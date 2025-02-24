@@ -45,9 +45,10 @@ The following suggestions are simply *suggestions*. If you are familiar with 3D 
 
 | Parameter  | Suggested Setting |
 | ----------- | ----------------- |
-| Resolution | 0.02mm |
+| Resolution | 0.02 mm |
 |  Infill | 40%-60% |
 |  Infill Pattern | Cubic |
-|  Supports | As needed. For nicer surface finish, place supports at the bottom of parts. |
+| Shell Thickness | 1.2 mm |
+|  Supports | > 45 degrees. For nicer surface finish, place supports at the bottom of parts. |
 
 *** EnclosureBase should be printed with the supports filling in the interior of the shell.
