@@ -16,10 +16,10 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 | *Z carriage              | Normal, Mirrored          | 2        |      |
 | Ball Screw Bracket      |                           | 1        |      |
 | Z Motor bracket        |                           | 1        |      |
-| Left Y carriage top    |                           | 1        |      |
-| Left Y carriage bottom |                           | 1        |      |
-| Right Y carriage top   |                           | 1        |      |
-| Right Y carriage bottom|                           | 1        |      |
+| Left Y carriage top    |                           | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD) | 
+| Left Y carriage bottom |                           | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD)     |
+| Right Y carriage top   |                           | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD)     |
+| Right Y carriage bottom|                           | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD)     |
 | X Limit Switch Mount   |                           | 1        |      |
 | MGN9 Linear Rail Jig   |                           | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
 | MGN12 Linear Rail Jig  |                           | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
