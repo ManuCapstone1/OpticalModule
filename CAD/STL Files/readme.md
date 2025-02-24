@@ -1,9 +1,12 @@
-All .STL files to be 3D printed. Below is the list of all the parts and the quantity needed.
+# 3D Printing Instructions
 
+## Parts List
+All .STL files to be 3D printed. Below is the list of all the parts and the quantity needed.
+See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 
 | Part Name                 | Notes                     | Quantity | Link |
 |---------------------------|---------------------------|----------|------|
-| Enclosure Base V2.1      |                           | 1        |      |
+| ***Enclosure Base V2.1    |                           | 1        |      |
 | Enclosure Cover Front    |                           | 1        |      |
 | Enclosure Cover Upper    |                           | 1        |      |
 | Belt Adapter            |                           | 1        |      |
@@ -28,3 +31,23 @@ All .STL files to be 3D printed. Below is the list of all the parts and the quan
 *Print one as is, then print another but mirrored.
 
 **Print scaled at 99%.
+
+## Recommended Print Settings
+##Printer
+
+Recommend using an FDM printer. Parts should hold good structural integrity to reduce wear and vibrations of the system.
+
+### Material
+Strong materials like ABS are the most preferred. However, PLA and PLA + are sufficient.
+
+### Slicer Setting
+The following suggestions are simply suggestions. If you are familiar with 3D printing, use you're discretion.
+
+| Parameter  | Suggested Setting |
+| ----------- | ----------------- |
+| Resolution | 0.02mm |
+|  Infill | 40%-60% |
+|  Infill Pattern | Cubic |
+|  Supports | As needed. For nicer surface finish, place supports at the bottom of parts. |
+
+*** EnclosureBase should be printed with the supports filling in the interior of the shell.
