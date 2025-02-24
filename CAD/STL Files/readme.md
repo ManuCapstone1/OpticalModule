@@ -33,15 +33,15 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 **Print scaled at 99%.
 
 ## Recommended Print Settings
-##Printer
+### Printer
 
-Recommend using an FDM printer. Parts should hold good structural integrity to reduce wear and vibrations of the system.
+Recommend using an *FDM printer*. Parts should hold good structural integrity to reduce wear and vibrations of the system.
 
 ### Material
 Strong materials like ABS are the most preferred. However, PLA and PLA + are sufficient.
 
 ### Slicer Setting
-The following suggestions are simply suggestions. If you are familiar with 3D printing, use you're discretion.
+The following suggestions are simply *suggestions*. If you are familiar with 3D printing, use you're discretion.
 
 | Parameter  | Suggested Setting |
 | ----------- | ----------------- |
