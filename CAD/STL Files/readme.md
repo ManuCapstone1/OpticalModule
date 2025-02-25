@@ -6,14 +6,14 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 
 | Part Name                 | Notes                     | Quantity | Link |
 |---------------------------|---------------------------|----------|------|
-| ***Enclosure Base V2.1    |                           | 1        |      |
+| *Enclosure Base V2.1    |                           | 1        |      |
 | Enclosure Cover Front    |                           | 1        |      |
 | Enclosure Cover Upper    |                           | 1        |      |
 | Belt Adapter            |                           | 1        |      |
 | Idler Mount B           |                           | 1        |      |
 | Idler Mount A           | Limit switch mount        | 1        |      |
-| *XY Motor mount          | Normal, Mirrored          | 2        |      |
-| *Z carriage              | Normal, Mirrored          | 2        |      |
+| **XY Motor mount          | Normal, Mirrored          | 2        |      |
+| **Z carriage              | Normal, Mirrored          | 2        |      |
 | Ball Screw Bracket      |                           | 1        |      |
 | Z Motor bracket        |                           | 1        |      |
 | Left Y carriage top    |                           | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD) | 
@@ -21,16 +21,18 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 | Right Y carriage top   |                           | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD)     |
 | Right Y carriage bottom|                           | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD)     |
 | X Limit Switch Mount   |                           | 1        |      |
+| Housing Top            |                          |           |       |
+| Housing Base           |                          |           |       |
 | MGN9 Linear Rail Jig   |                           | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
 | MGN12 Linear Rail Jig  |                           | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
 | T-bracket             |                           | 4        | [Thingiverse](https://www.thingiverse.com/thing:2503622/files) |
 | Top corner bracket    |                           | 4        | [Thingiverse](https://www.thingiverse.com/thing:2655498) |
 | Belt tensioner        |                           | 1        |      |
-| **Ball Screw Knob       |                           | 1        | [Thingiverse](https://www.thingiverse.com/thing:3014508/files) |
+| Ball Screw Knob       | Scaled at 99%            | 1        | [Thingiverse](https://www.thingiverse.com/thing:3014508/files) |
 
-*Print one as is, then print another but mirrored.
+**EnclosureBase should be printed with the supports filling in the interior of the shell.*
 
-**Print scaled at 99%.
+**Print one as is, then print another but mirrored.*
 
 ## Recommended Print Settings
 ### Printer
@@ -50,5 +52,3 @@ The following suggestions are simply *suggestions*. If you are familiar with 3D 
 |  Infill Pattern | Cubic |
 | Shell Thickness | 1.2 mm |
 |  Supports | > 45 degrees. For nicer surface finish, place supports at the bottom of parts. |
-
-*** EnclosureBase should be printed with the supports filling in the interior of the shell.
