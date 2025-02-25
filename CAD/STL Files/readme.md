@@ -32,7 +32,7 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 
 **EnclosureBase should be printed with the supports filling in the interior of the shell.*
 
-**Print one as is, then print another but mirrored.*
+** *Print one as is, then print another but mirrored.*
 
 ## Recommended Print Settings
 ### Printer
