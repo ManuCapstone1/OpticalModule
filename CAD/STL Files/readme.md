@@ -23,8 +23,8 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 | X Limit Switch Mount     |                           | 1        |       |
 | Housing Top              |                           | 1        |       |
 | Housing Base             |                           | 1        |       |
-| MGN9 Linear Rail Jig     |                           | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
-| MGN12 Linear Rail Jig    |                           | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
+| ***MGN9 Linear Rail Jig  |  Print weak settings.     | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
+| ***MGN12 Linear Rail Jig |  Print weak settings.     | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
 | T-bracket                |                           | 4        | [Thingiverse](https://www.thingiverse.com/thing:2503622/files) |
 | Top Corner Bracket       |                           | 4        | [Thingiverse](https://www.thingiverse.com/thing:2655498) |
 | Belt Tensioner           |                           | 1        |      |
@@ -33,6 +33,8 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 **EnclosureBase should be printed with the supports filling in the interior of the shell.*
 
 ** *Print one as is, then print another but mirrored.*
+
+*** *Since these parts are not apart of the ovedrall structure and used just for alignment, they can be printed on weak/low settings (e.g. infill 20%, shell thickness 0.8mm).*
 
 ## Recommended Print Settings
 ### Printer
