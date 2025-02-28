@@ -23,8 +23,8 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 | X Limit Switch Mount     |                           | 1        |       |
 | Housing Top              |                           | 1        |       |
 | Housing Base             |                           | 1        |       |
-| ***MGN9 Linear Rail Jig  |  Print weak settings.     | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
-| ***MGN12 Linear Rail Jig |  Print weak settings.     | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
+| ***MGN9 Linear Rail Jig  |  Print standard/weaker settings.     | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
+| ***MGN12 Linear Rail Jig |  Print standard/weaker settings.     | 2        | [Thingiverse](https://www.thingiverse.com/thing:5903898/files) |
 | T-bracket                |                           | 4        | [Thingiverse](https://www.thingiverse.com/thing:2503622/files) |
 | Top Corner Bracket       |                           | 4        | [Thingiverse](https://www.thingiverse.com/thing:2655498) |
 | Belt Tensioner           |                           | 1        |      |
