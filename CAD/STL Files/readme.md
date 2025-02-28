@@ -28,7 +28,7 @@ See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
 | T-bracket                |                           | 4        | [Thingiverse](https://www.thingiverse.com/thing:2503622/files) |
 | Top Corner Bracket       |                           | 4        | [Thingiverse](https://www.thingiverse.com/thing:2655498) |
 | Belt Tensioner           |                           | 1        |      |
-| Ball Screw Knob          | Scaled at 99%             | 1        | [Thingiverse](https://www.thingiverse.com/thing:3014508/files) |
+| Ball Screw Knob          | Scaled at 98%             | 1        | [Thingiverse](https://www.thingiverse.com/thing:3014508/files) |
 
 **EnclosureBase should be printed with the supports filling in the interior of the shell.*
 
