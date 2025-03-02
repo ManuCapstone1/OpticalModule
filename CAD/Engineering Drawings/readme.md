@@ -1,6 +1,5 @@
-# 3D Printing Instructions
+# Engineering Drawings 
 
-## Parts List
 
 | Part Name                | Notes                     | Quantity |
 |--------------------------|---------------------------|----------|
