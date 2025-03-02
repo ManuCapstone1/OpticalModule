@@ -1,9 +1,9 @@
 # Engineering Drawings 
 
 
-| Part Name                | Notes                     | Quantity |
-|--------------------------|---------------------------|----------|
-| *Enclosure Base V2.1     |                           | 1        |
-| Enclosure Cover Front    |                           | 1        |
-| Enclosure Cover Upper    |                           | 1        |
-| Belt Adapter             |                           | 1        |
+| Part Name                | Notes                     | Quantity  |
+|--------------------------|---------------------------|-----------|
+| 430 Main project assy    | Full assembly             | 1         |
+| Enclosure Backplate      | Metal Backplate for Carriage Enclosure| 1        |
+| breadboard platform      | Extra leveling holes in breadboard    | 1         |
+| support platform         |                           | 1         |
