@@ -2,7 +2,7 @@
 
 ## Parts List
 All .STL files to be 3D printed. Below is the list of all the parts and the quantity needed.
-See [Download BOM.xlsx](./OpticalModule/BOM/BOM.xlsx) for a more detailed BOM.
+See [Download BOM.xlsx](./OpticalModule/BOM/Github_BOM.xlsx) for a more detailed BOM.
 
 | Part Name                | Notes                     | Quantity | Link |
 |--------------------------|---------------------------|----------|------|
