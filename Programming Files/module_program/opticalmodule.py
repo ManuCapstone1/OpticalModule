@@ -1,7 +1,7 @@
 import pyfirmata
 import time
-#import cv2
-#from picamera2 import Picamera2, Preview
+import cv2
+from picamera2 import Picamera2, Preview
 import threading
 
 # Constants
@@ -11,46 +11,182 @@ PULSEWIDTH = 100 / 1000000.0 # microseconds
 BTWNSTEPS = 1000 / 1000000.0
 
 class OpticalModule:
+    """
+        This class...
+    """
     def __init__(self):
         self.board=pyfirmata.Arduino("/dev/ttyUSB0")
         # CNC Shield Arduino pins
         self.enPin = self.board.get_pin('d:8:o') 
         self.enPin.write(0)
-        self.stepAPin = self.board.get_pin('d:2:o') # CNC shield X-slot
-        self.dirAPin = self.board.get_pin('d:5:o')
-        self.stepBPin = self.board.get_pin('d:3:o') # CNC shield Y-slot
-        self.dirBPin = self.board.get_pin('d:6:o')
-        self.stepZPin = self.board.get_pin('d:4:o')
-        self.dirZPin = self.board.get_pin('d:7:o')
+        self.motorA = StepperMotor(2, 5, self.board)
+        self.motorB = StepperMotor(3, 6, self.board)
+        self.motorZ = StepperMotor(4, 7, self.board)
+        
         self.eStop = True
-        # Enable pullup resistors for limit switch pins
-        for i in range(9,12):
-            self.board.digital[i].write(1)
+        self.limitSwitchX = LimitSwitch(9, self.board)
+        self.limitSwitchY = LimitSwitch(10, self.board)
+        self.limitSwitchZ = LimitSwitch(11, self.board)
 
-        self.limitSwitchX = self.board.get_pin('d:9:i')
-        self.limitSwitchY = self.board.get_pin('d:10:i')
-        self.limitSwitchZ = self.board.get_pin('d:11:i')
+        # Create Camera
+        self.cam = Picamera2(0)
+        self.camera_config = self.cam.create_still_configuration({"size":(1920, 1080)})
+        self.cam.configure(self.camera_config)
+
+        # Create variables to hold current position in terms of steps
+        self.currX = 0 
+        self.currY = 0
+        self.CurrZ = 0
 
     def move_ab(self, deltaA: int, deltaB: int):
-        steps = abs(round(deltaA / STEPDISTXY))
+        steps = abs(deltaA)
 
         if deltaA >= 0:
-            self.dirAPin.write(1)
+            self.motorA.dir_pin.write(1)
         else:
-            self.dirAPin.write(0)
+            self.motorA.dir_pin.write(0)
 
         if deltaB >= 0:
-            self.dirBPin.write(1)
+            self.motorB.dir_pin.write(1)
         else:
-            self.dirBPin.write(0)
+            self.motorB.dir_pin.write(0)
 
         for i in range(steps):
-            self.stepAPin.write(1)
-            self.stepBPin.write(1)
+            self.motorA.step_pin.write(1)
+            self.motorB.step_pin.write(1)
             time.sleep(PULSEWIDTH)
-            self.stepAPin.write(0)
-            self.stepBPin.write(0)
+            self.motorA.step_pin.write(0)
+            self.motorB.step_pin.write(0)
             time.sleep(BTWNSTEPS)
+
+    # Moves carriage in x by a given linear distance (mm)
+    def move_x(self, deltaX=0):
+        deltaA = -deltaX
+        deltaB = -deltaX
+        self.currX = self.currX + deltaX 
+        
+        self.move_ab(deltaA, deltaB)
+
+    # Moves carriage in y by a given linear distance (mm)
+    def move_y(self,deltaY=0):
+        deltaA = -deltaY
+        deltaB = deltaY
+        self.currY = self.currY + deltaY
+        
+        self.move_ab(deltaA, deltaB)
+
+    # Moves platform in z by a given liner distance (mm)
+    def move_z(self, deltaZ=0):
+        steps = abs(deltaZ)
+        self.currZ = self.currZ + deltaZ
+        
+        if deltaZ >= 0:
+            self.motorZ.dir_pin.write(1)
+        else:
+            self.motorZ.dir_pin.write(0)
+
+        for i in range(steps):
+            self.motorZ.step_pin.write(1)
+            time.sleep(PULSEWIDTH)
+            self.motorZ.step_pin.write(0)
+            time.sleep(BTWNSTEPS)
+    
+    # Moves camera to a specified coordinate position
+    def go_to(self, x=None, y=None, z=None):
+        x = round(x/STEPDISTXY) if x is not None else self.currX
+        y = round(y/STEPDISTXY) if y is not None else self.currY
+        z = round(z/STEPDISTZ) if z is not None else self.currZ
+        
+        if not x == self.currX:
+            self.move_x(x-self.currX)
+
+        if not y == self.currY:
+            self.move_y(y-self.currY)
+
+        if not z == self.currZ:
+            self.move_z(z-self.currZ)
+
+    def get_curr_pos_mm(self, axis):
+        if axis == "x":
+            return self.currX*STEPDISTXY
+        elif axis == "y":
+            return self.currY*STEPDISTXY
+        elif axis == "z":
+            return self.currZ*STEPDISTZ
+        else: return 0
+
+    def home_xy(self):
+        print("Y")
+        self.motorA.dir_pin.write(1)
+        self.motorB.dir_pin.write(0)
+        while not self.limitSwitchY.is_pressed():      
+            self.motorA.step_pin.write(1)
+            self.motorB.step_pin.write(1)
+            time.sleep(PULSEWIDTH)
+            self.motorA.step_pin.write(0)
+            self.motorB.step_pin.write(0)
+            time.sleep(BTWNSTEPS)
+        print("X")
+        self.motorA.dir_pin.write(1)
+        self.motorB.dir_pin.write(1)
+        while not self.limitSwitchX.is_pressed():      
+            self.motorA.step_pin.write(1)
+            self.motorB.step_pin.write(1)
+            time.sleep(PULSEWIDTH)
+            self.motorA.step_pin.write(0)
+            self.motorB.step_pin.write(0)
+            time.sleep(BTWNSTEPS)
+    
+    def home_all(self):
+        self.home_xy()
+
+        print("Z")
+        self.motorZ.dir_pin.write(0)
+        while not self.limitSwitchX.is_pressed():      
+            self.motorZ.step_pin.write(1)
+            time.sleep(PULSEWIDTH)
+            self.motorZ.step_pin.write(0)
+            time.sleep(BTWNSTEPS)
+    # Returns image from camera in array format
+    def get_image_array(self) -> any:
+
+        self.cam.start()
+        array = self.cam.capture_array("main")
+        self.cam.stop()
+
+        return array
+    # Finds and moves the platform to the best focus position 
+    def auto_focus(self, zMin, zMax, stepSize, blur):
+        best_focus_value = -1
+        best_z_position = zMin
+
+        # Move from zMin to zMax in steps of stepSize
+        for z in range(zMin, zMax + stepSize, stepSize):
+            # Move to the current z position using go_to
+            self.go_to(z=z)
+
+            # Capture the image array
+            image_array = self.get_image_array()
+
+            # Convert the image to grayscale if it's not already
+            if len(image_array.shape) == 3:
+                image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2GRAY)
+
+            # Apply the Laplacian filter to detect edges
+            laplacian = cv2.Laplacian(image_array, cv2.CV_64F)
+
+            # Calculate the variance of the Laplacian (a measure of sharpness)
+            focus_value = laplacian.var()
+
+            # Check if this focus value is the best so far
+            if focus_value > best_focus_value:
+                best_focus_value = focus_value
+                best_z_position = z
+
+        # Move to the z position with the best focus using go_to
+        go_to(z=best_z_position)
+
+        return best_focus_value
 
     def execute(self, target, kwargs):
         #still need to add code to take target and key words as arguments
@@ -59,5 +195,38 @@ class OpticalModule:
         while self.eStop and targetThread.is_alive():
             time.sleep(0.01)
         return
-
     
+
+class StepperMotor:
+    def __init__(self, step_pin, dir_pin, board=pyfirmata.Arduino("/dev/ttyUSB0")):
+        self.board = board
+        self.step_pin = board.get_pin(f'd:{step_pin}:o')
+        self.dir_pin = board.get_pin(f'd:{dir_pin}:o')
+
+
+
+class LimitSwitch:
+    def __init__(self, pin, board=pyfirmata.Arduino("/dev/ttyUSB0")):
+        self.board = board
+        self.board.digital[pin].write(1)
+        self.pin = self.board.get_pin(f'd:{pin}:i')
+
+    def is_pressed(self):
+        """Returns True if the switch is triggered."""
+        if self.pin.read() == 0:
+            self.pin.mode() = 1
+            self.pin.write(1)
+            self.pin.mode() = 0
+        return self.pin.read() == 0 
+
+class Sample:
+    def __init__(self, sampleID, sampleHeight, mmPerLayer):
+        self.sampleID = sampleID
+        self.mmPerLayer = mmPerLayer
+        self.sampleHeight = sampleHeight
+        self.boundingBox = [(0,0), (0,0), (0,0), (0,0)]
+        self.boundingIsSet = False
+
+    def set_bounding_box(self, coordsList):
+        self.boundingBox = coordsList
+        self.boundingIsSet = True
