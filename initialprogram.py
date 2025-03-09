@@ -14,7 +14,12 @@ class LimitSwitch:
 
     def is_pressed(self):
         """Returns True if the switch is triggered."""
-        return self.pin.read() == 0  # Assuming LOW means triggered
+        status = self.pin.read() == 0 # Assuming LOW means triggered
+        if status:
+            self.pin.mode() = 1
+            self.pin.write(1)
+            self.pin.mode() = 0
+        return status  
 
 
 
