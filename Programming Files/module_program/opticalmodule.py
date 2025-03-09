@@ -3,6 +3,8 @@ import time
 import cv2
 from picamera2 import Picamera2, Preview
 import threading
+import os
+import random
 
 # Constants
 STEPDISTXY = 0.212058
@@ -32,11 +34,17 @@ class OpticalModule:
         self.cam = Picamera2(0)
         self.camera_config = self.cam.create_still_configuration({"size":(1920, 1080)})
         self.cam.configure(self.camera_config)
+        self.saveDir = "/home/microscope/images"
 
         # Create variables to hold current position in terms of steps
         self.currX = 0 
         self.currY = 0
         self.CurrZ = 0
+
+        self.currSample = None
+
+    def add_sample(self, sampleID, sampleHeight, mmPerLayer):
+        self.currSample = Sample(sampleID, sampleHeight, mmPerLayer)
 
     def move_ab(self, deltaA: int, deltaB: int):
         steps = abs(deltaA)
@@ -156,6 +164,45 @@ class OpticalModule:
 
         return array
     
+    def capture_and_save_image(self, dir: str) -> str:
+        """
+        Captures an image using Picamera2 and saves it to the specified directory.
+
+        :return: The full path of the saved image.
+        """
+        
+        # Ensure the save directory exists
+        os.makedirs(dir, exist_ok=True)
+
+        # Generate a unique filename using timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
+        filename = f"{self.currSample.sampleID}_({self.get_curr_pos_mm("x")},{self.get_curr_pos_mm("y")},{self.get_curr_pos_mm("z")})_{timestamp}.jpg"
+        file_path = os.path.join(dir, filename)
+
+        try:
+            # Start camera
+            self.cam.start()
+            time.sleep(0.5)  # Allow camera to adjust
+
+            # Capture image
+            image = self.cam.capture_array("main")
+
+            # Convert image to RGB for saving
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+            # Save image
+            cv2.imwrite(file_path, image_rgb)
+            print(f"Image saved at: {file_path}")
+
+            # Stop camera
+            self.cam.stop()
+
+            return file_path
+
+        except Exception as e:
+            print(f"Error capturing image: {e}")
+            return ""
+
     def calculate_focus_score(self, imageArray, blur):
 
         # Apply filter to image to reduce impact of noise
@@ -190,7 +237,30 @@ class OpticalModule:
         self.go_to(z=bestZPosition)
 
         return bestFocusValue
+    
+    def random_sampling(self, numImages, saveImages: bool):
+        # Create list of captured images
+        capturedImages = []
+        # Extract x and y coordinates from the bounding box
+        x_coords = [point[0] for point in self.currSample.boundingBox]
+        y_coords = [point[1] for point in self.currSample.boundingBox]
 
+        # Find the min and max values for x and y
+        min_x, max_x = min(x_coords), max(x_coords)
+        min_y, max_y = min(y_coords), max(y_coords)
+        
+
+        # Generate n random points within the bounding box
+        random_points = [(random.uniform(min_x, max_x), random.uniform(min_y, max_y)) for _ in range(numImages)]
+
+        for point in random_points:
+            self.go_to(x=point[0], y=point[1])
+            time.sleep(1)
+            if saveImages: self.capture_and_save_image(self.saveDir)
+            imageArr = self.get_image_array()
+            capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
+        return capturedImages
+    
     def execute(self, target, kwargs):
         #still need to add code to take target and key words as arguments
         targetThread = threading.Thread(target=self.move_ab, kwargs={"deltaA": 5, "deltaB": -5}, daemon=True)
@@ -230,6 +300,11 @@ class Sample:
         self.boundingBox = [(0,0), (0,0), (0,0), (0,0)]
         self.boundingIsSet = False
 
+        self.currLayer = 0
+
     def set_bounding_box(self, coordsList):
         self.boundingBox = coordsList
         self.boundingIsSet = True
+
+    def get_curr_height(self):
+        return self.sampleHeight - (self.mmPerLayer * self.currLayer)
