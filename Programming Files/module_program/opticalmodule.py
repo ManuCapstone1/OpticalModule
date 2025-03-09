@@ -155,10 +155,22 @@ class OpticalModule:
         self.cam.stop()
 
         return array
+    
+    def calculate_focus_score(self, imageArray, blur):
+
+        # Apply filter to image to reduce impact of noise
+        imageFiltered = cv2.medianBlur(imageArray, blur)
+
+        # Apply the Laplacian filter to detect edges
+        laplacian = cv2.Laplacian(imageFiltered, cv2.CV_64F)
+
+        # Calculate the variance of the Laplacian (a measure of sharpness)
+        return laplacian.var()
+    
     # Finds and moves the platform to the best focus position 
     def auto_focus(self, zMin, zMax, stepSize, blur):
-        best_focus_value = -1
-        best_z_position = zMin
+        bestFocusValue = -1
+        bestZPosition = zMin
 
         # Move from zMin to zMax in steps of stepSize
         for z in range(zMin, zMax + stepSize, stepSize):
@@ -166,27 +178,18 @@ class OpticalModule:
             self.go_to(z=z)
 
             # Capture the image array
-            image_array = self.get_image_array()
-
-            # Convert the image to grayscale if it's not already
-            if len(image_array.shape) == 3:
-                image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2GRAY)
-
-            # Apply the Laplacian filter to detect edges
-            laplacian = cv2.Laplacian(image_array, cv2.CV_64F)
-
-            # Calculate the variance of the Laplacian (a measure of sharpness)
-            focus_value = laplacian.var()
+            imageArray = self.get_image_array()
+            focusScore = self.calculate_focus_score(imageArray, blur)
 
             # Check if this focus value is the best so far
-            if focus_value > best_focus_value:
-                best_focus_value = focus_value
-                best_z_position = z
+            if focusScore > bestFocusValue:
+                bestFocusValue = focusScore
+                bestZPosition = z
 
         # Move to the z position with the best focus using go_to
-        go_to(z=best_z_position)
+        self.go_to(z=bestZPosition)
 
-        return best_focus_value
+        return bestFocusValue
 
     def execute(self, target, kwargs):
         #still need to add code to take target and key words as arguments
