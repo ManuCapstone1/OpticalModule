@@ -1,50 +1,115 @@
 import tkinter as tk
 import customtkinter as ctk
-from tkinter import simpledialog
+from tkinter import messagebox
+import time
 
-class App(ctk.CTk):
+class Application(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Checking & waffles")
+        self.title("Custom GUI")
         self.geometry("750x400")
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        # Dictionary to store different frames
-        self.frames = {}
+        # Top Frame with Status and Progress Bar
+        self.top_frame = ctk.CTkFrame(self)
+        self.top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=5)
 
-        # Create the four frames
-        for name in ["Main", "Motion", "Image", "Settings"]:
-            frame = ctk.CTkFrame(self, width=500, height=350, corner_radius=10)
-            label = ctk.CTkLabel(frame, text=f"{name}", font=("Arial", 18))
-            label.pack(pady=20)
-            self.frames[name] = frame
+        self.progress_bar = ctk.CTkProgressBar(self.top_frame, width=200)
+        self.progress_bar.pack(side="left", padx=10)
+        self.progress_bar.set(0.5)  # Example progress
+
+        # Main Content Area
+        self.main_frame = ctk.CTkFrame(self)
+        self.main_frame.grid(row=1, column=1, sticky="nsew")
         
-        # Initially show the Main tab
-        self.show_frame("Main")
+        # Bottom Frame with Tabs
+        self.bottom_frame = ctk.CTkFrame(self)
+        self.bottom_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.bottom_frame.grid_columnconfigure((0, 1, 2, 3, 4, 5), weight=1)
+        
+        self.main_btn = ctk.CTkButton(self.bottom_frame, text="Main", command=lambda: self.show_frame("main"))
+        self.main_btn.grid(row=0, column=0, sticky="ew")
+        
+        self.motion_btn = ctk.CTkButton(self.bottom_frame, text="Motion", command=lambda: self.show_frame("motion"))
+        self.motion_btn.grid(row=0, column=1, sticky="ew")
+        
+        self.image_btn = ctk.CTkButton(self.bottom_frame, text="Image", command=lambda: self.show_frame("image"))
+        self.image_btn.grid(row=0, column=2, sticky="ew")
+        
+        self.settings_btn = ctk.CTkButton(self.bottom_frame, text="Settings", command=lambda: self.show_frame("settings"))
+        self.settings_btn.grid(row=0, column=3, sticky="ew")
+        
+        self.status_label_bottom = ctk.CTkLabel(self.bottom_frame, text="Module Status: OK | Alarms: None")
+        self.status_label_bottom.grid(row=0, column=4, sticky="e", padx=10)
+        
+        self.time_label = ctk.CTkLabel(self.bottom_frame, text="Time: ")
+        self.time_label.grid(row=0, column=5, sticky="e", padx=10)
+        self.update_time()
+    
 
-        # Bottom frame to hold the buttons
-        bottom_frame = ctk.CTkFrame(self)
-        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Creating Frames for Each Tab
+        self.frames = {}
+        for frame_name in ("main", "motion", "image", "settings"):
+            frame = ctk.CTkFrame(self.main_frame)
+            self.frames[frame_name] = frame
+        
+        # Main Frame Content
+        home_button = ctk.CTkButton(self.frames["main"], text="HOME")
+        home_button.pack(pady=10)
 
-        # Tab buttons
-        for name in ["Main", "Motion", "Image", "Settings"]:
-            button = ctk.CTkButton(bottom_frame, text=name, command=lambda n=name: self.show_frame(n))
-            button.pack(side=tk.LEFT, expand=True, padx=5, pady=5)
-
-        # Selection Box
-        self.selection_var = tk.StringVar(value="Select Mode")
-        selection_box = ctk.CTkOptionMenu(self, variable=self.selection_var, values=["Scanning", "Detailed"], command=self.open_popup)
-        selection_box.pack(pady=10)
-
-    def show_frame(self, name):
+        self.scanning_button = ctk.CTkButton(self.frames["main"], text="Scanning", command=self.show_popup)
+        self.scanning_button.pack(pady=5)
+        
+        self.detailed_button = ctk.CTkButton(self.frames["main"], text="Detailed", command=self.show_popup)
+        self.detailed_button.pack(pady=5)
+        
+        # Motion Frame Content
+        ctk.CTkLabel(self.frames["motion"], text="Move To:").pack()
+        
+        coord_frame = ctk.CTkFrame(self.frames["motion"])
+        coord_frame.pack()
+        
+        ctk.CTkLabel(coord_frame, text="X:").grid(row=0, column=0)
+        self.x_entry = ctk.CTkEntry(coord_frame)
+        self.x_entry.grid(row=0, column=1, padx=5)
+        
+        ctk.CTkLabel(coord_frame, text="Y:").grid(row=1, column=0)
+        self.y_entry = ctk.CTkEntry(coord_frame)
+        self.y_entry.grid(row=1, column=1, padx=5)
+        
+        ctk.CTkLabel(coord_frame, text="Z:").grid(row=2, column=0)
+        self.z_entry = ctk.CTkEntry(coord_frame)
+        self.z_entry.grid(row=2, column=1, padx=5)
+        
+        # Settings Frame Content
+        settings_frame = ctk.CTkFrame(self.frames["settings"])
+        settings_frame.pack(anchor="w", padx=10)
+        ctk.CTkLabel(settings_frame, text="Motor Status: OK").pack(anchor="w")
+        ctk.CTkLabel(settings_frame, text="Camera Status: Active").pack(anchor="w")
+        ctk.CTkLabel(settings_frame, text="Image Processing: Running").pack(anchor="w")
+        
+        # Image Frame Content
+        ctk.CTkLabel(self.frames["image"], text="Current folder path:").pack()
+        self.folder_path_entry = ctk.CTkEntry(self.frames["image"], width=300)
+        self.folder_path_entry.pack(pady=5)
+        
+        self.show_frame("main")
+    
+    def show_frame(self, frame_name):
         for frame in self.frames.values():
             frame.pack_forget()
-        self.frames[name].pack(fill=tk.BOTH, expand=True)
-
-    def open_popup(self, selection):
-        sample_param = simpledialog.askstring("Input", f"Enter sample parameters for {selection} mode:")
-        if sample_param:
-            print(f"{selection} mode selected with parameters: {sample_param}")
-
+        self.frames[frame_name].pack(fill="both", expand=True)
+    
+    def show_popup(self):
+        messagebox.showinfo("Sample Parameters", "Enter sample parameters here.")
+    
+    def update_time(self):
+        current_time = time.strftime("%H:%M:%S")
+        self.time_label.configure(text=f"Time: {current_time}")
+        self.after(1000, self.update_time)
+        
 if __name__ == "__main__":
-    app = App()
+    app = Application()
     app.mainloop()
