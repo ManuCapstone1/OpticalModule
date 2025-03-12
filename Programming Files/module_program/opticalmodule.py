@@ -280,6 +280,40 @@ class OpticalModule:
             return
         else:
             raise AttributeError(f"'{type(self).__name__}' has no callable method '{targetMethod}'")
+
+    # This method was written by copilot and still requires testing
+    def call_method_from_console(self):
+        while True:
+            method_name = input("Enter the method name (or 'exit' to quit): ").strip()
+            if method_name.lower() == "exit":
+                print("Exiting...")
+                break
+
+            # Check if the method exists in the class
+            if not hasattr(self, method_name):
+                print(f"Method '{method_name}' does not exist. Please try again.")
+                continue
+
+            method = getattr(self, method_name)
+            if callable(method):
+                # Get the number of required arguments
+                import inspect
+                params = inspect.signature(method).parameters
+                if params:
+                    # Ask the user for each required argument
+                    args = []
+                    for param in params:
+                        user_input = input(f"Enter value for '{param}': ")
+                        args.append(user_input)
+                    # Call the method with the provided arguments
+                    method(*args)
+                else:
+                    # Call the method directly if it takes no arguments
+                    method()
+            else:
+                print(f"'{method_name}' is not callable. Please try again.")
+
+
     
 
 class StepperMotor:
