@@ -7,8 +7,8 @@ import os
 import random
 
 # Constants
-STEPDISTXY = 0.212058
-STEPDISTZ = 0.01
+STEPDISTXY = 0.212058/16
+STEPDISTZ = 0.01/16
 PULSEWIDTH = 100 / 1000000.0 # microseconds
 BTWNSTEPS = 1000 / 1000000.0
 
@@ -18,6 +18,9 @@ class OpticalModule:
     """
     def __init__(self):
         self.board=pyfirmata.Arduino("/dev/ttyUSB0")
+        it = pyfirmata.util.Iterator(self.board)
+        it.start()
+        
         # CNC Shield Arduino pins
         self.enPin = self.board.get_pin('d:8:o') 
         self.enPin.write(0)
@@ -39,8 +42,8 @@ class OpticalModule:
         # Create variables to hold current position in terms of steps
         self.currX = 0 
         self.currY = 0
-        self.CurrZ = 0
-
+        self.currZ = 0
+        print(self.currZ)
         self.currSample = None
 
     def add_sample(self, sampleID, sampleHeight, mmPerLayer):
@@ -150,11 +153,12 @@ class OpticalModule:
 
         print("Z")
         self.motorZ.dir_pin.write(0)
-        while not self.limitSwitchX.is_pressed():      
+        while not self.limitSwitchZ.is_pressed():      
             self.motorZ.step_pin.write(1)
             time.sleep(PULSEWIDTH)
             self.motorZ.step_pin.write(0)
             time.sleep(BTWNSTEPS)
+            
     # Returns image from camera in array format
     def get_image_array(self) -> any:
 
@@ -176,7 +180,7 @@ class OpticalModule:
 
         # Generate a unique filename using timestamp
         timestamp = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
-        filename = f"{self.currSample.sampleID}_({self.get_curr_pos_mm("x")},{self.get_curr_pos_mm("y")},{self.get_curr_pos_mm("z")})_{timestamp}.jpg"
+        filename = f"{self.currSample.sampleID}_({self.get_curr_pos_mm('x')},{self.get_curr_pos_mm('y')},{self.get_curr_pos_mm('z')})_{timestamp}.jpg"
         file_path = os.path.join(dir, filename)
 
         try:
@@ -212,17 +216,21 @@ class OpticalModule:
         laplacian = cv2.Laplacian(imageFiltered, cv2.CV_64F)
 
         # Calculate the variance of the Laplacian (a measure of sharpness)
+        print(laplacian.var())
         return laplacian.var()
     
     # Finds and moves the platform to the best focus position 
-    def auto_focus(self, zMin, zMax, stepSize, blur):
+    def auto_focus(self, zMin, zMax, stepSize, blur=5):
         bestFocusValue = -1
         bestZPosition = zMin
+        zMinMicron = int(zMin*1000)
+        zMaxMicron = int(zMax*1000)
+        stepSizeMicron = int(stepSize*1000)
 
         # Move from zMin to zMax in steps of stepSize
-        for z in range(zMin, zMax + stepSize, stepSize):
+        for z in range(zMinMicron, zMaxMicron + stepSizeMicron, stepSizeMicron):
             # Move to the current z position using go_to
-            self.go_to(z=z)
+            self.go_to(z=z/1000)
 
             # Capture the image array
             imageArray = self.get_image_array()
@@ -231,7 +239,7 @@ class OpticalModule:
             # Check if this focus value is the best so far
             if focusScore > bestFocusValue:
                 bestFocusValue = focusScore
-                bestZPosition = z
+                bestZPosition = z/1000
 
         # Move to the z position with the best focus using go_to
         self.go_to(z=bestZPosition)
@@ -290,11 +298,13 @@ class LimitSwitch:
 
     def is_pressed(self):
         """Returns True if the switch is triggered."""
+        state = self.pin.read() == 0
         if self.pin.read() == 0:
-            self.pin.mode() = 1
+            self.pin.mode = 1
             self.pin.write(1)
-            self.pin.mode() = 0
-        return self.pin.read() == 0 
+            self.pin.mode = 0
+        print(state)
+        return state 
 
 class Sample:
     def __init__(self, sampleID, sampleHeight, mmPerLayer):
