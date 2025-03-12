@@ -261,13 +261,17 @@ class OpticalModule:
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
         return capturedImages
     
-    def execute(self, target, kwargs):
-        #still need to add code to take target and key words as arguments
-        targetThread = threading.Thread(target=self.move_ab, kwargs={"deltaA": 5, "deltaB": -5}, daemon=True)
-        targetThread.start()
-        while self.eStop and targetThread.is_alive():
-            time.sleep(0.01)
-        return
+    def execute(self, targetMethod, **kwargs):
+        # Get the target method
+        target = getattr(self, targetMethod, None)
+        if callable(target):
+            targetThread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
+            targetThread.start()
+            while self.eStop and targetThread.is_alive():
+                time.sleep(0.01)
+            return
+        else:
+            raise AttributeError(f"'{type(self).__name__}' has no callable method '{targetMethod}'")
     
 
 class StepperMotor:
