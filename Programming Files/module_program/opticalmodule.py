@@ -269,6 +269,37 @@ class OpticalModule:
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
         return capturedImages
     
+    def scanning_images(self, step_size_x, step_size_y, saveImages: bool):
+        if not self.currSample or not self.currSample.boundingIsSet:
+            print("Bounding box not set. Cannot take images.")
+            return
+
+        capturedImages = []
+
+        x_coords = [point[0] for point in self.currSample.boundingBox]
+        y_coords = [point[1] for point in self.currSample.boundingBox]
+
+        min_x, max_x = min(x_coords), max(x_coords)
+        min_y, max_y = min(y_coords), max(y_coords)
+
+        x_positions = list(range(int(min_x), int(max_x) + step_size_x, step_size_x))
+        y_positions = list(range(int(min_y), int(max_y) + step_size_y, step_size_y))
+
+        for x in x_positions:
+            for y in y_positions:
+                self.go_to(x=x, y=y)
+                time.sleep(0.5)  # Allow system to stabilize
+                if saveImages:
+                    image_path = self.capture_and_save_image(self.saveDir)
+                    print(f"Image captured at ({x}, {y}) and saved to {image_path}")
+                imageArr = self.get_image_array()
+                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
+
+        print("Image capturing complete.")
+
+        return capturedImages
+
+    
     def execute(self, targetMethod, **kwargs):
         # Get the target method
         target = getattr(self, targetMethod, None)
@@ -314,7 +345,7 @@ class OpticalModule:
                 print(f"'{method_name}' is not callable. Please try again.")
 
 
-    
+        
 
 class StepperMotor:
     def __init__(self, step_pin, dir_pin, board=pyfirmata.Arduino("/dev/ttyUSB0")):
@@ -358,25 +389,4 @@ class Sample:
         return self.sampleHeight - (self.mmPerLayer * self.currLayer)
     
 
-    def image_taking(self, optical_module, step_size):
-        if not self.boundingIsSet:
-            print("Bounding box not set. Cannot take images.")
-            return
-        
-        x_coords = [point[0] for point in self.boundingBox]
-        y_coords = [point[1] for point in self.boundingBox]
-
-        min_x, max_x = min(x_coords), max(x_coords)
-        min_y, max_y = min(y_coords), max(y_coords)
-        
-        x_positions = list(range(int(min_x), int(max_x) + step_size, step_size))
-        y_positions = list(range(int(min_y), int(max_y) + step_size, step_size))
-        
-        for x in x_positions:
-            for y in y_positions:
-                optical_module.go_to(x=x, y=y)
-                time.sleep(1)  # Allow system to stabilize
-                image_path = optical_module.capture_and_save_image(optical_module.saveDir)
-                print(f"Image captured at ({x}, {y}) and saved to {image_path}")
-
-        print("Image capturing complete.")
+    
