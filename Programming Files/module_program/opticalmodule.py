@@ -147,7 +147,7 @@ class OpticalModule:
             self.motorA.step_pin.write(0)
             self.motorB.step_pin.write(0)
             time.sleep(BTWNSTEPS)
-    
+    #yrd
     def home_all(self):
         self.home_xy()
 
