@@ -43,8 +43,8 @@ class OpticalModule:
         self.saveDir = "/home/microscope/images"
 
         # Create variables for brightness and contrast
-        self.currBrightness = 0.2
-        self.currContrast = 1.5
+        self.currBrightness = 0
+        self.currContrast = 1.0
 
         # Create variables to hold current position in terms of steps
         self.currX = 0 
@@ -52,6 +52,9 @@ class OpticalModule:
         self.currZ = 0
         print(self.currZ)
         self.currSample = None
+
+        # Misc variables
+        self.imageCounter = 0
 
     def add_sample(self, sampleID, sampleHeight, mmPerLayer):
         self.currSample = Sample(sampleID, sampleHeight, mmPerLayer)
@@ -190,6 +193,9 @@ class OpticalModule:
         filename = f"{self.currSample.sampleID}_({self.get_curr_pos_mm('x')},{self.get_curr_pos_mm('y')},{self.get_curr_pos_mm('z')})_{timestamp}.jpg"
         file_path = os.path.join(dir, filename)
 
+        brightness = self.currBrightness
+        contrast = self.currContrast
+
         try:
             # Start camera
             self.cam.start()
@@ -207,6 +213,15 @@ class OpticalModule:
 
             # Stop camera
             self.cam.stop()
+
+            # Writing information to text file
+            with open(file_path, "w") as f:
+                f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Position X (mm): {self.get_curr_pos_mm('x')}\n")
+                f.write(f"Position Y (mm): {self.get_curr_pos_mm('y')}\n")
+                f.write(f"Position Z (mm): {self.get_curr_pos_mm('z')}n")
+                f.write(f"Brightness: {self.currBrightness}\n")
+                f.write(f"Contrast: {self.currContrast}\n")
 
             return file_path
 
@@ -267,13 +282,14 @@ class OpticalModule:
 
         # Generate n random points within the bounding box
         random_points = [(random.uniform(min_x, max_x), random.uniform(min_y, max_y)) for _ in range(numImages)]
-
+        self.imageCounter = 0
         for point in random_points:
             self.go_to(x=point[0], y=point[1])
             time.sleep(1)
             if saveImages: self.capture_and_save_image(self.saveDir)
             imageArr = self.get_image_array()
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
+            self.imageCounter = self.imageCounter + 1
         return capturedImages
     
     def execute(self, targetMethod, **kwargs):
