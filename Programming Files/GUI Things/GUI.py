@@ -103,9 +103,6 @@ class MainApp(ctk.CTk):
         home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 100, font=("Arial", 20), fg_color="green", text_color="white")
         home_btn.pack(pady=5, fill='x')
         
- 
-        
-   
     
     # ------------------ Image Placeholder ------------------ #
     def display_placeholder_image(self, frame):
@@ -208,6 +205,11 @@ class MainApp(ctk.CTk):
         # Graph Display
         self.create_graphs(right_frame)
 
+        ctk.CTkButton(right_frame, text="STOP", fg_color="red").pack(padx=10, pady=5)
+        ctk.CTkButton(right_frame, text="Finish").pack(padx=50, pady=5)
+
+
+
     # ------------------ Position Control ------------------ #
     def create_position_control(self, parent, label, value):
         ctk.CTkLabel(parent, text=f"{label} Position:").pack(padx=5, pady=2)
@@ -249,8 +251,8 @@ class MainApp(ctk.CTk):
         z_graph.pack(padx=5, pady=5)
 
         # Red Position Indicators (Mock)
-        ctk.CTkLabel(xy_graph, text="⬤", fg_color="red").place(relx=0.5, rely=0.5, anchor='center')
-        ctk.CTkLabel(z_graph, text="━", fg_color="red").place(relx=0.5, rely=0.5, anchor='center')
+        ctk.CTkLabel(xy_graph, text = "       ", fg_color="red").place(relx=0.5, rely=0.5, anchor='center')
+        ctk.CTkLabel(z_graph, text = "   ", fg_color="red").place(relx=0.5, rely=0.5, anchor='center')
  
     # ------------------ Time Updater ------------------ #
     def update_time(self):
