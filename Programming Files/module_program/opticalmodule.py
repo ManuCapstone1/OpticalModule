@@ -35,9 +35,16 @@ class OpticalModule:
 
         # Create Camera
         self.cam = Picamera2(0)
-        self.camera_config = self.cam.create_still_configuration({"size":(1920, 1080)})
+        
+        # Create camera configuration
+        # https://www.raspberrypi.com/documentation/accessories/camera.html
+        self.camera_config = self.cam.create_still_configuration({"size":(4056,3040)}) 
         self.cam.configure(self.camera_config)
         self.saveDir = "/home/microscope/images"
+
+        # Create variables for brightness and contrast
+        self.currBrightness = 0.2
+        self.currContrast = 1.5
 
         # Create variables to hold current position in terms of steps
         self.currX = 0 
@@ -312,6 +319,13 @@ class OpticalModule:
                     method()
             else:
                 print(f"'{method_name}' is not callable. Please try again.")
+
+    def set_brightness_and_contrast(self, brightness=None, contrast=None):
+        
+        brightness = brightness if brightness is not None else self.currBrightness
+        contrast = contrast if contrast is not None else self.currContrast
+        self.cam.set_controls({"Brightness": brightness, "Contrast": contrast})
+       
 
 
     
