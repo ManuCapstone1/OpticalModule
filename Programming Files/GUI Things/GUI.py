@@ -15,6 +15,7 @@ sample_data = {}
 current_x_pos = 50
 current_y_pos = 50
 current_z_pos = 50
+speed_value = 10
  
 # Sample Image Folder Paths
 image_folder = "images_folder"
@@ -177,10 +178,79 @@ class MainApp(ctk.CTk):
     # ------------------ Motion Tab ------------------ #
     def display_motion_tab(self):
         left_frame = ctk.CTkFrame(self.content_frame)
-        left_frame.pack(side=ctk.LEFT, fill='y')
- 
-        ctk.CTkLabel(left_frame, text="X Position:").pack(padx=5, pady=2)
-        ctk.CTkEntry(left_frame).pack(padx=5, pady=2)
+        left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
+
+        right_frame = ctk.CTkFrame(self.content_frame)
+        right_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
+
+        # GoTo Button
+        ctk.CTkButton(left_frame, text="Go To", font=("Arial", 20)).pack(padx=5, pady=5)
+
+        # Coordinate Entries and Step Adjustment
+        self.create_position_control(left_frame, "X", current_x_pos)
+        self.create_position_control(left_frame, "Y", current_y_pos)
+        self.create_position_control(left_frame, "Z", current_z_pos)
+
+        # Speed Control
+        ctk.CTkLabel(left_frame, text="Speed").pack(padx=5, pady=2)
+        self.speed_entry = ctk.CTkEntry(left_frame, width=30)
+        self.speed_entry.insert(0, str(speed_value))
+        self.speed_entry.pack(padx=5, pady=2)
+
+        # Speed Increment/Decrement
+        self.create_step_buttons(left_frame, self.speed_entry, step=1)
+
+        # Disable Steppers, Homing, and Calibration
+        ctk.CTkButton(left_frame, text="Disable Stepper Motors").pack(padx=5, pady=5)
+        ctk.CTkButton(left_frame, text="Homing", fg_color="green").pack(padx=5, pady=5)
+        ctk.CTkButton(left_frame, text="Calibration").pack(padx=5, pady=5)
+
+        # Graph Display
+        self.create_graphs(right_frame)
+
+    # ------------------ Position Control ------------------ #
+    def create_position_control(self, parent, label, value):
+        ctk.CTkLabel(parent, text=f"{label} Position:").pack(padx=5, pady=2)
+        entry = ctk.CTkEntry(parent, width=30)
+        entry.insert(0, str(value))
+        entry.pack(padx=5, pady=2)
+
+        # Arrows for Step Adjustments
+        self.create_step_buttons(parent, entry)
+
+    
+
+
+    # ------------------ Step Adjustment Buttons ------------------ #
+    def create_step_buttons(self, parent, entry_widget, step=1):
+        btn_frame = ctk.CTkFrame(parent)
+        btn_frame.pack(padx=5, pady=2)
+
+        ctk.CTkButton(btn_frame, text="▲", width=30, command=lambda: self.adjust_value(entry_widget, step)).pack(side=ctk.LEFT, padx=2)
+        ctk.CTkButton(btn_frame, text="▼", width=30, command=lambda: self.adjust_value(entry_widget, -step)).pack(side=ctk.LEFT, padx=2)
+
+    def adjust_value(self, entry, step):
+        try:
+            current_value = int(entry.get())
+            entry.delete(0, ctk.END)
+            entry.insert(0, str(current_value + step))
+        except ValueError:
+            entry.delete(0, ctk.END)
+            entry.insert(0, "0")
+
+    # ------------------ Graphs ------------------ #
+    def create_graphs(self, parent):
+        # Placeholder for X-Y Graph
+        xy_graph = ctk.CTkFrame(parent, width=300, height=300, fg_color="blue")
+        xy_graph.pack(padx=5, pady=5)
+
+        # Placeholder for Z-Axis Graph
+        z_graph = ctk.CTkFrame(parent, width=300, height=50, fg_color="blue")
+        z_graph.pack(padx=5, pady=5)
+
+        # Red Position Indicators (Mock)
+        ctk.CTkLabel(xy_graph, text="⬤", fg_color="red").place(relx=0.5, rely=0.5, anchor='center')
+        ctk.CTkLabel(z_graph, text="━", fg_color="red").place(relx=0.5, rely=0.5, anchor='center')
  
     # ------------------ Time Updater ------------------ #
     def update_time(self):
