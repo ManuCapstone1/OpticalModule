@@ -11,6 +11,7 @@ STEPDISTXY = 0.212058/16
 STEPDISTZ = 0.01/16
 PULSEWIDTH = 100 / 1000000.0 # microseconds
 BTWNSTEPS = 1000 / 1000000.0
+STAGEFOCUSHEIGHT = 85 # Need to determine real value
 
 class OpticalModule:
     """
@@ -28,7 +29,7 @@ class OpticalModule:
         self.motorB = StepperMotor(3, 6, self.board)
         self.motorZ = StepperMotor(4, 7, self.board)
         
-        self.eStop = True
+        self.Stop = False
         self.limitSwitchX = LimitSwitch(9, self.board)
         self.limitSwitchY = LimitSwitch(10, self.board)
         self.limitSwitchZ = LimitSwitch(11, self.board)
@@ -55,9 +56,22 @@ class OpticalModule:
 
         # Misc variables
         self.imageCounter = 0
+        self.isHomed = False
+
+        # Threading Lock
+        self.positionLock = threading.Lock()
+        self.cameraLock = threading.Lock()
+        self.imageLock = threading.Lock()
 
     def add_sample(self, sampleID, sampleHeight, mmPerLayer):
         self.currSample = Sample(sampleID, sampleHeight, mmPerLayer)
+
+    def disable_motors(self):
+        self.enPin.write(1)
+        self.isHomed = False
+
+    def enable_motors(self):
+        self.enPin.write(0)
 
     def move_ab(self, deltaA: int, deltaB: int):
         steps = abs(deltaA)
@@ -84,7 +98,8 @@ class OpticalModule:
     def move_x(self, deltaX=0):
         deltaA = -deltaX
         deltaB = -deltaX
-        self.currX = self.currX + deltaX 
+        with self.positionLock:
+            self.currX = self.currX + deltaX 
         
         self.move_ab(deltaA, deltaB)
 
@@ -92,7 +107,8 @@ class OpticalModule:
     def move_y(self,deltaY=0):
         deltaA = -deltaY
         deltaB = deltaY
-        self.currY = self.currY + deltaY
+        with self.positionLock:
+            self.currY = self.currY + deltaY
         
         self.move_ab(deltaA, deltaB)
 
@@ -147,6 +163,8 @@ class OpticalModule:
             self.motorA.step_pin.write(0)
             self.motorB.step_pin.write(0)
             time.sleep(BTWNSTEPS)
+        with self.positionLock:
+            self.currY = 0
         print("X")
         self.motorA.dir_pin.write(1)
         self.motorB.dir_pin.write(1)
@@ -157,6 +175,8 @@ class OpticalModule:
             self.motorA.step_pin.write(0)
             self.motorB.step_pin.write(0)
             time.sleep(BTWNSTEPS)
+        with self.positionLock:
+            self.currX = 0
     
     def home_all(self):
         self.home_xy()
@@ -168,7 +188,10 @@ class OpticalModule:
             time.sleep(PULSEWIDTH)
             self.motorZ.step_pin.write(0)
             time.sleep(BTWNSTEPS)
-            
+        with self.positionLock:
+            self.currZ = 0
+        self.isHomed = True
+
     # Returns image from camera in array format
     def get_image_array(self) -> any:
 
@@ -242,7 +265,11 @@ class OpticalModule:
         return laplacian.var()
     
     # Finds and moves the platform to the best focus position 
-    def auto_focus(self, zMin, zMax, stepSize, blur=5):
+    def auto_focus(self, zMin=None, zMax=None, stepSize=None, blur=5):
+        if zMin is None or zMax is None or stepSize is None:
+            zMin = self.currSample.get_curr_height() + STAGEFOCUSHEIGHT - 1
+            zMax = self.currSample.get_curr_height() + STAGEFOCUSHEIGHT + 1
+            stepSize = 0.05
         bestFocusValue = -1
         bestZPosition = zMin
         zMinMicron = int(zMin*1000)
@@ -282,14 +309,16 @@ class OpticalModule:
 
         # Generate n random points within the bounding box
         random_points = [(random.uniform(min_x, max_x), random.uniform(min_y, max_y)) for _ in range(numImages)]
-        self.imageCounter = 0
+        with self.imageLock:
+            self.imageCounter = 0
         for point in random_points:
             self.go_to(x=point[0], y=point[1])
             time.sleep(1)
             if saveImages: self.capture_and_save_image(self.saveDir)
             imageArr = self.get_image_array()
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
-            self.imageCounter = self.imageCounter + 1
+            with self.imageLock:
+                self.imageCounter = self.imageCounter + 1
         return capturedImages
     
     def execute(self, targetMethod, **kwargs):
@@ -298,7 +327,7 @@ class OpticalModule:
         if callable(target):
             targetThread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
             targetThread.start()
-            while self.eStop and targetThread.is_alive():
+            while not self.Stop and targetThread.is_alive():
                 time.sleep(0.01)
             return
         else:
@@ -338,9 +367,10 @@ class OpticalModule:
 
     def set_brightness_and_contrast(self, brightness=None, contrast=None):
         
-        brightness = brightness if brightness is not None else self.currBrightness
-        contrast = contrast if contrast is not None else self.currContrast
-        self.cam.set_controls({"Brightness": brightness, "Contrast": contrast})
+        with self.cameraLock:
+            brightness = brightness if brightness is not None else self.currBrightness
+            contrast = contrast if contrast is not None else self.currContrast
+            self.cam.set_controls({"Brightness": brightness, "Contrast": contrast})
        
 
 

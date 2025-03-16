@@ -24,6 +24,7 @@ shabam = OpticalModule()
 status_data = {
     "module_status": "Unknown",
     "alarm_status": "None",
+    "mode": "Manual",
     "x_pos" : shabam.get_curr_pos_mm('x'),
     "y_pos" : shabam.get_curr_pos_mm('y'),
     "z_pos" : shabam.get_curr_pos_mm('z'),
@@ -38,16 +39,21 @@ status_data = {
 def send_status_updates():
     while True:
         # Simulate the Raspberry Pi periodically updating status data
+        update_status_data()
         pub_socket.send_json(status_data)
         print("Sent status update to the PC...")
         time.sleep(1)  # Wait 1 second before sending the next update
+
 def update_status_data():
-    status_data["x_pos"] = shabam.get_curr_pos_mm('x')
-    status_data["y_pos"] = shabam.get_curr_pos_mm('y')
-    status_data["z_pos"] = shabam.get_curr_pos_mm('z')
-    status_data["brightness"] = shabam.currBrightness
-    status_data["contrast"] = shabam.currContrast
-    
+    with shabam.positionLock:
+        status_data["x_pos"] = shabam.get_curr_pos_mm('x')
+        status_data["y_pos"] = shabam.get_curr_pos_mm('y')
+        status_data["z_pos"] = shabam.get_curr_pos_mm('z')
+    with shabam.cameraLock:
+        status_data["brightness"] = shabam.currBrightness
+        status_data["contrast"] = shabam.currContrast
+    with shabam.imageLock:
+        status_data["current_image"] = shabam.imageCounter
 
 
 # Handler for receiving data from the PC
@@ -56,22 +62,36 @@ def handle_request():
         try:
             message = rep_socket.recv_json(flags=zmq.NOBLOCK)  # Non-blocking receive
             print(f"Received request: {message}")
-
-            if "exe_random" in message:
+            thread = threading.Thread()
+            if message["command"] is "exe_sampling" and not thread.is_alive():
                 status_data["module_status"] = "Random Sampling Running"
-                # Execute random sampling routine
+                status_data["total_image"] = message["total_image"]
+                thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "random_sampling", "numImages": message["total_image"], "saveImages": False})
+                thread.start()
 
-            if "exe_scanning" in message:
+            if message["command"] is "exe_scanning" and not thread.is_alive():
                 status_data["module_status"] = "Scanning Running"
                 # Execute scanning routine
 
-            if "exe_homing" in message:
-                status_data["module_status"] = "Homing" 
+            if message["command"] is "exe_homing_xy" and not thread.is_alive():
+                status_data["module_status"] = "Homing XY" 
+                thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "home_xy"})
+                thread.start()
+                # Execute homing routine
+            
+            if message["command"] is "exe_homing_all" and not thread.is_alive():
+                status_data["module_status"] = "Homing All" 
+                thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "home_all"})
                 # Execute homing routine
 
-            if "exe_stop" in message:
+            if message["command"] is "exe_stop":
                 status_data["module_status"] = "Stopped"
+                shabam.Stop = True
+                shabam.isHomed = False
                 # Execute stopping routine
+
+            if status_data["module_status"] is not "idle" and not thread.is_alive():
+                status_data["module_status"] = "idle"
 
 
             rep_socket.send_json({"status": "received"})  # Acknowledge request
