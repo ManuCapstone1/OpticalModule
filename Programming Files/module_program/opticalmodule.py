@@ -29,7 +29,6 @@ class OpticalModule:
         self.motorB = StepperMotor(3, 6, self.board)
         self.motorZ = StepperMotor(4, 7, self.board)
         
-        self.Stop = False
         self.limitSwitchX = LimitSwitch(9, self.board)
         self.limitSwitchY = LimitSwitch(10, self.board)
         self.limitSwitchZ = LimitSwitch(11, self.board)
@@ -57,18 +56,22 @@ class OpticalModule:
         # Misc variables
         self.imageCounter = 0
         self.isHomed = False
+        self.Stop = False
 
         # Threading Lock
         self.positionLock = threading.Lock()
         self.cameraLock = threading.Lock()
-        self.imageLock = threading.Lock()
+        self.imageCountLock = threading.Lock()
+        self.homeLock = threading.Lock()
+        self.stopLock = threading.Lock()
 
     def add_sample(self, sampleID, sampleHeight, mmPerLayer):
         self.currSample = Sample(sampleID, sampleHeight, mmPerLayer)
 
     def disable_motors(self):
         self.enPin.write(1)
-        self.isHomed = False
+        with self.homeLock:
+            self.isHomed = False
 
     def enable_motors(self):
         self.enPin.write(0)
@@ -144,13 +147,14 @@ class OpticalModule:
             self.move_z(z-self.currZ)
 
     def get_curr_pos_mm(self, axis):
-        if axis == "x":
-            return self.currX*STEPDISTXY
-        elif axis == "y":
-            return self.currY*STEPDISTXY
-        elif axis == "z":
-            return self.currZ*STEPDISTZ
-        else: return 0
+        with self.positionLock:
+            if axis == "x":
+                return self.currX*STEPDISTXY
+            elif axis == "y":
+                return self.currY*STEPDISTXY
+            elif axis == "z":
+                return self.currZ*STEPDISTZ
+            else: return 0
 
     def home_xy(self):
         print("Y")
@@ -190,7 +194,8 @@ class OpticalModule:
             time.sleep(BTWNSTEPS)
         with self.positionLock:
             self.currZ = 0
-        self.isHomed = True
+        with self.homeLock:
+            self.isHomed = True
 
     # Returns image from camera in array format
     def get_image_array(self) -> any:
@@ -372,9 +377,6 @@ class OpticalModule:
             contrast = contrast if contrast is not None else self.currContrast
             self.cam.set_controls({"Brightness": brightness, "Contrast": contrast})
        
-
-
-    
 
 class StepperMotor:
     def __init__(self, step_pin, dir_pin, board=pyfirmata.Arduino("/dev/ttyUSB0")):
