@@ -86,8 +86,10 @@ def handle_request():
 
             if message["command"] is "exe_stop":
                 status_data["module_status"] = "Stopped"
+                
                 shabam.Stop = True
-                shabam.isHomed = False
+                with shabam.homeLock:
+                    shabam.isHomed = False
                 # Execute stopping routine
 
             if status_data["module_status"] is not "idle" and not thread.is_alive():
