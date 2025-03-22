@@ -3,7 +3,6 @@ from tkinter import filedialog, messagebox, font
 from PIL import Image, ImageTk
 from datetime import datetime
 import numpy as np
-import numpy as np
 import os
 
 from communication import CommunicationHandler
@@ -152,8 +151,6 @@ class MainApp(ctk.CTk):
         calibration_btn.pack(pady=5, fill='x')
 
         home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 100, font=("Arial", 20), fg_color="green", text_color="white")
-
-        home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 100, font=("Arial", 20), fg_color="green", text_color="white")
         home_btn.pack(pady=5, fill='x')
     
 
@@ -192,7 +189,6 @@ class MainApp(ctk.CTk):
         #Sample height 
         ctk.CTkLabel(sample_window, text="Enter sample height:").grid(row = 2, column = 0, columnspan = 4, padx=1, pady=5)
         sample_height = ctk.CTkEntry(sample_window)
-        sample_height.grid(row = 3, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
         sample_height.grid(row = 3, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
 
         #------Bounding box -----
@@ -388,6 +384,7 @@ class MainApp(ctk.CTk):
 
         # Configure grid to center images
         total_columns = max(first_row_count, second_row_count)  # Use max columns for even spacing
+
         for col in range(total_columns):
             sampling_frame.grid_columnconfigure(col, weight=1)  # Make columns expand
 
@@ -435,7 +432,6 @@ class MainApp(ctk.CTk):
         expanded_window.title("Expanded Image")
         expanded_window.geometry("600x600")  # Default size
         expanded_window.minsize(300, 300)    # Minimum size to prevent excessive shrinking
-
         expanded_window.grab_set()
 
         # Load the original image
