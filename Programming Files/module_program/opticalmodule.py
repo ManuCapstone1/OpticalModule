@@ -13,6 +13,7 @@ STEPDISTZ = 0.01/16
 PULSEWIDTH = 100 / 1000000.0 # microseconds
 BTWNSTEPS = 1000 / 1000000.0
 STAGEFOCUSHEIGHT = 85 # Need to determine real value
+STAGECENTRE = (8281, 7005) # Stage centre location in steps
 
 class OpticalModule:
     """
@@ -45,7 +46,7 @@ class OpticalModule:
 
         # Misc variables
         self.imageCounter = 0
-        self.currImage = []
+        self.totalImages = 0
         self.currImageMetadata = {
             "image_name" : "None",
             "sample_id" : "None",
@@ -311,8 +312,16 @@ class OpticalModule:
         self.update_image_metadata()
     
     def random_sampling(self, numImages, saveImages: bool):
+        if self.currSample is None or not self.currSample.boundingIsSet:
+            print("Bounding box not set. Cannot take images.")
+            return
+        if self.cam.calculate_focus_score() < 1:
+            print("Sample not detected or not in focus")
+            return
         if not self.isHomed:
             self.home_all
+        with self.imageCountLock:   
+            self.totalImages = numImages
         # Create list of captured images
         capturedImages = []
         # Extract x and y coordinates from the bounding box
@@ -329,17 +338,58 @@ class OpticalModule:
             self.cam.imageCount = 0
         for point in random_points:
             self.go_to(x=point[0], y=point[1])
-            time.sleep(1)
+            with self.imageCountLock:
+                self.cam.imageCount = self.cam.imageCount + 1
+            time.sleep(0.5)
             if saveImages: 
                 imageArr = self.cam.save_image(self.saveDir, self.currSample)
             else:
                 imageArr = self.cam.update_curr_image(self.currSample)
             self.update_image_metadata()
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
-            with self.imageCountLock:
-                self.cam.imageCount = self.cam.imageCount + 1
         self.currSample.currLayer = self.currSample.currLayer + 1
         return capturedImages
+    
+    def scanning_images(self, step_size_x, step_size_y, saveImages: bool):
+        if self.currSample is None or not self.currSample.boundingIsSet:
+            print("Bounding box not set. Cannot take images.")
+            return
+        if self.cam.calculate_focus_score() < 1:
+            print("Sample not detected or not in focus")
+            return
+        if not self.isHomed:
+            self.home_all
+
+        capturedImages = []
+
+        x_coords = [point[0] for point in self.currSample.boundingBox]
+        y_coords = [point[1] for point in self.currSample.boundingBox]
+
+        min_x, max_x = min(x_coords), max(x_coords)
+        min_y, max_y = min(y_coords), max(y_coords)
+
+        x_positions = list(range(int(min_x), int(max_x) + step_size_x, step_size_x))
+        y_positions = list(range(int(min_y), int(max_y) + step_size_y, step_size_y))
+        with self.imageCountLock:
+            self.totalImages = len(x_positions) * len(y_positions)
+            self.cam.imageCount = 0
+        for x in x_positions:
+            for y in y_positions:
+                self.go_to(x=x, y=y)
+                time.sleep(0.5)  # Allow system to stabilize
+                with self.imageCountLock:
+                    self.cam.imageCount = self.cam.imageCount
+                if saveImages:
+                    imageArr = self.cam.save_image(self.saveDir, self.currSample)
+                else:    
+                    imageArr = self.cam.update_curr_image(self.currSample)
+                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
+                
+
+        print("Image capturing complete.")
+
+        return capturedImages
+
     
     def execute(self, targetMethod, **kwargs):
         # Get the target method

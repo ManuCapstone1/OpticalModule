@@ -60,6 +60,7 @@ def update_status_data():
         status_data["colour_temp"] = shabam.cam.currColourTemp,
     with shabam.imageCountLock:
         status_data["image_count"] = shabam.cam.imageCount
+        status_data["total_image"] = shabam.totalImages
 
     status_data["current_image"] = shabam.cam.currImage
     status_data["image_metadata"] = shabam.currImageMetadata
@@ -99,7 +100,7 @@ def handle_request():
                 # Execute update image
 
             if message["command"] is "exe_stop":
-                status_data["module_status"] = "Stopped"
+                status_data["module_status"] = "Stopping..."
                 
                 shabam.Stop = True
                 with shabam.homeLock:
