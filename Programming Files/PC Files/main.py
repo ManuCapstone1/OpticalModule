@@ -4,7 +4,10 @@ from communication import CommunicationHandler
 from tkinter import messagebox
 
 def main():
-    gui = MainApp() #instantiate gui
+
+    #Instantiate gui app
+    gui = MainApp() 
+
     try:
         comms = CommunicationHandler() #instantiate communication handler
 
@@ -19,8 +22,9 @@ def main():
     except Exception as e:
         messagebox.showerror("Error", f"Could not establish communcation: {e}")
 
-    #Open and start GUI
+    #Open and start GUI app
     gui.mainloop()
 
+#START ALL PC CODE HERE
 if __name__ == "__main__":
     main()
