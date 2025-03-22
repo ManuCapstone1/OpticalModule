@@ -28,10 +28,14 @@ status_data = {
     "x_pos" : shabam.get_curr_pos_mm('x'),
     "y_pos" : shabam.get_curr_pos_mm('y'),
     "z_pos" : shabam.get_curr_pos_mm('z'),
-    "brightness" : shabam.currBrightness,
-    "contrast" : shabam.currContrast,
+    "exposure_time" : shabam.cam.currExposureTime,
+    "analog_gain" : shabam.cam.currAnalogGain,
+    "contrast" : shabam.cam.currContrast,
+    "colour_temp" : shabam.cam.currColourTemp,
     "total_image": 0,
-    "current_image": 0,
+    "image_count": 0,
+    "current_image" : shabam.cam.currImage,
+    "image_metadata" : shabam.currImageMetadata,
     "file_location": "Unknown"
 }
 
@@ -50,10 +54,15 @@ def update_status_data():
         status_data["y_pos"] = shabam.get_curr_pos_mm('y')
         status_data["z_pos"] = shabam.get_curr_pos_mm('z')
     with shabam.cameraLock:
-        status_data["brightness"] = shabam.currBrightness
-        status_data["contrast"] = shabam.currContrast
-    with shabam.imageLock:
-        status_data["current_image"] = shabam.imageCounter
+        status_data["exposure_time"] = shabam.cam.currExposureTime,
+        status_data["analog_gain"] = shabam.cam.currAnalogGain,
+        status_data["contrast"] = shabam.cam.currContrast,
+        status_data["colour_temp"] = shabam.cam.currColourTemp,
+    with shabam.imageCountLock:
+        status_data["image_count"] = shabam.cam.imageCount
+
+    status_data["current_image"] = shabam.cam.currImage
+    status_data["image_metadata"] = shabam.currImageMetadata
 
 
 # Handler for receiving data from the PC
@@ -83,6 +92,11 @@ def handle_request():
                 status_data["module_status"] = "Homing All" 
                 thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "home_all"})
                 # Execute homing routine
+
+            if message["command"] is "exe_update_image" and not thread.is_alive():
+                status_data["module_status"] = "Homing All" 
+                thread = threading.Thread(target=shabam.update_image)
+                # Execute update image
 
             if message["command"] is "exe_stop":
                 status_data["module_status"] = "Stopped"

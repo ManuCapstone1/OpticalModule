@@ -46,7 +46,6 @@ class OpticalModule:
         # Misc variables
         self.imageCounter = 0
         self.currImage = []
-        self.currImageName = "None"
         self.currImageMetadata = {
             "image_name" : "None",
             "sample_id" : "None",
@@ -298,7 +297,7 @@ class OpticalModule:
         self.currImageMetadata["image_name"] = self.cam.currImageName
         self.currImageMetadata["sample_id"] = self.currSample.sampleID
         self.currImageMetadata["sample_layer"] = self.currSample.currLayer
-        self.currImageMetadata["image_number"] = self.imageCounter
+        self.currImageMetadata["image_number"] = self.cam.imageCount
         self.currImageMetadata["image_x_pos"] = self.get_curr_pos_mm('x')
         self.currImageMetadata["image_y_pos"] = self.get_curr_pos_mm('y')
         self.currImageMetadata["image_z_pos"] = self.get_curr_pos_mm('z')
@@ -307,6 +306,9 @@ class OpticalModule:
         self.currImageMetadata["contrast"] = self.cam.currContrast
         self.currImageMetadata["colour_temp"] = self.cam.currColourTemp
 
+    def update_image(self):
+        self.cam.update_curr_image(self.currSample)
+        self.update_image_metadata()
     
     def random_sampling(self, numImages, saveImages: bool):
         if not self.isHomed:
@@ -321,7 +323,6 @@ class OpticalModule:
         min_x, max_x = min(x_coords), max(x_coords)
         min_y, max_y = min(y_coords), max(y_coords)
         
-
         # Generate n random points within the bounding box
         random_points = [(random.uniform(min_x, max_x), random.uniform(min_y, max_y)) for _ in range(numImages)]
         with self.imageCountLock:
@@ -329,11 +330,15 @@ class OpticalModule:
         for point in random_points:
             self.go_to(x=point[0], y=point[1])
             time.sleep(1)
-            if saveImages: self.cam.save_image(self.saveDir, self.currSample)
-            imageArr = self.cam.get_image_array(True)
+            if saveImages: 
+                imageArr = self.cam.save_image(self.saveDir, self.currSample)
+            else:
+                imageArr = self.cam.update_curr_image(self.currSample)
+            self.update_image_metadata()
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
             with self.imageCountLock:
-                self.imageCounter = self.imageCounter + 1
+                self.cam.imageCount = self.cam.imageCount + 1
+        self.currSample.currLayer = self.currSample.currLayer + 1
         return capturedImages
     
     def execute(self, targetMethod, **kwargs):
@@ -379,13 +384,6 @@ class OpticalModule:
                     method()
             else:
                 print(f"'{method_name}' is not callable. Please try again.")
-
-    def set_brightness_and_contrast(self, brightness=None, contrast=None):
-        
-        with self.cameraLock:
-            brightness = brightness if brightness is not None else self.currBrightness
-            contrast = contrast if contrast is not None else self.currContrast
-            self.cam.set_controls({"Brightness": brightness, "Contrast": contrast})
        
 
 class StepperMotor:
@@ -456,6 +454,10 @@ class Camera:
         
         # Apply the controls to the camera.
         self.picam.set_controls(controls)
+    
+    def update_curr_image(self, sample):
+        self.update_image_name(sample)
+        return self.get_image_array(True)
 
     def calculate_focus_score(self, imageArray=None, blur=5):
 
@@ -516,7 +518,7 @@ class Camera:
             cv2.imwrite(file_path, image_rgb)
             print(f"Image saved at: {file_path}")
 
-            return file_path
+            return image
 
         except Exception as e:
             print(f"Error capturing image: {e}")
