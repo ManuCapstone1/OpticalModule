@@ -1,5 +1,5 @@
 import zmq
-import threading
+import time
 
 class CommunicationHandler:
     def __init__(self):
@@ -14,22 +14,28 @@ class CommunicationHandler:
         self.sub_socket.connect("tcp://192.168.1.111:5556")
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    #Function: send_data
+
     #Purpose: Send data to Raspberry Pi from PC, used as needed, called in gui.py
     #Parameters: data: json object
     #Return: response: json object response from raspberry pi
-    def send_data(self, data):
-        try:
-            # Send data to Raspberry Pi
-            self.req_socket.send_json(data)
-            # Receive acknowledgment from Raspberry Pi
-            response = self.req_socket.recv_json()
-            return response
-        except Exception as e:
-            print(f"Error sending data: {e}")
-            return None
-    
-    #Function: receive_status_updates
+    def send_data(self, data, retries=3, delay=2):
+        """Send data to Raspberry Pi with retries in case of failure."""
+        for attempt in range(retries):
+            try:
+                self.req_socket.send_json(data)
+                response = self.req_socket.recv_json(flags=zmq.NOBLOCK)  # Non-blocking call
+                return response
+            except zmq.Again:  # In case of timeout or no response
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    print(f"Retrying... attempt {attempt + 1}")
+                else:
+                    print(f"Failed to get response after {retries} attempts.")
+                    return {"error": "Timeout", "message": "No response from Raspberry Pi"}
+            except Exception as e:
+                print(f"Error sending data: {e}")
+                return {"error": "Send Error", "message": str(e)}
+
     #Purpose: Receive updates in json file from raspberry pi as suscriber every ~1 second
     #Parameters: gui.py
     def receive_status_updates(self, gui):

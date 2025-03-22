@@ -9,8 +9,10 @@ from communication import CommunicationHandler
 
 
 class MainApp(ctk.CTk):
-    #============================ Appearance =================================================#
     def __init__(self):
+    #====================================================================================#
+    #----------------------------- Variables and Instantiation -------------------------#
+    #====================================================================================#
         super().__init__()
 
         #---------- Raspberry Pi JSON Keys instatiate ----------#
@@ -36,7 +38,7 @@ class MainApp(ctk.CTk):
         self.brightness = "Unknown"
         self.contrast = "Unknown"
 
-        #------ JSON Objects sent TO rapsberry pi ------
+        #------ JSON Objects sent TO rapsberry pi ------#
         #Sample data
         self.sample_data = {
             "mount_type" : "Unknown",
@@ -60,7 +62,10 @@ class MainApp(ctk.CTk):
             "step_y" :0
         }
 
-        #--------------------- GUI Instantiation ---------------------------#
+        #----------------- Image Stitching ------------------#
+
+
+        #--------------------- GUI Appearance Variables ---------------------------#
         #Skeleton appearance
         self.title("Control Panel")
         self.geometry("800x500")
@@ -80,6 +85,9 @@ class MainApp(ctk.CTk):
 
         self.display_main_tab()
 
+    #====================================================================================#
+    #----------------------------- GUI Appearances and Main app -------------------------#
+    #====================================================================================#
 
     # ------------------ Top Frame ------------------ #
     def create_top_frame(self):
@@ -467,7 +475,10 @@ class MainApp(ctk.CTk):
         # Update the image in the label
         self.img_display.configure(image=self.img_ctk)
 
-    #=============================== GUI Functionality ===============================#
+
+    #====================================================================================#
+    #-------------------------- GUI Communication and Functions -------------------------#
+    #====================================================================================#
     
     #------------------- Disable Buttons Function ----------------------#
     #DOESN"T WORK RIGHT NOW
@@ -478,6 +489,7 @@ class MainApp(ctk.CTk):
                 button.configure(state=ctk.DISABLED)  # Disable button
             else:
                 button.configure(state=ctk.NORMAL)  # Enable button again
+    
 
 
     #============================== Communcation ====================================#
@@ -485,6 +497,25 @@ class MainApp(ctk.CTk):
     #Assign communication handler from main.py
     def set_communication(self, comms):
         self.comms = comms
+    
+     #Send JSON file to raspberry pi, and handle errors
+    def send_json_error_check(self, data, success_message):
+        if self.comms:  # Ensure communication handler exists
+            try:
+                # Send data to Raspberry Pi
+                response = self.comms.send_data(data)
+
+                # If the response is successful
+                if response and "error" in response:
+                    # If there's an error in the response
+                    messagebox.showerror("Error", f"Failed to send data: {response.get('message', 'Unknown error')}")
+                else:
+                    # Show success message in GUI
+                    print(f"Response from Raspberry Pi: {response}")
+                    messagebox.showinfo("Success", success_message)
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to send data: {e}")
 
     #Get all the data from the JSON file
     #From raspberry pi publisher
@@ -531,17 +562,9 @@ class MainApp(ctk.CTk):
         self.sample_data['initial_height'] = initial_height
         self.sample_data['sample_id'] = sample_id
 
-        if self.comms:  # Ensure communication handler exists
-            try:
-                # Send the sample data to Raspberry Pi
-                response = self.comms.send_data(self.sample_data)
-                print(f"Response from Raspberry Pi: {response}")
-
-                # Show confirmation in GUI
-                messagebox.showinfo("Success", "Sample data sent successfully!")
-
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to send sample data: {e}")
+        #Send sample data
+        success_message = "Sample data sent."
+        self.send_json_error_check(self.sample_data, success_message)
 
     #Send random samping data to raspberry pi
     #Called when ok is pressed in random sampling pop-up window
@@ -552,23 +575,23 @@ class MainApp(ctk.CTk):
             self.random_data['status'] = status
             self.random_data['num_images'] = num_images
 
-            if self.comms:  # Ensure communication handler exists
-                try:
-                    # Send the sample data to Raspberry Pi
-                    response = self.comms.send_data(self.random_data)
-                    print(f"Response from Raspberry Pi: {response}")
+            #Send random sampling data
+            success_message = "Random sampling data sent."
+            self.send_json_error_check(self.random_data, success_message)
 
-                    # Show confirmation in GUI
-                    messagebox.showinfo("Success", "Sample data sent successfully!")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to send sample data: {e}")
         else:
-            print("Status not in idle, wait to requestion scanning mode.")
+            messagebox.showerror("Status not in idle, wait to request scanning mode.")
     
     #Send scanning data to raspberry pi
     #Called when ok is pressed in scanning sampling pop-up window
     def send_scanning_data(self, mode, status, step_x, step_y):
         if self.status == "Idle":
+
+            #Check step if valid entry
+            if step_x <= 0 or step_y <= 0:
+                messagebox.showerror("Invalid input", "Step values must be positive numbers") 
+                return   
+
             #Store scanning sampling data
             self.scanning_data['mode'] = mode
             self.scanning_data['status'] = status
@@ -585,5 +608,9 @@ class MainApp(ctk.CTk):
                     messagebox.showinfo("Success", "Sample data sent successfully!")
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to send sample data: {e}")
+                
+                #Send scanning  data
+                success_message = "Scanning data sent."
+                self.send_json_error_check(self.scanning_data, success_message)
         else:
-            print("Status not in idle, wait to requestion scanning mode.")
+            messagebox.showerror("Status not in idle, wait to request scanning mode.")

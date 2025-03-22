@@ -2,12 +2,14 @@ import threading
 from gui import MainApp
 from communication import CommunicationHandler
 from tkinter import messagebox
+from stitcher import ImageStitcher
 
 def main():
 
     #Instantiate gui app
     gui = MainApp() 
 
+    #--------------Setup communication and thread for raspberry pi -----------------------
     try:
         comms = CommunicationHandler() #instantiate communication handler
 
@@ -21,6 +23,15 @@ def main():
     #Throw exception if raspberry pi is offline   
     except Exception as e:
         messagebox.showerror("Error", f"Could not establish communcation: {e}")
+
+    #------------------------- Setup image stitcher --------------------------------
+    try:
+        stitcher = ImageStitcher() #instantiate image stitcher
+        gui.set_stitcher(stitcher) #Setup stitcher in gui
+        
+    #Throw error if image stitcher fails
+    except Exception as e:
+        messagebox.showerror("Error", f"Could not setup image stitcher: {e}")
 
     #Open and start GUI app
     gui.mainloop()
