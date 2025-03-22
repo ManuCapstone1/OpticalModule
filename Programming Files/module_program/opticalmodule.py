@@ -1,5 +1,6 @@
 import pyfirmata
 import time
+import math
 import cv2
 from picamera2 import Picamera2, Preview
 import threading
@@ -34,29 +35,34 @@ class OpticalModule:
         self.limitSwitchZ = LimitSwitch(11, self.board)
 
         # Create Camera
-        self.cam = Picamera2(0)
-        
-        # Create camera configuration
-        # https://www.raspberrypi.com/documentation/accessories/camera.html
-        self.camera_config = self.cam.create_still_configuration({"size":(4056,3040)}) 
-        self.cam.configure(self.camera_config)
-        self.saveDir = "/home/microscope/images"
-
-        # Create variables for brightness and contrast
-        self.currBrightness = 0
-        self.currContrast = 1.0
+        self.cam = Camera()
 
         # Create variables to hold current position in terms of steps
         self.currX = 0 
         self.currY = 0
         self.currZ = 0
-        print(self.currZ)
         self.currSample = None
 
         # Misc variables
         self.imageCounter = 0
+        self.currImage = []
+        self.currImageName = "None"
+        self.currImageMetadata = {
+            "image_name" : "None",
+            "sample_id" : "None",
+            "sample_layer" : 0,
+            "image_number" : 0,
+            "image_x_pos" : 0,
+            "image_y_pos" : 0,
+            "image_z_pos" : 0,
+            "exposure_time" : self.cam.currExposureTime,
+            "analog_gain" : self.cam.currAnalogGain,
+            "contrast" : self.cam.currContrast,
+            "colour_temp" : self.cam.currColourTemp
+        }
         self.isHomed = False
         self.Stop = False
+
 
         # Threading Lock
         self.positionLock = threading.Lock()
@@ -76,7 +82,7 @@ class OpticalModule:
     def enable_motors(self):
         self.enPin.write(0)
 
-    def move_ab(self, deltaA: int, deltaB: int):
+    def _move_ab(self, deltaA: int, deltaB: int):
         steps = abs(deltaA)
 
         if deltaA >= 0:
@@ -104,7 +110,7 @@ class OpticalModule:
         with self.positionLock:
             self.currX = self.currX + deltaX 
         
-        self.move_ab(deltaA, deltaB)
+        self._move_ab(deltaA, deltaB)
 
     # Moves carriage in y by a given linear distance (mm)
     def move_y(self,deltaY=0):
@@ -113,7 +119,7 @@ class OpticalModule:
         with self.positionLock:
             self.currY = self.currY + deltaY
         
-        self.move_ab(deltaA, deltaB)
+        self._move_ab(deltaA, deltaB)
 
     # Moves platform in z by a given liner distance (mm)
     def move_z(self, deltaZ=0):
@@ -197,77 +203,66 @@ class OpticalModule:
         with self.homeLock:
             self.isHomed = True
 
-    # Returns image from camera in array format
-    def get_image_array(self) -> any:
+    # # Returns image from camera in array format
+    # def get_image_array(self, updateImage=False) -> any:
 
-        self.cam.start()
-        array = self.cam.capture_array("main")
-        self.cam.stop()
+    #     self.cam.start()
+    #     array = self.cam.capture_array("main")
+    #     self.cam.stop()
 
-        return array
+    #     return array
     
-    def capture_and_save_image(self, dir: str) -> str:
-        """
-        Captures an image using Picamera2 and saves it to the specified directory.
+    # def capture_and_save_image(self, dir: str) -> str:
+    #     """
+    #     Captures an image using Picamera2 and saves it to the specified directory.
 
-        :return: The full path of the saved image.
-        """
+    #     :return: The full path of the saved image.
+    #     """
         
-        # Ensure the save directory exists
-        os.makedirs(dir, exist_ok=True)
+    #     # Ensure the save directory exists
+    #     os.makedirs(dir, exist_ok=True)
 
-        # Generate a unique filename using timestamp
-        timestamp = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
-        filename = f"{self.currSample.sampleID}_({self.get_curr_pos_mm('x')},{self.get_curr_pos_mm('y')},{self.get_curr_pos_mm('z')})_{timestamp}.jpg"
-        file_path = os.path.join(dir, filename)
+    #     # Generate a unique filename using timestamp
+    #     timestamp = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
+    #     filename = f"{self.currSample.sampleID}_({self.get_curr_pos_mm('x')},{self.get_curr_pos_mm('y')},{self.get_curr_pos_mm('z')})_{timestamp}.jpg"
+    #     file_path = os.path.join(dir, filename)
 
-        brightness = self.currBrightness
-        contrast = self.currContrast
 
-        try:
-            # Start camera
-            self.cam.start()
-            time.sleep(0.5)  # Allow camera to adjust
+    #     try:
+    #         # Start camera
+    #         self.cam.start()
+    #         time.sleep(0.5)  # Allow camera to adjust
 
-            # Capture image
-            image = self.cam.capture_array("main")
+    #         # Capture image
+    #         image = self.cam.capture_array("main")
 
-            # Convert image to RGB for saving
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    #         # Convert image to RGB for saving
+    #         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-            # Save image
-            cv2.imwrite(file_path, image_rgb)
-            print(f"Image saved at: {file_path}")
+    #         # Save image
+    #         cv2.imwrite(file_path, image_rgb)
+    #         print(f"Image saved at: {file_path}")
 
-            # Stop camera
-            self.cam.stop()
+    #         # Stop camera
+    #         self.cam.stop()
 
-            # Writing information to text file
-            with open(file_path, "w") as f:
-                f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"Position X (mm): {self.get_curr_pos_mm('x')}\n")
-                f.write(f"Position Y (mm): {self.get_curr_pos_mm('y')}\n")
-                f.write(f"Position Z (mm): {self.get_curr_pos_mm('z')}n")
-                f.write(f"Brightness: {self.currBrightness}\n")
-                f.write(f"Contrast: {self.currContrast}\n")
+    #         return file_path
 
-            return file_path
+    #     except Exception as e:
+    #         print(f"Error capturing image: {e}")
+    #         return ""
 
-        except Exception as e:
-            print(f"Error capturing image: {e}")
-            return ""
+    # def calculate_focus_score(self, imageArray, blur):
 
-    def calculate_focus_score(self, imageArray, blur):
+    #     # Apply filter to image to reduce impact of noise
+    #     imageFiltered = cv2.medianBlur(imageArray, blur)
 
-        # Apply filter to image to reduce impact of noise
-        imageFiltered = cv2.medianBlur(imageArray, blur)
+    #     # Apply the Laplacian filter to detect edges
+    #     laplacian = cv2.Laplacian(imageFiltered, cv2.CV_64F)
 
-        # Apply the Laplacian filter to detect edges
-        laplacian = cv2.Laplacian(imageFiltered, cv2.CV_64F)
-
-        # Calculate the variance of the Laplacian (a measure of sharpness)
-        print(laplacian.var())
-        return laplacian.var()
+    #     # Calculate the variance of the Laplacian (a measure of sharpness)
+    #     #print(laplacian.var())
+    #     return laplacian.var()
     
     # Finds and moves the platform to the best focus position 
     def auto_focus(self, zMin=None, zMax=None, stepSize=None, blur=5):
@@ -286,10 +281,9 @@ class OpticalModule:
             # Move to the current z position using go_to
             self.go_to(z=z/1000)
 
-            # Capture the image array
-            imageArray = self.get_image_array()
-            focusScore = self.calculate_focus_score(imageArray, blur)
-
+            # Get the focus score
+            focusScore = self.cam.calculate_focus_score()
+            print(focusScore)
             # Check if this focus value is the best so far
             if focusScore > bestFocusValue:
                 bestFocusValue = focusScore
@@ -300,7 +294,23 @@ class OpticalModule:
 
         return bestFocusValue
     
+    def update_image_metadata(self):
+        self.currImageMetadata["image_name"] = self.cam.currImageName
+        self.currImageMetadata["sample_id"] = self.currSample.sampleID
+        self.currImageMetadata["sample_layer"] = self.currSample.currLayer
+        self.currImageMetadata["image_number"] = self.imageCounter
+        self.currImageMetadata["image_x_pos"] = self.get_curr_pos_mm('x')
+        self.currImageMetadata["image_y_pos"] = self.get_curr_pos_mm('y')
+        self.currImageMetadata["image_z_pos"] = self.get_curr_pos_mm('z')
+        self.currImageMetadata["exposure_time"] = self.cam.currExposureTime
+        self.currImageMetadata["analog_gain"] = self.cam.currAnalogGain
+        self.currImageMetadata["contrast"] = self.cam.currContrast
+        self.currImageMetadata["colour_temp"] = self.cam.currColourTemp
+
+    
     def random_sampling(self, numImages, saveImages: bool):
+        if not self.isHomed:
+            self.home_all
         # Create list of captured images
         capturedImages = []
         # Extract x and y coordinates from the bounding box
@@ -314,15 +324,15 @@ class OpticalModule:
 
         # Generate n random points within the bounding box
         random_points = [(random.uniform(min_x, max_x), random.uniform(min_y, max_y)) for _ in range(numImages)]
-        with self.imageLock:
-            self.imageCounter = 0
+        with self.imageCountLock:
+            self.cam.imageCount = 0
         for point in random_points:
             self.go_to(x=point[0], y=point[1])
             time.sleep(1)
-            if saveImages: self.capture_and_save_image(self.saveDir)
-            imageArr = self.get_image_array()
+            if saveImages: self.cam.save_image(self.saveDir, self.currSample)
+            imageArr = self.cam.get_image_array(True)
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
-            with self.imageLock:
+            with self.imageCountLock:
                 self.imageCounter = self.imageCounter + 1
         return capturedImages
     
@@ -383,6 +393,192 @@ class StepperMotor:
         self.board = board
         self.step_pin = board.get_pin(f'd:{step_pin}:o')
         self.dir_pin = board.get_pin(f'd:{dir_pin}:o')
+
+class Camera:
+    def __init__(self):
+        # Create Camera
+        self.picam = Picamera2(0)
+        
+        # Create variables for brightness and contrast
+        self.currExposureTime = 10000       # Example exposure time in microseconds
+        self.currAnalogGain = 1.0           # Default analogue gain (1.0 = no gain)
+        self.currContrast = 1.0             # Default contrast (1.0 is neutral)
+        self.currColourTemp = 6000          # Default colour temperature in Kelvin
+
+        # Create camera configuration
+        # https://www.raspberrypi.com/documentation/accessories/camera.html
+        self.camera_config = self.picam.create_still_configuration({"size":(4056,3040)}) 
+        self.picam.configure(self.camera_config)
+        self._apply_settings()
+
+        # Misc Variables
+        self.currImage = []
+        self.currImageName = "None"
+        self.imageCount = 0
+
+    def update_settings(self, exposureTime=None, analogGain=None, contrast=None, colorTemperature=None):
+        """
+        Update the camera settings. For any parameter that is None, the existing setting is maintained.
+        
+        Parameters:
+            exposureTime: New exposure time in microseconds.
+            analogGain: New analogue gain (float).
+            contrast: New contrast setting.
+            colorTemperature: New color temperature in Kelvin.
+        """
+        if exposureTime is not None:
+            self.currExposureTime = exposureTime
+        if analogGain is not None:
+            self.currAnalogGain = analogGain
+        if contrast is not None:
+            self.currContrast = contrast
+        if colorTemperature is not None:
+            self.currColourTemp = colorTemperature
+
+        # Re-apply all settings after updates.
+        self._apply_settings()
+
+    def _apply_settings(self):
+        """
+        Convert the current color temperature to ColourGains using the RGB conversion algorithm
+        and apply all controls to the camera.
+        """
+        # Get red and blue gains calculated from the color temperature.
+        redGain, blueGain = self._convert_temperature_to_gains(self.currColourTemp)
+        
+        # Build the controls dictionary.
+        controls = {
+            "ExposureTime": self.currExposureTime,
+            "AnalogueGain": self.currAnalogGain,
+            "Contrast": self.currContrast,
+            "ColourGains": (redGain, blueGain)
+        }
+        
+        # Apply the controls to the camera.
+        self.picam.set_controls(controls)
+
+    def calculate_focus_score(self, imageArray=None, blur=5):
+
+        if imageArray is None:
+            imageArray = self.get_image_array()
+
+        # Apply filter to image to reduce impact of noise
+        imageFiltered = cv2.medianBlur(imageArray, blur)
+
+        # Apply the Laplacian filter to detect edges
+        laplacian = cv2.Laplacian(imageFiltered, cv2.CV_64F)
+
+        # Calculate the variance of the Laplacian (a measure of sharpness)
+        #print(laplacian.var())
+        return laplacian.var()
+    
+    def get_image_array(self, updateImage=False) -> any:
+
+        try:
+            self.picam.start()
+            array = self.picam.capture_array("main")
+            self.picam.stop()
+
+            if updateImage:
+                self.currImage = array
+
+            return array
+        
+        except Exception as e:
+            print(f"Error capturing image: {e}")
+            return ""
+    
+    def save_image(self, dir: str, sample, image=None) -> str:
+        """
+        Captures an image using Picamera2 and saves it to the specified directory.
+
+        :return: The full path of the saved image.
+        """
+        
+        # Ensure the save directory exists
+        os.makedirs(dir, exist_ok=True)
+
+        # Generate a unique filename using timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
+        imageName = self.update_image_name(sample)
+        filename = f"{imageName}_{timestamp}.jpg"
+        file_path = os.path.join(dir, filename)
+
+        try:
+            if image is None:
+                # Capture image
+                image = self.get_image_array(True)
+
+            # Convert image to RGB for saving
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+            # Save image
+            cv2.imwrite(file_path, image_rgb)
+            print(f"Image saved at: {file_path}")
+
+            return file_path
+
+        except Exception as e:
+            print(f"Error capturing image: {e}")
+            return ""
+    def update_image_name(self, sample, imageCount=None):
+        if imageCount is None: imageCount = self.imageCount
+        imageName = f"{imageCount}_{sample.currLayer}_{sample.sampleID}"
+        self.currImageName = imageName
+        return imageName
+
+    def _convert_temperature_to_gains(self, kelvin):
+        """
+        Convert a given color temperature in Kelvin to a pair of red and blue gain multipliers
+        using Tanner Helland's RGB conversion algorithm.
+        
+        This function calculates the red, green, and blue components corresponding to the
+        specified Kelvin temperature. It then normalizes the red and blue values relative to the
+        green channel (which is assumed to be at unity gain) to compute the gains.
+        
+        For more details on the algorithm, see:
+        https://tannerhelland.com/2012/09/18/convert-temperature-rgb-algorithm-code.html
+        
+        Parameters:
+            kelvin: Color temperature in Kelvin.
+            
+        Returns:
+            A tuple (redGain, blueGain).
+        """
+        # Convert Kelvin to a scaled temperature value
+        temperature = kelvin / 100.0
+
+        # Calculate red component
+        if temperature <= 66:
+            red = 255
+        else:
+            red = 329.698727446 * ((temperature - 60) ** -0.1332047592)
+            red = max(0, min(red, 255))
+        
+        # Calculate green component
+        if temperature <= 66:
+            green = 99.4708025861 * math.log(temperature) - 161.1195681661
+            green = max(0, min(green, 255))
+        else:
+            green = 288.1221695283 * ((temperature - 60) ** -0.0755148492)
+            green = max(0, min(green, 255))
+        
+        # Calculate blue component
+        if temperature >= 66:
+            blue = 255
+        elif temperature <= 19:
+            blue = 0
+        else:
+            blue = 138.5177312231 * math.log(temperature - 10) - 305.0447927307
+            blue = max(0, min(blue, 255))
+        
+        # Normalize red and blue relative to green (green is used as reference gain of 1.0)
+        # Prevent division by zero if green is 0.
+        if green == 0:
+            green = 1
+        redGain = red / green
+        blueGain = blue / green
+        return redGain, blueGain
 
 
 
