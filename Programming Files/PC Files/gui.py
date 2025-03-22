@@ -286,10 +286,6 @@ class MainApp(ctk.CTk):
         self.create_position_control(left_frame, "Y", self.current_y_pos, row=2)
         self.create_position_control(left_frame, "Z", self.current_z_pos, row=3)
 
-        # Speed Display
-        self.speed_label = ctk.CTkLabel(left_frame, text=f"Speed: {self.speed}")
-        self.speed_label.pack(font=("Arial", 18)).grid(row=4, column=0, padx=5, pady=30, sticky='w')
-
         # Additional Controls
         ctk.CTkButton(left_frame, text="Disable Stepper Motors").grid(row=7, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
         ctk.CTkButton(left_frame, text="Homing", fg_color="green").grid(row=8, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
@@ -582,7 +578,7 @@ class MainApp(ctk.CTk):
             else:
                 buttons_to_disable = ["stop_btn"]
 
-        elif module_status == "Scanning" or module_status == "Sampling" or status == "Stopping":
+        elif module_status == "Scanning" or module_status == "Sampling" or module_status == "Stopping":
             buttons_to_enable = ["main_tab", "motion_tab", "details_tab", "image_tab", "stop_btn"]
 
         elif module_status == "Calibrating":
@@ -649,6 +645,7 @@ class MainApp(ctk.CTk):
     def update_status_data(self, data):
         #Store previous status before update
         prev_module_status = self.module_status
+        prev_image_count = self.image_count
 
         # Extract values from the received data dictionary, with defaults for missing keys
         self.unpack_pi_JSON(data)
@@ -656,11 +653,14 @@ class MainApp(ctk.CTk):
         # Update all GUI elements
         self.status_label.configure(text=f"Module Status: {self.module_status}")
         self.alarm_label.configure(text=f"Alarms: {self.alarm_status}")
-        self.speed_label.configure(text=f"Speed: {self.speed}")
 
         #Update buttons only during status changes
         if prev_module_status != self.module_status :
             self.disable_buttons(self.module_status, self.sample_loaded)
+        
+        if prev_image_count != self.image_count :
+            #Update images
+            return
 
 
     #Function sends sample_data to raspberry pi
@@ -738,4 +738,3 @@ class MainApp(ctk.CTk):
 #Image tab
 
 #Image stitching: calling it, threading, transferring files
-#Link  up data published from raspberry pi and sent to reapsberry pi with Gus
