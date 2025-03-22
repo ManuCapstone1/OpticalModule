@@ -3,6 +3,7 @@ from tkinter import filedialog, messagebox, font
 from PIL import Image, ImageTk
 from datetime import datetime
 import numpy as np
+import numpy as np
 import os
 
 from communication import CommunicationHandler
@@ -63,8 +64,8 @@ class MainApp(ctk.CTk):
         #--------------------- GUI Instantiation ---------------------------#
         #Skeleton appearance
         self.title("Control Panel")
-        self.geometry("900x600")
-        self.minsize(900, 600)  # Set the minimum width and height
+        self.geometry("800x500")
+        self.minsize(800, 550)  # Set the minimum width and height
         ctk.set_appearance_mode("dark")  # Options: "dark", "light", "system"
 
         #Image related info from pi
@@ -124,12 +125,17 @@ class MainApp(ctk.CTk):
         for widget in self.content_frame.winfo_children():
             widget.destroy()
 
+        """Displays the Scanning layout with a large image grid."""
+        for widget in self.content_frame.winfo_children():
+            widget.destroy()
+
         #Setup frame padding on left and right
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
         right_frame = ctk.CTkFrame(self.content_frame, width=400, height=400)
         right_frame.pack(side=ctk.RIGHT, expand=True, fill='both')
+
 
         # Image Display on Right
         self.display_placeholder_image(right_frame)
@@ -146,13 +152,16 @@ class MainApp(ctk.CTk):
         calibration_btn.pack(pady=5, fill='x')
 
         home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 100, font=("Arial", 20), fg_color="green", text_color="white")
+
+        home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 100, font=("Arial", 20), fg_color="green", text_color="white")
         home_btn.pack(pady=5, fill='x')
     
 
     # ------------------ Image Placeholder ------------------ #
     def display_placeholder_image(self, frame):
-        img = Image.open("C:/Users/Steph/Downloads/dog.jpg")  # Replace with your image path
+        img = Image.open("C:/Users/a4iri/Desktop/Capstone/Test image.png")  # Replace with your image path
         img = img.resize((350, 350), Image.LANCZOS)
+
 
         # Create a CTkImage instance
         img_ctk = ctk.CTkImage(img, size=(350, 350))
@@ -184,6 +193,7 @@ class MainApp(ctk.CTk):
         ctk.CTkLabel(sample_window, text="Enter sample height:").grid(row = 2, column = 0, columnspan = 4, padx=1, pady=5)
         sample_height = ctk.CTkEntry(sample_window)
         sample_height.grid(row = 3, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
+        sample_height.grid(row = 3, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
 
         #------Bounding box -----
         #Width
@@ -201,7 +211,11 @@ class MainApp(ctk.CTk):
         def toggleEntry():
             if sample_2_var.get():
                 sample_height_2.configure(state='normal')
+            if sample_2_var.get():
+                sample_height_2.configure(state='normal')
             else:
+                sample_height_2.configure(state='disabled')
+
                 sample_height_2.configure(state='disabled')
 
         sample_2_var = ctk.BooleanVar()
@@ -237,6 +251,7 @@ class MainApp(ctk.CTk):
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
+
         right_frame = ctk.CTkFrame(self.content_frame)
         right_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
 
@@ -259,6 +274,7 @@ class MainApp(ctk.CTk):
         # Graph Display
         self.create_graphs(right_frame)
 
+
         ctk.CTkButton(right_frame, text="STOP", fg_color="red").pack(padx=10, pady=5)
         ctk.CTkButton(right_frame, text="Finish").pack(padx=50, pady=5)
 
@@ -271,9 +287,16 @@ class MainApp(ctk.CTk):
         entry.grid(row=row, column=2, padx=3, pady=2)
         self.create_step_buttons(parent, entry, row=row)
 
+        entry.grid(row=row, column=2, padx=3, pady=2)
+        self.create_step_buttons(parent, entry, row=row)
+
     # ------------------ Step Adjustment Buttons ------------------ #
     def create_step_buttons(self, parent, entry_widget, step=1, row=0):
         btn_frame = ctk.CTkFrame(parent)
+        btn_frame.grid(row=row, column=1, padx=5, pady=2)
+
+        ctk.CTkButton(btn_frame, text="▲", width=30, command=lambda: self.adjust_value(entry_widget, step)).grid(row=0, column=0, padx=2)
+        ctk.CTkButton(btn_frame, text="▼", width=30, command=lambda: self.adjust_value(entry_widget, -step)).grid(row=0, column=1, padx=2)
         btn_frame.grid(row=row, column=1, padx=5, pady=2)
 
         ctk.CTkButton(btn_frame, text="▲", width=30, command=lambda: self.adjust_value(entry_widget, step)).grid(row=0, column=0, padx=2)
@@ -287,15 +310,18 @@ class MainApp(ctk.CTk):
             entry.delete(0, ctk.END)
             entry.insert(0, "0")
 
+
     # ------------------ Graphs ------------------ #
     def create_graphs(self, parent):
         # Placeholder for X-Y Graph
         xy_graph = ctk.CTkFrame(parent, width=300, height=300, fg_color="blue")
         xy_graph.pack(padx=5, pady=5)
 
+
         # Placeholder for Z-Axis Graph
         z_graph = ctk.CTkFrame(parent, width=300, height=50, fg_color="blue")
         z_graph.pack(padx=5, pady=5)
+
 
         # Red Position Indicators (Mock)
         ctk.CTkLabel(xy_graph, text = "       ", fg_color="red").place(relx=self.current_x_pos*0.001, 
