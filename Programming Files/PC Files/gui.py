@@ -109,18 +109,32 @@ class MainApp(ctk.CTk):
         #Space between the edge and the frame
         top_frame.pack(side=ctk.TOP, fill='x', padx=10, pady=5)
  
+<<<<<<< HEAD
         self.status_label = ctk.CTkLabel(top_frame, text=f"Module Status: {self.module_status}")
+=======
+        self.status_label = ctk.CTkLabel(top_frame, text=f"Module Status: {self.status}")
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
         self.status_label.pack(side=ctk.LEFT, padx=10)
 
         self.mode_label = ctk.CTkLabel(top_frame, text=f"Mode: {self.mode}")
         self.mode_label.pack(side=ctk.LEFT, padx=30)
+<<<<<<< HEAD
 
         self.sample_label = ctk.CTkLabel(top_frame, text=f"Current Sample: {self.sample_data['sample_id']}")
         self.sample_label.pack(side=ctk.LEFT, padx=80)
 
         self.alarm_label = ctk.CTkLabel(top_frame, text=f"Alarms: {self.alarm_status}")
         self.alarm_label.pack(side=ctk.RIGHT, padx=10)
+=======
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
 
+        self.sample_label = ctk.CTkLabel(top_frame, text=f"Current Sample: {self.sample_data["sample_id"]}")
+        self.sample_label.pack(side=ctk.LEFT, padx=80)
+
+        self.alarm_label = ctk.CTkLabel(top_frame, text=f"Alarms: {self.alarm_status}")
+        self.alarm_label.pack(side=ctk.RIGHT, padx=10)
+ 
+        
     # ------------------ Bottom Frame (Tabs) ------------------ #
     def create_bottom_frame(self):
         bottom_frame = ctk.CTkFrame(self)
@@ -134,6 +148,11 @@ class MainApp(ctk.CTk):
         self.date_time_label = ctk.CTkLabel(bottom_frame, text="", font = ("Arial", 14))
         self.date_time_label.pack(side=ctk.RIGHT, padx=5)
         self.update_time()
+<<<<<<< HEAD
+=======
+
+        
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
 
     # ------------------ Tab Navigation ------------------ #
     def switch_tab(self, tab_name):
@@ -186,7 +205,11 @@ class MainApp(ctk.CTk):
 
     # ------------------ Image Placeholder ------------------ #
     def display_placeholder_image(self, frame):
+<<<<<<< HEAD
         img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures dog.jpg")  # Replace with your image path
+=======
+        img = Image.open("C:/Users/a4iri/Desktop/Capstone/430 Main project assy.PNG")  # Replace with your image path
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
         img = img.resize((2169, 1651), Image.LANCZOS)
         tilt_img = img.rotate(-1)
 
@@ -199,10 +222,20 @@ class MainApp(ctk.CTk):
 
         # Center the image within the frame using place() method
         img_label.place(relx=0.5, rely=0.5, anchor="center")  # This centers the image in the frame
+<<<<<<< HEAD
+=======
+
+
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
 
 
 # ------------------ Sample Parameter Dialog ------------------ #
     def open_sample_dialog(self):
+<<<<<<< HEAD
+=======
+        """Displays sample dialog and switches layout based on user choice."""
+
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
         #Window setup
         sample_window = ctk.CTkToplevel(self)
         sample_window.title("Enter Sample Parameters")
@@ -247,6 +280,10 @@ class MainApp(ctk.CTk):
 
         #Cancel button, closes window
         ctk.CTkButton(sample_window, text="Cancel", command=sample_window.destroy, width = 80).grid(row = 9, column = 3,columnspan = 2, padx=5, pady=5)
+<<<<<<< HEAD
+=======
+
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
 
     # ------------------ Motion Tab ------------------ #
     def display_motion_tab(self):
@@ -259,9 +296,15 @@ class MainApp(ctk.CTk):
         ctk.CTkButton(left_frame, text="Go To", font=("Arial", 20)).grid(row=0, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Position Controls
+<<<<<<< HEAD
         self.create_position_control(left_frame, "X", self.x_pos, row=1)
         self.create_position_control(left_frame, "Y", self.y_pos, row=2)
         self.create_position_control(left_frame, "Z", self.z_pos, row=3)
+=======
+        self.create_position_control(left_frame, "X", self.current_pos_x, row=1)
+        self.create_position_control(left_frame, "Y", self.current_pos_y, row=2)
+        self.create_position_control(left_frame, "Z", self.current_pos_z, row=3)
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
 
         # Speed Control
         ctk.CTkLabel(left_frame, text="Speed", font=("Arial", 18)).grid(row=4, column=0, padx=5, pady=30, sticky='w')
@@ -332,19 +375,33 @@ class MainApp(ctk.CTk):
 
         # Red Position Indicator (Mock) for X-Y Graph
         ctk.CTkLabel(xy_graph, text="       ", fg_color="red").place(
+<<<<<<< HEAD
             relx=self.x_pos * 0.001, rely=self.y_pos * 0.001, anchor='center')
 
         # Red Position Indicator (Mock) for Z-Axis Graph (Now aligned vertically)
         ctk.CTkLabel(z_graph, text="           ", fg_color="red").place(
             relx=0.5, rely=1 - (self.z_pos * 0.001), anchor='center')  # Flipped to align vertically
+=======
+            relx=self.current_pos_x * 0.001, rely=self.current_pos_y * 0.001, anchor='center')
+
+        # Red Position Indicator (Mock) for Z-Axis Graph (Now aligned vertically)
+        ctk.CTkLabel(z_graph, text="           ", fg_color="red").place(
+            relx=0.5, rely=1 - (self.current_pos_z * 0.001), anchor='center')  # Flipped to align vertically
+
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
 
     # ------------------ Time Updater ------------------ #
     def update_time(self):
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now().strftime("%Y-%m-%d         %H:%M:%S")
         self.date_time_label.configure(text=now)
         self.after(1000, self.update_time)
 
+<<<<<<< HEAD
       # ------------------ Image Tab ------------------ #
+=======
+    
+    # ------------------ Image Tab ------------------ #
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
     def display_image_tab(self):
         """Displays the Image tab layout with entry boxes on the left and image display on the right."""
 
@@ -580,6 +637,36 @@ class MainApp(ctk.CTk):
 
             # Maintain aspect ratio
             aspect_ratio = original_img.width / original_img.height
+<<<<<<< HEAD
+=======
+
+            # Calculate new dimensions, but scale the image down to fit the window
+            new_width = window_width - 20  # Account for padding
+            new_height = window_height - 20
+
+            if new_width / aspect_ratio <= new_height:
+                new_height = int(new_width / aspect_ratio)
+            else:
+                new_width = int(new_height * aspect_ratio)
+
+            # Resize the image to the calculated size
+            resized_img = original_img.resize((new_width, new_height), Image.LANCZOS)
+
+            # Update the image displayed in the window
+            self.img_ctk = ImageTk.PhotoImage(resized_img)
+            self.img_display.configure(image=self.img_ctk)
+
+            # Schedule the next resize check after 100ms
+            expanded_window.after(50, resize_image_periodically)
+
+        # Start the periodic resizing check
+        resize_image_periodically()
+
+        # Ensure the layout expands correctly
+        expanded_window.grid_rowconfigure(0, weight=1)
+        expanded_window.grid_rowconfigure(1, weight=0)  # Keep the back button at the bottom
+        expanded_window.grid_columnconfigure(0, weight=1)
+>>>>>>> ce1c5a6e28c8cf1c073a4993418e12ff31483731
 
             # Calculate new dimensions, but scale the image down to fit the window
             new_width = window_width - 20  # Account for padding
