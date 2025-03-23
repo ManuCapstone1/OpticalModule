@@ -324,8 +324,10 @@ class OpticalModule:
         if self.cam.calculate_focus_score() < 1:
             print("Sample not detected or not in focus")
             return
-        if not self.isHomed:
-            self.home_all
+        with self.homeLock:
+            isHomed = self.isHomed
+        if not isHomed:
+            self.home_all()
         with self.imageCountLock:   
             self.totalImages = numImages
         # Create list of captured images
@@ -364,8 +366,10 @@ class OpticalModule:
         if self.cam.calculate_focus_score() < 1:
             print("Sample not detected or not in focus")
             return
-        if not self.isHomed:
-            self.home_all
+        with self.homeLock:
+            isHomed = self.isHomed
+        if not isHomed:
+            self.home_all()
 
         capturedImages = []
 
@@ -402,7 +406,10 @@ class OpticalModule:
         if callable(target):
             targetThread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
             targetThread.start()
-            while not self.Stop and targetThread.is_alive():
+            while True:
+                with self.stopLock:
+                    if self.Stop or not targetThread.is_alive():
+                        break
                 time.sleep(0.01)
             return
         else:

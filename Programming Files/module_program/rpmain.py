@@ -95,14 +95,15 @@ def handle_request():
                 # Execute homing routine
 
             if message["command"] is "exe_update_image" and not thread.is_alive():
-                status_data["module_status"] = "Homing All" 
+                status_data["module_status"] = "Updating Image" 
                 thread = threading.Thread(target=shabam.update_image)
                 # Execute update image
 
             if message["command"] is "exe_stop":
                 status_data["module_status"] = "Stopping..."
                 
-                shabam.Stop = True
+                with shabam.stopLock:
+                    shabam.Stop = True
                 with shabam.homeLock:
                     shabam.isHomed = False
                 # Execute stopping routine
