@@ -259,9 +259,9 @@ class MainApp(ctk.CTk):
         ctk.CTkButton(left_frame, text="Go To", font=("Arial", 20)).grid(row=0, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Position Controls
-        self.create_position_control(left_frame, "X", self.current_pos_x, row=1)
-        self.create_position_control(left_frame, "Y", self.current_pos_y, row=2)
-        self.create_position_control(left_frame, "Z", self.current_pos_z, row=3)
+        self.create_position_control(left_frame, "X", self.x_pos, row=1)
+        self.create_position_control(left_frame, "Y", self.y_pos, row=2)
+        self.create_position_control(left_frame, "Z", self.z_pos, row=3)
 
         # Speed Control
         ctk.CTkLabel(left_frame, text="Speed", font=("Arial", 18)).grid(row=4, column=0, padx=5, pady=30, sticky='w')
@@ -332,11 +332,11 @@ class MainApp(ctk.CTk):
 
         # Red Position Indicator (Mock) for X-Y Graph
         ctk.CTkLabel(xy_graph, text="       ", fg_color="red").place(
-            relx=self.current_pos_x * 0.001, rely=self.current_pos_y * 0.001, anchor='center')
+            relx=self.x_pos * 0.001, rely=self.y_pos * 0.001, anchor='center')
 
         # Red Position Indicator (Mock) for Z-Axis Graph (Now aligned vertically)
         ctk.CTkLabel(z_graph, text="           ", fg_color="red").place(
-            relx=0.5, rely=1 - (self.current_pos_z * 0.001), anchor='center')  # Flipped to align vertically
+            relx=0.5, rely=1 - (self.z_pos * 0.001), anchor='center')  # Flipped to align vertically
 
     # ------------------ Time Updater ------------------ #
     def update_time(self):
