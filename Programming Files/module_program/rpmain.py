@@ -36,7 +36,7 @@ status_data = {
     "image_count": 0,
     "current_image" : shabam.cam.currImage,
     "image_metadata" : shabam.currImageMetadata,
-    "file_location": "Unknown"
+    "motors_enabled" : shabam.motorsEnabled
 }
 
 # Send status updates periodically with JSON file
@@ -53,7 +53,7 @@ def update_status_data():
         status_data["x_pos"] = shabam.get_curr_pos_mm('x')
         status_data["y_pos"] = shabam.get_curr_pos_mm('y')
         status_data["z_pos"] = shabam.get_curr_pos_mm('z')
-    with shabam.cameraLock:
+    with shabam.cam.settingsLock:
         status_data["exposure_time"] = shabam.cam.currExposureTime,
         status_data["analog_gain"] = shabam.cam.currAnalogGain,
         status_data["contrast"] = shabam.cam.currContrast,
@@ -61,9 +61,9 @@ def update_status_data():
     with shabam.imageCountLock:
         status_data["image_count"] = shabam.cam.imageCount
         status_data["total_image"] = shabam.totalImages
-
-    status_data["current_image"] = shabam.cam.currImage
-    status_data["image_metadata"] = shabam.currImageMetadata
+    with shabam.cam.imageLock:
+        status_data["current_image"] = shabam.cam.currImage
+        status_data["image_metadata"] = shabam.currImageMetadata
 
 
 # Handler for receiving data from the PC

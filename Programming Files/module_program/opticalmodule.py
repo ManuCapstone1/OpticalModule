@@ -27,6 +27,7 @@ class OpticalModule:
         # CNC Shield Arduino pins
         self.enPin = self.board.get_pin('d:8:o') 
         self.enPin.write(0)
+        self.motorsEnabled = True
         self.motorA = StepperMotor(2, 5, self.board)
         self.motorB = StepperMotor(3, 6, self.board)
         self.motorZ = StepperMotor(4, 7, self.board)
@@ -45,11 +46,11 @@ class OpticalModule:
         self.currSample = None
 
         # Misc variables
-        self.imageCounter = 0
         self.totalImages = 0
         self.currImageMetadata = {
             "image_name" : "None",
             "sample_id" : "None",
+            "timestamp" : time.strftime("%Y%m%d_%H%M%S"),  # Format: YYYYMMDD_HHMMSS
             "sample_layer" : 0,
             "image_number" : 0,
             "image_x_pos" : 0,
@@ -70,17 +71,22 @@ class OpticalModule:
         self.imageCountLock = threading.Lock()
         self.homeLock = threading.Lock()
         self.stopLock = threading.Lock()
+        self.motorStateLock = threading.Lock()
 
     def add_sample(self, sampleID, sampleHeight, mmPerLayer):
         self.currSample = Sample(sampleID, sampleHeight, mmPerLayer)
 
     def disable_motors(self):
         self.enPin.write(1)
+        with self.motorStateLock:
+            self.motorsEnabled = False
         with self.homeLock:
             self.isHomed = False
 
     def enable_motors(self):
         self.enPin.write(0)
+        with self.motorStateLock:
+            self.motorsEnabled = True
 
     def _move_ab(self, deltaA: int, deltaB: int):
         steps = abs(deltaA)
@@ -153,14 +159,13 @@ class OpticalModule:
             self.move_z(z-self.currZ)
 
     def get_curr_pos_mm(self, axis):
-        with self.positionLock:
-            if axis == "x":
-                return self.currX*STEPDISTXY
-            elif axis == "y":
-                return self.currY*STEPDISTXY
-            elif axis == "z":
-                return self.currZ*STEPDISTZ
-            else: return 0
+        if axis == "x":
+            return self.currX*STEPDISTXY
+        elif axis == "y":
+            return self.currY*STEPDISTXY
+        elif axis == "z":
+            return self.currZ*STEPDISTZ
+        else: return 0
 
     def home_xy(self):
         print("Y")
@@ -297,6 +302,7 @@ class OpticalModule:
     def update_image_metadata(self):
         self.currImageMetadata["image_name"] = self.cam.currImageName
         self.currImageMetadata["sample_id"] = self.currSample.sampleID
+        self.currImageMetadata["timestamp"] = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
         self.currImageMetadata["sample_layer"] = self.currSample.currLayer
         self.currImageMetadata["image_number"] = self.cam.imageCount
         self.currImageMetadata["image_x_pos"] = self.get_curr_pos_mm('x')
@@ -348,6 +354,7 @@ class OpticalModule:
             self.update_image_metadata()
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
         self.currSample.currLayer = self.currSample.currLayer + 1
+        self.home_xy()
         return capturedImages
     
     def scanning_images(self, step_size_x, step_size_y, saveImages: bool):
@@ -378,16 +385,14 @@ class OpticalModule:
                 self.go_to(x=x, y=y)
                 time.sleep(0.5)  # Allow system to stabilize
                 with self.imageCountLock:
-                    self.cam.imageCount = self.cam.imageCount
+                    self.cam.imageCount = self.cam.imageCount + 1
                 if saveImages:
                     imageArr = self.cam.save_image(self.saveDir, self.currSample)
                 else:    
                     imageArr = self.cam.update_curr_image(self.currSample)
-                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
-                
-
-        print("Image capturing complete.")
-
+                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))              
+        self.currSample.currLayer = self.currSample.currLayer + 1
+        self.home_xy()
         return capturedImages
 
     
@@ -447,7 +452,7 @@ class Camera:
         # Create Camera
         self.picam = Picamera2(0)
         
-        # Create variables for brightness and contrast
+        # Create variables for camera settings
         self.currExposureTime = 10000       # Example exposure time in microseconds
         self.currAnalogGain = 1.0           # Default analogue gain (1.0 = no gain)
         self.currContrast = 1.0             # Default contrast (1.0 is neutral)
@@ -464,6 +469,11 @@ class Camera:
         self.currImageName = "None"
         self.imageCount = 0
 
+        # Thread locking
+        self.settingsLock = threading.Lock()
+        self.imageLock = threading.Lock()
+
+
     def update_settings(self, exposureTime=None, analogGain=None, contrast=None, colorTemperature=None):
         """
         Update the camera settings. For any parameter that is None, the existing setting is maintained.
@@ -474,14 +484,15 @@ class Camera:
             contrast: New contrast setting.
             colorTemperature: New color temperature in Kelvin.
         """
-        if exposureTime is not None:
-            self.currExposureTime = exposureTime
-        if analogGain is not None:
-            self.currAnalogGain = analogGain
-        if contrast is not None:
-            self.currContrast = contrast
-        if colorTemperature is not None:
-            self.currColourTemp = colorTemperature
+        with self.settingsLock:
+            if exposureTime is not None:
+                self.currExposureTime = exposureTime
+            if analogGain is not None:
+                self.currAnalogGain = analogGain
+            if contrast is not None:
+                self.currContrast = contrast
+            if colorTemperature is not None:
+                self.currColourTemp = colorTemperature
 
         # Re-apply all settings after updates.
         self._apply_settings()
@@ -532,7 +543,8 @@ class Camera:
             self.picam.stop()
 
             if updateImage:
-                self.currImage = array
+                with self.imageLock:
+                    self.currImage = array
 
             return array
         
@@ -576,7 +588,8 @@ class Camera:
     def update_image_name(self, sample, imageCount=None):
         if imageCount is None: imageCount = self.imageCount
         imageName = f"{imageCount}_{sample.currLayer}_{sample.sampleID}"
-        self.currImageName = imageName
+        with self.imageLock:
+            self.currImageName = imageName
         return imageName
 
     def _convert_temperature_to_gains(self, kelvin):
@@ -647,7 +660,6 @@ class LimitSwitch:
             self.pin.mode = 1
             self.pin.write(1)
             self.pin.mode = 0
-        print(state)
         return state 
 
 class Sample:
