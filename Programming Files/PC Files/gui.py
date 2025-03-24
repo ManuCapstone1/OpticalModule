@@ -410,8 +410,8 @@ class MainApp(ctk.CTk):
 
         # Additional Controls
         ctk.CTkButton(left_frame, text="Disable Stepper Motors").grid(row=7, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
-        ctk.CTkButton(left_frame, text="Homing", fg_color="green").grid(row=8, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
-        ctk.CTkButton(left_frame, text="Calibration").grid(row=9, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
+        #ctk.CTkButton(left_frame, text="Homing", fg_color="green").grid(row=8, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
+        #ctk.CTkButton(left_frame, text="Calibration").grid(row=9, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
 
         # Graph Display
         self.create_graphs(right_frame)
@@ -481,7 +481,7 @@ class MainApp(ctk.CTk):
         self.date_time_label.configure(text=now)
         self.after(1000, self.update_time)
 
-      # ------------------ Image Tab ------------------ #
+        # ------------------ Image Tab ------------------ #
     def display_image_tab(self):
         """Displays the Image tab layout with entry boxes on the left and image display on the right."""
 
@@ -489,14 +489,20 @@ class MainApp(ctk.CTk):
         for widget in self.content_frame.winfo_children():
             widget.destroy()
 
-        # Setup left and right frames
+        # Setup left, right, and main frames
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
         right_frame = ctk.CTkFrame(self.content_frame)
         right_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
 
+        main_frame = ctk.CTkFrame(self.content_frame)
+        main_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
+
         # Left Frame: Entry Boxes and Buttons
+        left_label = ctk.CTkLabel(left_frame, text="Enter in desired parameters:", font=("Arial", 14, "bold"))
+        left_label.pack(pady=10, anchor='w')
+
         # Exposure Time (microsec)
         exposure_time_label = ctk.CTkLabel(left_frame, text="Exposure Time (microsec):")
         exposure_time_label.pack(pady=5, anchor='w')
@@ -522,18 +528,78 @@ class MainApp(ctk.CTk):
         self.colour_temp_entry.pack(pady=5, fill='x')
 
         # Buttons below entry boxes
-        button_frame = ctk.CTkFrame(left_frame)
+        button_frame = ctk.CTkFrame(right_frame)
         button_frame.pack(pady=10, fill='x')
 
-        update_image_btn = ctk.CTkButton(button_frame, text="Update Image", font=("Arial", 16), command=self.update_image)
-        update_image_btn.pack(side="left", padx=10, fill='x', expand=True)
+        send_data_btn = ctk.CTkButton(left_frame, text="SEND DATA", font=("Arial", 16), 
+                                      command=lambda: self.send_camera_data(self.exposure_time_entry, self.analog_gain_entry, self.contrast_entry, self.colour_temp_entry))
+        send_data_btn.pack(pady=10)
 
-        save_image_btn = ctk.CTkButton(button_frame, text="Save Image", font=("Arial", 16), command=self.save_image)
-        save_image_btn.pack(side="right", padx=10, fill='x', expand=True)
-
-        # Right Frame: Image Display
         image_label = ctk.CTkLabel(right_frame, text="Image will appear here", fg_color="gray")
         image_label.pack(expand=True, fill='both')
+
+        #INCOMPLETE
+        update_image_btn = ctk.CTkButton(button_frame, text="Update Image", font=("Arial", 16))
+        update_image_btn.pack(side="left", padx=10, fill='x', expand=True)
+
+        #INCOMPLETE
+        save_image_btn = ctk.CTkButton(button_frame, text="Save Image", font=("Arial", 16))
+        save_image_btn.pack(side="right", padx=10, fill='x', expand=True)
+
+        # Main Frame: Display Raspberry Pi Parameters
+        main_label = ctk.CTkLabel(main_frame, text="Current Camera Parameters:", font=("Arial", 14, "bold"))
+        main_label.pack(pady=10, anchor='w')
+
+        #Data from Raspberry Pi
+        #Exposure
+        exposure_time_label_2 = ctk.CTkLabel(main_frame, text="Exposure Time (microsec):")
+        exposure_time_label_2.pack(pady=5, anchor='w')
+        self.rpi_exposure_var = ctk.StringVar(value="--")  # Dynamic variable
+        self.rpi_exposure_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_exposure_var)
+        self.rpi_exposure_label.pack(pady=5, fill='x')
+
+        # Analog Gain
+        analog_gain_label_2 = ctk.CTkLabel(main_frame, text="Analog Gain (1=no gain):")
+        analog_gain_label_2.pack(pady=5, anchor='w')
+        self.rpi_analog_gain_var = ctk.StringVar(value="--")
+        self.rpi_analog_gain_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_analog_gain_var)
+        self.rpi_analog_gain_label.pack(pady=5, fill='x')
+
+        # Contrast
+        contrast_label_2 = ctk.CTkLabel(main_frame, text="Contrast (0-32, 1=no value):")
+        contrast_label_2.pack(pady=5, anchor='w')
+        self.rpi_contrast_var = ctk.StringVar(value="--")
+        self.rpi_contrast_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_contrast_var)
+        self.rpi_contrast_label.pack(pady=5, fill='x')
+
+        # Colour Temperature
+        colour_temp_label_2 = ctk.CTkLabel(main_frame, text="Colour Temperature (K):")
+        colour_temp_label_2.pack(pady=5, anchor='w')
+        self.rpi_colour_temp_var = ctk.StringVar(value="--")
+        self.rpi_colour_temp_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_colour_temp_var)
+        self.rpi_colour_temp_label.pack(pady=5, fill='x')
+
+        # Last Refreshed Label
+        self.last_refreshed_var = ctk.StringVar(value="Last Updated: --")
+        self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
+        self.last_refreshed_label.pack(pady=5)
+
+        # Refresh Button
+        refresh_button = ctk.CTkButton(main_frame, text="Refresh Data", command=self.refresh_camera_data)
+        refresh_button.pack(pady=10)
+
+    # Refresh camera data 
+    def refresh_camera_data(self):
+        """Fetch new data and update labels dynamically"""
+        self.rpi_exposure_var.set(str(self.exposure_time))
+        self.rpi_analog_gain_var.set(str(self.analog_gain))
+        self.rpi_contrast_var.set(str(self.contrast))
+        self.rpi_colour_temp_var.set(str(self.colour_temp))
+        
+        # Update last refreshed time
+        from datetime import datetime
+        self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+
 
     # ------------------ Displaying Scanning Layout ------------------ #
     def display_scanning_layout(self, images_x, images_y, frame):
@@ -919,6 +985,25 @@ class MainApp(ctk.CTk):
             self.send_json_error_check(self.scanning_data, success_message)
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
+    
+    #Change camera configuration from Image tab
+    def send_camera_data(self, exposure_time, analog_gain, contrast, colour_temp):
+        if self.module_status == "Idle":
+            json_data = {
+                "command" : "exe_camera_settings",
+                "mode" : self.mode,
+                "module_status" : self.module_status,
+                "exposure_time" : exposure_time,
+                "analog_gain" : analog_gain,
+                "contrast" : contrast,
+                "colour_temp" : colour_temp
+            }
+
+            #Send scanning data
+            success_message = "Updated camera settings data sent."
+            self.send_json_error_check(json_data, success_message)
+        else:
+            messagebox.showerror("Status not in idle, wait before modifying camera settings.")
 
     # =============================== Image Stitching ==========================================#
     def set_stitcher(self, stitcher) :
@@ -926,10 +1011,30 @@ class MainApp(ctk.CTk):
 
 
 #To do
-# populate labels with data (e.g. temperature, speed)
-# Implement button names and addButton function
-# Populate images as they come in
+
+#Details
+#instructions on how to use
+#Temperature
+#File directory
+
+#Add button
+#configure buttons, disable
+
+#Random sampling
+#Populate images
+#Stop button
+
+#Scanning images
+#Populating images
+#Finish button
+#Stop button
+
+#Motion
+#Go to function
 
 #Image tab
+#Add in default settings
+#Configure save image
+#Configure update image
 
 #Image stitching: calling it, threading, transferring files
