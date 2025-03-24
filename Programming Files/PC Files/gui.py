@@ -725,26 +725,12 @@ class MainApp(ctk.CTk):
 
         #stop button sents stop command and switches to main tab
         stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
-                                    command=lambda:[self.send_simple_command("exe_stop", False), self.display_main_tab])
+                                    command=lambda:[self.send_simple_command("exe_stop", False), self.display_main_tab()])
         stop_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
 
         #Finish button switches to main tab
         finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
         finish_button.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
-
-        # Call the update function every 5 seconds to check for changes in the folder
-        self.master.after(5000, self.check_for_new_images)
-
-    def check_for_new_images(self):
-        """Check for new images in the folder and update the layout."""
-        images = self.load_images_from_folder(self.image_folder)
-        available_images = len(images)
-
-        if available_images != len(self.image_labels):
-            self.display_random_sampling_layout()  # Re-display layout with updated images
-
-        # Schedule the next check in 5 seconds
-        self.master.after(5000, self.check_for_new_images)
 
     def expand_image(self, img_path):
         """Opens a new window displaying the image and resizes it based on the window size."""
