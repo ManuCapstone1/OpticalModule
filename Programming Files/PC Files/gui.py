@@ -180,7 +180,8 @@ class MainApp(ctk.CTk):
         sampling_btn.pack(pady=5, fill='x')
         scanning_btn.pack(pady=5, fill='x')
 
-        calibration_btn = ctk.CTkButton(left_frame, width = 200, height = 50, text="Calibration", font=("Arial", 20))
+        calibration_btn = ctk.CTkButton(left_frame, width = 200, height = 50, text="Calibration", font=("Arial", 20),
+                                        command=lambda :self.send_simple_command("exe_calibration", True))
         calibration_btn.pack(pady=5, fill='x')
 
         home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white",
@@ -376,13 +377,13 @@ class MainApp(ctk.CTk):
 
         # "Homing All" button
         homing_all_button = ctk.CTkButton(homing_window, text="Homing All", 
-                                        command=lambda: [self.send_simple_data("exe_homing_xy"),homing_window.destroy()], 
+                                        command=lambda: [self.send_simple_command("exe_homing_xy", True),homing_window.destroy()], 
                                         width=150)
         homing_all_button.pack(pady=5)
 
         # "Homing XY" button
         homing_xy_button = ctk.CTkButton(homing_window, text="Homing XY", 
-                                        command=lambda: [self.send_simple_data("exe_homing_all"),homing_window.destroy()], 
+                                        command=lambda: [self.send_simple_command("exe_homing_all", True),homing_window.destroy()], 
                                         width=150)
         homing_xy_button.pack(pady=5)
 
@@ -935,15 +936,18 @@ class MainApp(ctk.CTk):
 
     #Send JSON data to raspberry pi to request to run a method
     #Use for simple requests: Homing_xy, update_image etc.
-    def send_simple_command(self, command):
+    def send_simple_command(self, command, checkIdle):
         json_data = {
             "command" : command,
             "mode" : self.mode,
             "module_status" : self.module_status
         }
 
-        success_message = "JSON data sent."
-        self.send_json_error_check(json_data, success_message)
+        if self.module_status != "Idle" and checkIdle :
+            messagebox.showerror("Status not in idle, wait before sending request.")
+        else:
+            success_message = "JSON data sent."
+            self.send_json_error_check(json_data, success_message)
 
     #Send random samping data to raspberry pi
     #Called when ok is pressed in random sampling pop-up window
