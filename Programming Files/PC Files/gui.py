@@ -207,7 +207,7 @@ class MainApp(ctk.CTk):
     def open_sampling_dialog(self, frame):
         # Window setup
         image_sample_window = ctk.CTkToplevel(self)
-        image_sample_window.title("Enter Random Sampling Parameters")
+        image_sample_window.title("Enter Sampling Parameters")
         image_sample_window.geometry("350x135")  # Set initial size
         image_sample_window.minsize(350, 135)   # Limit the minimum size
         image_sample_window.maxsize(350, 135)   # Limit the maximum size
@@ -218,19 +218,14 @@ class MainApp(ctk.CTk):
         label = ctk.CTkLabel(image_sample_window, text="Enter in the number of images taken for random sampling:")
         label.grid(row=0, column=0, columnspan=4, padx=5, pady=10, sticky="ew")
 
-        # Set wraplength for the label to wrap text
-        #label.configure(wraplength=300)  # Wrap text at 300px width
-
         # Total images input field
         ctk.CTkLabel(image_sample_window, text="Total Images:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
         total_images = ctk.CTkEntry(image_sample_window, placeholder_text="6")
         total_images.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
-        right_frame = ctk.CTkFrame(self.content_frame, width=400, height=400)
-        right_frame.pack(side=ctk.RIGHT, expand=True, fill='both')
-
         # OK button (closes the window and processes input)
-        ok_button = ctk.CTkButton(image_sample_window, text="OK", command=lambda: [image_sample_window.destroy(), self.display_random_sampling_layout(total_images, frame)], width=80)
+        ok_button = ctk.CTkButton(image_sample_window, text="OK", 
+                                  command=lambda: [image_sample_window.destroy(), self.display_random_sampling_layout(total_images, frame), self.send_sampling_data(total_images)], width=80)
         ok_button.grid(row=2, column=0, padx=5, pady=10, sticky="ew")
 
         # Cancel button (closes the window)
@@ -240,6 +235,21 @@ class MainApp(ctk.CTk):
         # Ensure the buttons are always at the bottom of the window
         image_sample_window.grid_rowconfigure(3, weight=1)  # Add this line to allow the window to expand as needed
         image_sample_window.grid_rowconfigure(2, weight=0)  # Ensure row 2 (buttons) stays at the bottom
+
+        # Simple validation function
+        def validate_input(*args):
+            try:
+                value = int(total_images.get())
+                # Check if value is between 1 and 8
+                if 1 <= value <= 8:
+                    ok_button.configure(state="normal")  # Enable OK button
+                else:
+                    ok_button.configure(state="disabled")  # Disable OK button
+            except ValueError:
+                ok_button.configure(state="disabled")  # Disable OK button if input is not a number
+
+        # Trace the input changes and call validate_input
+        total_images.bind("<KeyRelease>", validate_input)
 
 # ------------------ Sample Parameter Dialog ------------------ #
     def open_sample_dialog(self):
