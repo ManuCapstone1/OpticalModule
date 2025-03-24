@@ -169,9 +169,12 @@ class MainApp(ctk.CTk):
         self.display_placeholder_image(right_frame)
 
         # Buttons on Left Side
-        create_sample_btn = ctk.CTkButton(left_frame, text = "Create a new sample", font = ("Arial", 20), width = 200, height = 100, fg_color = "green", command = lambda: self.open_sample_dialog())
-        sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_random_sampling_layout(8, right_frame))
-        scanning_btn = ctk.CTkButton(left_frame, text="Scanning", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_scanning_layout(7,6,right_frame))
+        create_sample_btn = ctk.CTkButton(left_frame, text = "Create a new sample", font = ("Arial", 20), 
+                                          width = 200, height = 100, fg_color = "green", command = lambda: self.open_sample_dialog())
+        sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.open_sampling_dialog(right_frame))
+        #sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_random_sampling_layout(8, right_frame))
+        scanning_btn = ctk.CTkButton(left_frame, text="Scanning", font=("Arial", 20), 
+                                        width = 200, height = 100, command = lambda: self.display_scanning_layout(7,6,right_frame))
 
         create_sample_btn.pack(pady=5, fill='x')
         sampling_btn.pack(pady=5, fill='x')
@@ -186,7 +189,7 @@ class MainApp(ctk.CTk):
 
     # ------------------ Image Placeholder ------------------ #
     def display_placeholder_image(self, frame):
-        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures dog.jpg")  # Replace with your image path
+        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures/dog.jpg")  # Replace with your image path
         img = img.resize((2169, 1651), Image.LANCZOS)
         tilt_img = img.rotate(-1)
 
@@ -200,6 +203,43 @@ class MainApp(ctk.CTk):
         # Center the image within the frame using place() method
         img_label.place(relx=0.5, rely=0.5, anchor="center")  # This centers the image in the frame
 
+#-----------------------Random Sampling Pop-up ---------------- #
+    def open_sampling_dialog(self, frame):
+        # Window setup
+        image_sample_window = ctk.CTkToplevel(self)
+        image_sample_window.title("Enter Random Sampling Parameters")
+        image_sample_window.geometry("350x135")  # Set initial size
+        image_sample_window.minsize(350, 135)   # Limit the minimum size
+        image_sample_window.maxsize(350, 135)   # Limit the maximum size
+
+        image_sample_window.grab_set()
+
+        # New prompt text
+        label = ctk.CTkLabel(image_sample_window, text="Enter in the number of images taken for random sampling:")
+        label.grid(row=0, column=0, columnspan=4, padx=5, pady=10, sticky="ew")
+
+        # Set wraplength for the label to wrap text
+        #label.configure(wraplength=300)  # Wrap text at 300px width
+
+        # Total images input field
+        ctk.CTkLabel(image_sample_window, text="Total Images:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        total_images = ctk.CTkEntry(image_sample_window, placeholder_text="6")
+        total_images.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        right_frame = ctk.CTkFrame(self.content_frame, width=400, height=400)
+        right_frame.pack(side=ctk.RIGHT, expand=True, fill='both')
+
+        # OK button (closes the window and processes input)
+        ok_button = ctk.CTkButton(image_sample_window, text="OK", command=lambda: [image_sample_window.destroy(), self.display_random_sampling_layout(total_images, frame)], width=80)
+        ok_button.grid(row=2, column=0, padx=5, pady=10, sticky="ew")
+
+        # Cancel button (closes the window)
+        cancel_button = ctk.CTkButton(image_sample_window, text="Cancel", command=image_sample_window.destroy, width=80)
+        cancel_button.grid(row=2, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
+
+        # Ensure the buttons are always at the bottom of the window
+        image_sample_window.grid_rowconfigure(3, weight=1)  # Add this line to allow the window to expand as needed
+        image_sample_window.grid_rowconfigure(2, weight=0)  # Ensure row 2 (buttons) stays at the bottom
 
 # ------------------ Sample Parameter Dialog ------------------ #
     def open_sample_dialog(self):
@@ -262,14 +302,6 @@ class MainApp(ctk.CTk):
         self.create_position_control(left_frame, "X", self.x_pos, row=1)
         self.create_position_control(left_frame, "Y", self.y_pos, row=2)
         self.create_position_control(left_frame, "Z", self.z_pos, row=3)
-
-        # Speed Control
-        ctk.CTkLabel(left_frame, text="Speed", font=("Arial", 18)).grid(row=4, column=0, padx=5, pady=30, sticky='w')
-        self.speed_entry = ctk.CTkEntry(left_frame, width=30)
-        self.speed_entry.insert(0, str(self.speed))
-        self.speed_entry.grid(row=4, column=2, padx=5, pady=30)
-
-        self.create_step_buttons(left_frame, self.speed_entry, step=1, row=4)
 
         # Additional Controls
         ctk.CTkButton(left_frame, text="Disable Stepper Motors").grid(row=7, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
@@ -409,7 +441,7 @@ class MainApp(ctk.CTk):
 
         self.scan_image_grid = []  # Store references to image labels
 
-        img = Image.open("C:/Users/a4iri/Desktop/Capstone/Test image.png")  # Replace with your image path
+        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures/dog.jpg")  # Replace with your image path
         img = img.resize((50, 50), Image.LANCZOS)
 
         # Create a CTkImage instance
@@ -648,8 +680,9 @@ class MainApp(ctk.CTk):
     #============================== Communcation ====================================#
     
     #Assign communication handler from main.py
-    def set_communication(self, comms):
+    def set_communication(self, comms, stop_event):
         self.comms = comms
+        self.stop_event = stop_event 
     
      #Send JSON file to raspberry pi, and handle errors
     def send_json_error_check(self, data, success_message):
@@ -715,7 +748,6 @@ class MainApp(ctk.CTk):
             #Update images
             return
 
-
     #Function sends sample_data to raspberry pi
     #This function is called in function store_sample_data when the ok button is pressed
     def send_sample_data(self, mount_type, sample_height, initial_height, sample_id):
@@ -732,10 +764,10 @@ class MainApp(ctk.CTk):
 
     #Send JSON data to raspberry pi to request to run a method
     #Use for simple requests: Homing_xy, update_image etc.
-    def send_simple_command(self, command, mode):
+    def send_simple_command(self, command):
         json_data = {
             "command" : command,
-            "mode" : mode,
+            "mode" : self.mode,
             "module_status" : self.module_status
         }
 
@@ -744,11 +776,11 @@ class MainApp(ctk.CTk):
 
     #Send random samping data to raspberry pi
     #Called when ok is pressed in random sampling pop-up window
-    def send_sampling_data(self, mode, num_images):
+    def send_sampling_data(self, num_images):
         if self.module_status == "Idle":
             #Store random sampling data
             self.sampling_data['command'] = "exe_sampling"
-            self.sampling_data['mode'] = mode
+            self.sampling_data['mode'] = self.mode
             self.sampling_data['module_status'] = self.module_status
             self.sampling_data['num_images'] = num_images
 
@@ -756,12 +788,13 @@ class MainApp(ctk.CTk):
             success_message = "Random sampling data sent."
             self.send_json_error_check(self.sampling_data, success_message)
 
+            self.sample_loaded = True
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
     
     #Send scanning data to raspberry pi
     #Called when ok is pressed in scanning sampling pop-up window
-    def send_scanning_data(self, mode, step_x, step_y):
+    def send_scanning_data(self, step_x, step_y):
         if self.module_status == "Idle":
 
             #Check step if valid entry
@@ -771,7 +804,7 @@ class MainApp(ctk.CTk):
 
             #Store scanning sampling data
             self.scanning_data['command'] = "exe_scanning"
-            self.scanning_data['mode'] = mode
+            self.scanning_data['mode'] = self.mode
             self.scanning_data['module_status'] = self.module_status
             self.scanning_data['step_x'] = step_x
             self.scanning_data['step_y'] = step_y

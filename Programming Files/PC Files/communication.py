@@ -38,16 +38,24 @@ class CommunicationHandler:
 
     #Purpose: Receive updates in json file from raspberry pi as suscriber every ~1 second
     #Parameters: gui.py
-    def receive_status_updates(self, gui):
+    def receive_status_updates(self, gui, stop_event):
         """Listen for status updates from the Raspberry Pi and update the GUI."""
-        while True:
+        while not stop_event.is_set():
             try:
                 # Receive the status update from Raspberry Pi
-                status_data = self.sub_socket.recv_json()
+                status_data = self.sub_socket.recv_json(flags=zmq.NOBLOCK)
                 print(f"Received status update: {status_data}")
 
                 # Update the GUI with received status data
                 gui.after(0, gui.update_status_data, status_data)
+            except zmq.Again:
+                time.sleep(0.1)  # Reduce CPU usage by waiting instead of busy looping
             except Exception as e:
                 print(f"Error receiving status update: {e}")
+                time.sleep(1)  # Avoid flooding errors
 
+        def close(self):
+            """Cleanup sockets when closing"""
+            self.req_socket.close()
+            self.sub_socket.close()
+            self.context.term()
