@@ -607,9 +607,10 @@ class MainApp(ctk.CTk):
         """Displays the Scanning layout with a large image grid."""
         for widget in frame.winfo_children():
             widget.destroy()
-    
+
+        # Create the scanning frame to hold the images
         scanning_frame = ctk.CTkFrame(frame)
-        scanning_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
+        scanning_frame.pack(side=ctk.TOP, expand=True, fill='both', padx=10, pady=10)
 
         self.scan_image_grid = []  # Store references to image labels
 
@@ -622,24 +623,24 @@ class MainApp(ctk.CTk):
         # Create dynamic grid based on `images_x` and `images_y`
         for row in range(images_y):
             for col in range(images_x):
-                img_placeholder = ctk.CTkLabel(scanning_frame, text="", image = img_ctk)
+                img_placeholder = ctk.CTkLabel(scanning_frame, text="", image=img_ctk)
                 img_placeholder.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
                 img_placeholder.bind("<Button-1>", lambda e, img=img_placeholder: self.expand_image(img))
                 self.scan_image_grid.append(img_placeholder)
 
-        # STOP and Finish buttons
-         # Ensure button frame always appears, even if no images are loaded
-        button_frame = ctk.CTkFrame(scanning_frame)
-        button_frame.grid(row=images_y, column=images_x/2, columnspan=images_x, pady=15, sticky='ew')
+        # Create a frame for the buttons to always be at the bottom
+        button_frame = ctk.CTkFrame(frame)
+        button_frame.pack(side=ctk.BOTTOM, fill='x', pady=10)
 
-        button_frame.grid_columnconfigure(0, weight=1)
-        button_frame.grid_columnconfigure(1, weight=1)
+        # Create and place the buttons inside the button frame
+        #stop will send stop command, and switch to main
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
+                                    command=lambda: [self.send_simple_command("exe_stop", False), self.display_main_tab])
+        stop_button.pack(side=ctk.LEFT, expand=True, padx=5, pady=5)
 
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red")
-        stop_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
-
+        #Finish will switch to main
         finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
-        finish_button.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
+        finish_button.pack(side=ctk.LEFT, expand=True, padx=5, pady=5)
 
     def load_images_from_folder(self, folder):
         """Load image file paths from the specified folder."""
@@ -657,7 +658,7 @@ class MainApp(ctk.CTk):
         sampling_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
         # Load available images
-        images = self.load_images_from_folder(self.testing_pictures)
+        images = self.load_images_from_folder(self.image_folder)
         available_images = len(images)
 
         # Adjust num_images to the available images count
@@ -719,7 +720,7 @@ class MainApp(ctk.CTk):
         button_frame.grid_columnconfigure(0, weight=1)
         button_frame.grid_columnconfigure(1, weight=1)
 
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red")
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", command=lambda:self.send_simple_command("exe_stop", False))
         stop_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
 
         finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
@@ -730,7 +731,7 @@ class MainApp(ctk.CTk):
 
     def check_for_new_images(self):
         """Check for new images in the folder and update the layout."""
-        images = self.load_images_from_folder(self.testing_pictures)
+        images = self.load_images_from_folder(self.image_folder)
         available_images = len(images)
 
         if available_images != len(self.image_labels):
@@ -993,7 +994,7 @@ class MainApp(ctk.CTk):
     #Change camera configuration from Image tab
     def send_camera_data(self, exposure_time, analog_gain, contrast, colour_temp):
         if self.module_status == "Idle":
-            json_data = {
+            camera_data = {
                 "command" : "exe_camera_settings",
                 "mode" : self.mode,
                 "module_status" : self.module_status,
@@ -1005,9 +1006,34 @@ class MainApp(ctk.CTk):
 
             #Send scanning data
             success_message = "Updated camera settings data sent."
-            self.send_json_error_check(json_data, success_message)
+            self.send_json_error_check(camera_data, success_message)
         else:
             messagebox.showerror("Status not in idle, wait before modifying camera settings.")
+    
+    #GoTO functionality
+    def send_goto_command(self, req_x, req_y, req_z) :
+        if self.module_status == "Idle":
+
+            #Check step if valid entry
+            if req_x <= 0 or req_y <= 0 or req_z <= 0:
+                messagebox.showerror("Invalid input", "Step values must be positive numbers") 
+                return   
+
+            #Store scanning sampling data
+            goto_data = {
+                "command" : "exe_goto",
+                "mode" : self.mode,
+                "module_status" : self.module_status,
+                "req_x_pos" : req_x,
+                "req_y_pos" : req_y,
+                "req_z_pos" : req_z
+            }
+
+            #Send scanning data
+            success_message = "Go to data sent."
+            self.send_json_error_check(goto_data, success_message)
+        else:
+            messagebox.showerror("Status not in idle, wait to request scanning mode.")
 
     # =============================== Image Stitching ==========================================#
     def set_stitcher(self, stitcher) :
