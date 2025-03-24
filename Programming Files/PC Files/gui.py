@@ -274,7 +274,9 @@ class MainApp(ctk.CTk):
 
         # OK button (closes the window and processes input)
         ok_button = ctk.CTkButton(image_sampling_window, text="OK", 
-                                  command=lambda: [image_sampling_window.destroy(), self.display_random_sampling_layout(total_images, frame), self.send_s_data(total_images)], width=80)
+                                command=lambda: [self.display_random_sampling_layout(int(total_images.get()), frame), 
+                                                self.send_sampling_data(int(total_images.get())),image_sampling_window.destroy()], 
+                                width=80, state="disabled")  # Initially disabled
         ok_button.grid(row=2, column=0, padx=5, pady=10, sticky="ew")
 
         # Cancel button (closes the window)
@@ -330,7 +332,7 @@ class MainApp(ctk.CTk):
         ok_button = ctk.CTkButton(image_scanning_window, text="OK", 
                                 command=lambda: [
                                     self.display_scanning_layout(int(step_x.get()), int(step_y.get()), frame),
-                                    self.send_scanning_data(step_x, step_y),
+                                    self.send_scanning_data(int(step_x.get()), int(step_y.get())),
                                     image_scanning_window.destroy()], 
                                 width=80, state="disabled")  # Initially disabled
         ok_button.grid(row=3, column=0, padx=5, pady=10, sticky="ew")
@@ -602,7 +604,7 @@ class MainApp(ctk.CTk):
         self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
 
 
-    # ------------------ Displaying Scanning Layout ------------------ #
+    # --------------------- Displaying Scanning Layout ------------------ #
     def display_scanning_layout(self, images_x, images_y, frame):
         """Displays the Scanning layout with a large image grid."""
         for widget in frame.winfo_children():
@@ -646,6 +648,7 @@ class MainApp(ctk.CTk):
         """Load image file paths from the specified folder."""
         return [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('png', 'jpg', 'jpeg', 'gif'))]
 
+    # --------------------- Displaying Random Sampling Layout ------------------ #
     def display_random_sampling_layout(self, num_images, frame):
         """Displays an evenly distributed grid layout for images, handling missing images gracefully."""
         
@@ -720,9 +723,12 @@ class MainApp(ctk.CTk):
         button_frame.grid_columnconfigure(0, weight=1)
         button_frame.grid_columnconfigure(1, weight=1)
 
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", command=lambda:self.send_simple_command("exe_stop", False))
+        #stop button sents stop command and switches to main tab
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
+                                    command=lambda:[self.send_simple_command("exe_stop", False), self.display_main_tab])
         stop_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
 
+        #Finish button switches to main tab
         finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
         finish_button.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
 
