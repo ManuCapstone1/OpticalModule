@@ -183,7 +183,8 @@ class MainApp(ctk.CTk):
         calibration_btn = ctk.CTkButton(left_frame, width = 200, height = 50, text="Calibration", font=("Arial", 20))
         calibration_btn.pack(pady=5, fill='x')
 
-        home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white")
+        home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white",
+                                 command = lambda: self.open_homing_dialog())        
         home_btn.pack(pady=5, fill='x')
     
 
@@ -202,54 +203,6 @@ class MainApp(ctk.CTk):
 
         # Center the image within the frame using place() method
         img_label.place(relx=0.5, rely=0.5, anchor="center")  # This centers the image in the frame
-
-#-----------------------Random Sampling Pop-up ---------------- #
-    def open_sampling_dialog(self, frame):
-        # Window setup
-        image_sample_window = ctk.CTkToplevel(self)
-        image_sample_window.title("Enter Sampling Parameters")
-        image_sample_window.geometry("350x135")  # Set initial size
-        image_sample_window.minsize(350, 135)   # Limit the minimum size
-        image_sample_window.maxsize(350, 135)   # Limit the maximum size
-
-        image_sample_window.grab_set()
-
-        # New prompt text
-        label = ctk.CTkLabel(image_sample_window, text="Enter in the number of images taken for random sampling:")
-        label.grid(row=0, column=0, columnspan=4, padx=5, pady=10, sticky="ew")
-
-        # Total images input field
-        ctk.CTkLabel(image_sample_window, text="Total Images:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
-        total_images = ctk.CTkEntry(image_sample_window, placeholder_text="6")
-        total_images.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-
-        # OK button (closes the window and processes input)
-        ok_button = ctk.CTkButton(image_sample_window, text="OK", 
-                                  command=lambda: [image_sample_window.destroy(), self.display_random_sampling_layout(total_images, frame), self.send_sampling_data(total_images)], width=80)
-        ok_button.grid(row=2, column=0, padx=5, pady=10, sticky="ew")
-
-        # Cancel button (closes the window)
-        cancel_button = ctk.CTkButton(image_sample_window, text="Cancel", command=image_sample_window.destroy, width=80)
-        cancel_button.grid(row=2, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
-
-        # Ensure the buttons are always at the bottom of the window
-        image_sample_window.grid_rowconfigure(3, weight=1)  # Add this line to allow the window to expand as needed
-        image_sample_window.grid_rowconfigure(2, weight=0)  # Ensure row 2 (buttons) stays at the bottom
-
-        # Simple validation function
-        def validate_input(*args):
-            try:
-                value = int(total_images.get())
-                # Check if value is between 1 and 8
-                if 1 <= value <= 8:
-                    ok_button.configure(state="normal")  # Enable OK button
-                else:
-                    ok_button.configure(state="disabled")  # Disable OK button
-            except ValueError:
-                ok_button.configure(state="disabled")  # Disable OK button if input is not a number
-
-        # Trace the input changes and call validate_input
-        total_images.bind("<KeyRelease>", validate_input)
 
 # ------------------ Sample Parameter Dialog ------------------ #
     def open_sample_dialog(self):
@@ -297,6 +250,148 @@ class MainApp(ctk.CTk):
 
         #Cancel button, closes window
         ctk.CTkButton(sample_window, text="Cancel", command=sample_window.destroy, width = 80).grid(row = 9, column = 3,columnspan = 2, padx=5, pady=5)
+
+#-----------------------Random Sampling Pop-up ---------------- #
+    def open_sampling_dialog(self, frame):
+        # Window setup
+        image_sampling_window = ctk.CTkToplevel(self)
+        image_sampling_window.title("Enter Sampling Parameters")
+        image_sampling_window.geometry("350x135")  # Set initial size
+        image_sampling_window.minsize(350, 135)   # Limit the minimum size
+        image_sampling_window.maxsize(350, 135)   # Limit the maximum size
+
+        image_sampling_window.grab_set()
+
+        # New prompt text
+        label = ctk.CTkLabel(image_sampling_window, text="Enter in the number of images taken for random sampling:")
+        label.grid(row=0, column=0, columnspan=4, padx=5, pady=10, sticky="ew")
+
+        # Total images input field
+        ctk.CTkLabel(image_sampling_window, text="Total Images:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        total_images = ctk.CTkEntry(image_sampling_window, placeholder_text="6")
+        total_images.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        # OK button (closes the window and processes input)
+        ok_button = ctk.CTkButton(image_sampling_window, text="OK", 
+                                  command=lambda: [image_sampling_window.destroy(), self.display_random_sampling_layout(total_images, frame), self.send_s_data(total_images)], width=80)
+        ok_button.grid(row=2, column=0, padx=5, pady=10, sticky="ew")
+
+        # Cancel button (closes the window)
+        cancel_button = ctk.CTkButton(image_sampling_window, text="Cancel", command=image_sampling_window.destroy, width=80)
+        cancel_button.grid(row=2, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
+
+        # Ensure the buttons are always at the bottom of the window
+        image_sampling_window.grid_rowconfigure(3, weight=1)  # Add this line to allow the window to expand as needed
+        image_sampling_window.grid_rowconfigure(2, weight=0)  # Ensure row 2 (buttons) stays at the bottom
+
+        # Simple validation function
+        def validate_input(*args):
+            try:
+                value = int(total_images.get())
+                # Check if value is between 1 and 8
+                if 1 <= value <= 8:
+                    ok_button.configure(state="normal")  # Enable OK button
+                else:
+                    ok_button.configure(state="disabled")  # Disable OK button
+            except ValueError:
+                ok_button.configure(state="disabled")  # Disable OK button if input is not a number
+
+        # Trace the input changes and call validate_input
+        total_images.bind("<KeyRelease>", validate_input)
+
+    # ------------------ Scanning Parameter Dialog ------------------ #
+    #---------------------- Scanning Parameter Dialog ---------------- #
+    def open_scanning_dialog(self, frame):
+        # Window setup
+        image_scanning_window = ctk.CTkToplevel(self)
+        image_scanning_window.title("Enter Scanning Parameters")
+        image_scanning_window.geometry("335x170")  # Set initial size
+        image_scanning_window.minsize(335, 170)   # Limit the minimum size
+        image_scanning_window.maxsize(335, 170)   # Limit the maximum size
+
+        image_scanning_window.grab_set()
+
+        # New prompt text
+        label = ctk.CTkLabel(image_scanning_window, text="Please enter the scanning bounding box:")
+        label.grid(row=0, column=0, columnspan=4, padx=5, pady=10, sticky="ew")
+
+        # Step x input field
+        ctk.CTkLabel(image_scanning_window, text="Step x:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        step_x = ctk.CTkEntry(image_scanning_window, placeholder_text="1")
+        step_x.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        # Step y input field
+        ctk.CTkLabel(image_scanning_window, text="Step y:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+        step_y = ctk.CTkEntry(image_scanning_window, placeholder_text="1")
+        step_y.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+
+        # OK button (closes the window, changes frame, sends scanning_data
+        ok_button = ctk.CTkButton(image_scanning_window, text="OK", 
+                                command=lambda: [
+                                    self.display_scanning_layout(int(step_x.get()), int(step_y.get()), frame),
+                                    self.send_scanning_data(step_x, step_y),
+                                    image_scanning_window.destroy()], 
+                                width=80, state="disabled")  # Initially disabled
+        ok_button.grid(row=3, column=0, padx=5, pady=10, sticky="ew")
+
+        # Cancel button (closes the window)
+        cancel_button = ctk.CTkButton(image_scanning_window, text="Cancel", command=image_scanning_window.destroy, width=80)
+        cancel_button.grid(row=3, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
+
+        # Ensure the buttons are always at the bottom of the window
+        image_scanning_window.grid_rowconfigure(4, weight=1)  # Add this line to allow the window to expand as needed
+        image_scanning_window.grid_rowconfigure(3, weight=0)  # Ensure row 3 (buttons) stays at the bottom
+
+        # Simple validation function for Step x and Step y
+        def validate_input(*args):
+            try:
+                value_x = float(step_x.get())
+                value_y = float(step_y.get())
+                # Check if both values are positive numbers
+                if value_x > 0 and value_y > 0:
+                    ok_button.configure(state="normal")  # Enable OK button
+                else:
+                    ok_button.configure(state="disabled")  # Disable OK button
+            except ValueError:
+                ok_button.configure(state="disabled")  # Disable OK button if input is not a valid number
+
+        # Trace the input changes and call validate_input
+        step_x.bind("<KeyRelease>", validate_input)
+        step_y.bind("<KeyRelease>", validate_input)
+
+    #------------- Homing Pop-up selection ---------------#
+    def open_homing_dialog(self):
+        # Window setup
+        homing_window = ctk.CTkToplevel(self)
+        homing_window.title("Select Homing Type")
+        homing_window.geometry("300x250")  # Set initial size
+        homing_window.minsize(300, 250)   # Limit the minimum size
+        homing_window.maxsize(300, 250)   # Limit the maximum size
+
+        homing_window.grab_set()  # Makes the window modal
+
+        # Prompt text
+        label = ctk.CTkLabel(homing_window, text="Select homing type:")
+        label.pack(pady=10)
+
+        # "Homing All" button
+        homing_all_button = ctk.CTkButton(homing_window, text="Homing All", 
+                                        command=lambda: [self.send_simple_data("exe_homing_xy"),homing_window.destroy()], 
+                                        width=150)
+        homing_all_button.pack(pady=5)
+
+        # "Homing XY" button
+        homing_xy_button = ctk.CTkButton(homing_window, text="Homing XY", 
+                                        command=lambda: [self.send_simple_data("exe_homing_all"),homing_window.destroy()], 
+                                        width=150)
+        homing_xy_button.pack(pady=5)
+
+        # Add vertical space before the cancel button
+        ctk.CTkLabel(homing_window, text="").pack(pady=10)
+
+        # Cancel button
+        cancel_button = ctk.CTkButton(homing_window, text="Cancel", command=homing_window.destroy, width=150)
+        cancel_button.pack(pady=5)
 
     # ------------------ Motion Tab ------------------ #
     def display_motion_tab(self):
