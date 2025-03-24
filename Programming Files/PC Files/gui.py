@@ -412,15 +412,20 @@ class MainApp(ctk.CTk):
         self.create_position_control(left_frame, "Z", self.z_pos, row=3)
 
         # Additional Controls
-        ctk.CTkButton(left_frame, text="Disable Stepper Motors").grid(row=7, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
+        #Disable stepper motors, checks if Idle
+        disable_motors_btn= ctk.CTkButton(left_frame, text="Disable Stepper Motors", command=lambda: self.send_simple_command("exe_disable_motors", True))
+        disable_motors_btn.grid(row=7, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
         #ctk.CTkButton(left_frame, text="Homing", fg_color="green").grid(row=8, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
         #ctk.CTkButton(left_frame, text="Calibration").grid(row=9, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
 
         # Graph Display
         self.create_graphs(right_frame)
 
-        ctk.CTkButton(right_frame, text="STOP", fg_color="red").pack(padx=10, pady=5)
-        ctk.CTkButton(right_frame, text="Finish").pack(padx=50, pady=5)
+        #Stop button, for if running GoTo
+        stop_btn = ctk.CTkButton(right_frame, text="STOP", fg_color="red", command=lambda: self.send_simple_command("exe_stop", False))
+        stop_btn.pack(padx=10, pady=5)
+        #finish_btn = ctk.CTkButton(right_frame, text="Finish")
+        #finish_btn.pack(padx=50, pady=5)
 
 
     # ------------------ Position Control ------------------ #
@@ -1039,20 +1044,22 @@ class MainApp(ctk.CTk):
 #Temperature
 #File directory
 
-#Add button
+#BUTTONS
+#addButton function
 #configure buttons, disable
 
 #Random sampling
 #Populate images
-#Stop button
+#Updating images
 
 #Scanning images
 #Populating images
-#Finish button
-#Stop button
+#image stitching
+#expand image
 
 #Motion
 #Go to function
+#Display current motor data
 
 #Image tab
 #Add in default settings
