@@ -18,11 +18,11 @@ class MainApp(ctk.CTk):
         #---------- Raspberry Pi JSON Keys instatiate ----------#
         #Module states and data
         self.module_status = "Unknown"
-        self.alarm_status = "Uknown"
+        self.alarm_status = "Unknown"
         self.mode = "Manual"
 
         #Motion data
-        self.motors_enabled : False
+        self.motors_enabled = False
         self.x_pos = 0
         self.y_pos = 0
         self.z_pos = 0
@@ -53,7 +53,7 @@ class MainApp(ctk.CTk):
 
         #Random sampling method json data
         self.sampling_data = {
-            "command" :"Uknown",
+            "command" :"Unknown",
             "mode" : "Unknown",
             "module_status" : "Unknown",
             "total_images" : 0
@@ -68,8 +68,25 @@ class MainApp(ctk.CTk):
             "step_y" :0
         }
 
-        #Not related JSON data
+        #-------------- Flags -----------------------#
         self.sample_loaded = False
+
+        #----------------- Status Labels ---------------#
+        #Update motor pane labels
+        self.rpi_motors_enabled_var = ctk.StringVar(value="--")
+        self.rpi_x_pos_var = ctk.StringVar(value="--")
+        self.rpi_y_pos_var = ctk.StringVar(value="--")
+        self.rpi_z_pos_var = ctk.StringVar(value="--")
+
+        #Update camera pane labels
+        self.rpi_exposure_var = ctk.StringVar(value="--")
+        self.rpi_analog_gain_var = ctk.StringVar(value="--")
+        self.rpi_contrast_var = ctk.StringVar(value="--")
+        self.rpi_colour_temp_var = ctk.StringVar(value="--")
+
+        # Update last refreshed time
+        #Used in camera and motor pane
+        self.last_refreshed_var = ctk.StringVar(value="Last Updated: --")
 
         #--------------------- GUI Appearance Variables ---------------------------#
         #Skeleton appearance
@@ -79,7 +96,8 @@ class MainApp(ctk.CTk):
         ctk.set_appearance_mode("dark")  # Options: "dark", "light", "system"
 
         #Image related info from pi
-        self.image_folder = "C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures"
+        #DIRECTORY
+        self.image_folder = "C:/Users/GraemeJF/Documents/Capstone/Test Pictures"
 
         # Top & Bottom Frames
         self.create_top_frame()
@@ -173,7 +191,7 @@ class MainApp(ctk.CTk):
         self.display_placeholder_image(right_frame)
 
         # Buttons on Left Side
-        create_sample_btn = ctk.CTkButton(left_frame, text = "Create a new sample", font = ("Arial", 20), 
+        create_sample_btn = ctk.CTkButton(left_frame, text = "Create a New Sample", font = ("Arial", 20), 
                                           width = 200, height = 100, fg_color = "green", command = lambda: self.open_sample_dialog())
         sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.open_sampling_dialog(right_frame))
         #sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_random_sampling_layout(8, right_frame))
@@ -188,19 +206,14 @@ class MainApp(ctk.CTk):
                                         command=lambda :self.send_simple_command("exe_calibration", True))
         calibration_btn.pack(pady=5, fill='x')
 
-        home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white",
-                                 command = lambda: self.open_homing_dialog())        
-        home_btn.pack(pady=5, fill='x')
-    
-
     # ------------------ Image Placeholder ------------------ #
     def display_placeholder_image(self, frame):
-        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures/assy.png")  # Replace with your image path
-        img = img.resize((2169, 1651), Image.LANCZOS)
+        img = Image.open("C:/Users/GraemeJF/Documents/Capstone/Test Pictures/assy_centered.png")  # Replace with your image path
+        img = img.resize((1295, 1343), Image.LANCZOS)
         tilt_img = img.rotate(-1)
 
         # Create a CTkImage instance
-        img_ctk = ctk.CTkImage(tilt_img, size=(800, 600))
+        img_ctk = ctk.CTkImage(tilt_img, size=(800, 800))
 
         # Create the CTkLabel and display the CTkImage
         img_label = ctk.CTkLabel(frame, image=img_ctk, text="")
@@ -214,9 +227,9 @@ class MainApp(ctk.CTk):
         #Window setup
         sample_window = ctk.CTkToplevel(self)
         sample_window.title("Enter Sample Parameters")
-        sample_window.geometry("320x410")
-        sample_window.minsize(320, 410)
-        sample_window.maxsize(320, 410)
+        sample_window.geometry("320x420")
+        sample_window.minsize(320, 420)
+        sample_window.maxsize(320, 420)
 
         sample_window.grab_set()
 
@@ -232,14 +245,14 @@ class MainApp(ctk.CTk):
 
         #Sample height
         ctk.CTkLabel(sample_window, text="Enter starting sample height:").grid(row = 4, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
-        initial_height = ctk.CTkEntry(sample_window, placeholder_text = "20")
+        initial_height = ctk.CTkEntry(sample_window)
         initial_height.grid(row = 5, column = 1, columnspan = 2, padx=1, pady=1, sticky="ew")
 
         #Sample layer height
         ctk.CTkLabel(sample_window, text="Enter sample layer height:").grid(row = 6, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
         ctk.CTkLabel(sample_window, text="(i.e. Amount of material removed each layer):").grid(row = 7, column = 0, columnspan = 4, pady=1, sticky = "ew")
-        layer_height = ctk.CTkEntry(sample_window)
-        layer_height. grid(row = 8, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
+        layer_height = ctk.CTkEntry(sample_window, width = 50)
+        layer_height.grid(row = 8, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
 
         #------Bounding box -----
         #Width
@@ -257,8 +270,8 @@ class MainApp(ctk.CTk):
         #Closes the window and calls function send_sample_data() on ok
         ok_button = ctk.CTkButton(sample_window, text="OK", 
                                   command=lambda: [self.send_sample_data(mount_type.get(), sample_id.get(),
-                                                      float(initial_height.get()), float(layer_height.get())), 
-                                                      float(sample_width.get()), float(sample_length.get()), sample_window.destroy()], width = 80)
+                                                      float(initial_height.get()), float(layer_height.get()), 
+                                                      float(sample_width.get()), float(sample_length.get())), sample_window.destroy()], width = 80)
 
         ok_button.grid(row = 11, column = 0, padx=5, pady=5)
 
@@ -391,13 +404,13 @@ class MainApp(ctk.CTk):
 
         # "Homing All" button
         homing_all_button = ctk.CTkButton(homing_window, text="Homing All", 
-                                        command=lambda: [self.send_simple_command("exe_homing_xy", True),homing_window.destroy()], 
+                                        command=lambda: [self.send_simple_command("exe_homing_all", True),homing_window.destroy()], 
                                         width=150)
         homing_all_button.pack(pady=5)
 
         # "Homing XY" button
         homing_xy_button = ctk.CTkButton(homing_window, text="Homing XY", 
-                                        command=lambda: [self.send_simple_command("exe_homing_all", True),homing_window.destroy()], 
+                                        command=lambda: [self.send_simple_command("exe_homing_xy", True),homing_window.destroy()], 
                                         width=150)
         homing_xy_button.pack(pady=5)
 
@@ -409,6 +422,7 @@ class MainApp(ctk.CTk):
         cancel_button.pack(pady=5)
 
     # ------------------ Motion Tab ------------------ #
+    def display_motion_tab(self):
     #Left frame
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
@@ -442,27 +456,26 @@ class MainApp(ctk.CTk):
         send_coord_btn.grid(row=4, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Additional Controls
+        #Homing Button
+        home_btn = ctk.CTkButton(button_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white",
+                                 command = lambda: self.open_homing_dialog())        
+        home_btn.pack(pady=5, fill='x')
+
         #Disable stepper motors, checks if Idle
         disable_motors_btn = ctk.CTkButton(button_frame, text="Disable Stepper Motors", 
                                            command=lambda: self.send_simple_command("exe_disable_motors", True))
         disable_motors_btn.pack(pady=5, fill="x")
 
-        #homing_btn = ctk.CTkButton(button_frame, text="Homing", fg_color="green")
-        #homing_btn.pack(pady=5, fill="x")
-        #calibrate_btn = ctk.CTkButton(button_frame, text="Calibration")
-        #calibrate_btn.pack(pady=5, fill="x")
-
         # Graph Display
         self.create_graphs(right_frame)
 
         #Stop button, for if running GoTo
-        stop_btn = ctk.CTkButton(button_frame, text="STOP", fg_color="red")
+        stop_btn = ctk.CTkButton(button_frame, text="STOP", fg_color="red", command=lambda: self.send_simple_command("exe_stop", False))
         stop_btn.pack(pady=5, fill="x")
         #finish_btn = ctk.CTkButton(button_frame, text="Finish")
         #finish_btn.pack(pady=5, fill="x")
 
         #Data from Raspberry Pi in Main Tab
-
         #Motors Enabled
         motors_enabled_label = ctk.CTkLabel(main_frame, text="Motors Enabled")
         motors_enabled_label.pack(pady=5, anchor='w')
@@ -674,7 +687,8 @@ class MainApp(ctk.CTk):
 
         self.scan_image_grid = []  # Store references to image labels
 
-        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures/dog.jpg")  # Replace with your image path
+        #Directory image path
+        img = Image.open("C:/Users/GraemeJF/Documents/Capstone/img.jpg")
         img = img.resize((50, 50), Image.LANCZOS)
 
         # Create a CTkImage instance
@@ -929,25 +943,28 @@ class MainApp(ctk.CTk):
     #From raspberry pi publisher
     def unpack_pi_JSON(self, data):
         # Extract values from the received data dictionary, with defaults for missing keys
-        self.module_status = data.get("module_status", "Unknown")
-        self.mode = data.get("mode", "Unknown")
-        self.alarm_status = data.get("alarm_status", "Unknown")
+            try:
+                self.module_status = data.get("module_status", "Unknown")
+                self.mode = data.get("mode", "Unknown")
+                self.alarm_status = data.get("alarm_status", "Unknown")
 
-        self.motors_enabled = data.get("motors_enabled", False)
-        self.x_pos = data.get("x_pos", 0)
-        self.y_pos = data.get("y_pos", 0)
-        self.z_pos = data.get("z_pos", 0)
+                self.motors_enabled = data.get("motors_enabled", False)
+                self.x_pos = data.get("x_pos", 0)
+                self.y_pos = data.get("y_pos", 0)
+                self.z_pos = data.get("z_pos", 0)
 
-        self.exposure_time = data.get("exposure_time", 0)
-        self.analog_gain = data.get("analog_gain", 0)
-        self.contrast = data.get("contrast", 0)
-        self.colour_temp = data.get("colour_temp", 0)
+                self.exposure_time = data.get("exposure_time", 0)
+                self.analog_gain = data.get("analog_gain", 0)
+                self.contrast = data.get("contrast", 0)
+                self.colour_temp = data.get("colour_temp", 0)
 
-        self.total_image = data.get("total_image", 0)
-        self.image_count = data.get("image_count", 0)
-        self.current_image = data.get("current_image", [])
-        self.image_metadata = data.get("image_metadata", {})
-
+                self.total_image = data.get("total_image", 0)
+                self.image_count = data.get("image_count", 0)
+                self.current_image = data.get("current_image", [])
+                self.image_metadata = data.get("image_metadata", {})
+            except Exception as e:
+                print(f"Error unpacking JSON data: {e}")
+    
     #Unpack and update data from raspberry pi
     #Function is called in communication.py in the receive status updates
     def update_status_data(self, data):
@@ -958,12 +975,16 @@ class MainApp(ctk.CTk):
         # Extract values from the received data dictionary, with defaults for missing keys
         self.unpack_pi_JSON(data)
 
-        # Update all GUI elements
+        #Update GUI elements on seperate thread
+        self.content_frame.after(0, self.update_gui_elements, prev_module_status, prev_image_count)
+
+    #Update GUI on the main thread
+    def update_gui_elements(self, prev_module_status, prev_image_count):      
 
         #Update top and bottom frame parts
         self.status_label.configure(text=f"Module Status: {self.module_status}")
         self.alarm_label.configure(text=f"Alarms: {self.alarm_status}")
-
+        
         #Update motor pane labels
         self.rpi_motors_enabled_var.set(str(self.motors_enabled))
         self.rpi_x_pos_var.set(str(self.x_pos))
@@ -979,8 +1000,9 @@ class MainApp(ctk.CTk):
         # Update last refreshed time
         #Used in camera and motor pane
         self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
-
-
+        
+        '''
+        #STILL NEED TO  TO DO
         #Update buttons only during status changes
         if prev_module_status != self.module_status :
             self.disable_buttons(self.module_status, self.sample_loaded)
@@ -988,6 +1010,7 @@ class MainApp(ctk.CTk):
         if prev_image_count != self.image_count :
             #Update images
             return
+        '''
 
     #Function sends sample_data to raspberry pi
     #This function is called in function store_sample_data when the ok button is pressed
@@ -1115,6 +1138,12 @@ class MainApp(ctk.CTk):
 
 #To do
 
+#Homing
+#Move to motion tab
+
+#Calibration
+#Create frame for calibration
+
 #Details
 #instructions on how to use
 #Temperature
@@ -1134,12 +1163,14 @@ class MainApp(ctk.CTk):
 #expand image
 
 #Motion
-#Go to function
+#Go to function buttons
+#fix spacing of main frame
 #Imaging of location
 
 #Image tab
-#Add in default settings
+#Add in default settings???
 #Configure save image
 #Configure update image
+#Display image
 
 #Image stitching: calling it, threading, transferring files

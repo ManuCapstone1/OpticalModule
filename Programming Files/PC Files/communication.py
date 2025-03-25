@@ -23,7 +23,7 @@ class CommunicationHandler:
         for attempt in range(retries):
             try:
                 self.req_socket.send_json(data)
-                response = self.req_socket.recv_json(flags=zmq.NOBLOCK)  # Non-blocking call
+                response = self.req_socket.recv_json()  # Blocking call, don't make it blocking
                 return response
             except zmq.Again:  # In case of timeout or no response
                 if attempt < retries - 1:
@@ -49,13 +49,13 @@ class CommunicationHandler:
                 # Update the GUI with received status data
                 gui.after(0, gui.update_status_data, status_data)
             except zmq.Again:
-                time.sleep(0.1)  # Reduce CPU usage by waiting instead of busy looping
+                stop_event.wait(0.1)  # Reduce CPU usage by waiting instead of busy looping
             except Exception as e:
                 print(f"Error receiving status update: {e}")
                 time.sleep(1)  # Avoid flooding errors
 
-        def close(self):
-            """Cleanup sockets when closing"""
-            self.req_socket.close()
-            self.sub_socket.close()
-            self.context.term()
+    def close(self):
+        """Cleanup sockets when closing"""
+        self.req_socket.close()
+        self.sub_socket.close()
+        self.context.term()
