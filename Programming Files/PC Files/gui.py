@@ -899,7 +899,6 @@ class MainApp(ctk.CTk):
             else:
                 self.buttons[name].configure(state=ctk.DISABLED)
 
-
     #============================== Communcation ====================================#
     
     #Assign communication handler from main.py
