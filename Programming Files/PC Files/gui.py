@@ -41,10 +41,14 @@ class MainApp(ctk.CTk):
         #------ JSON Objects sent TO rapsberry pi ------#
         #Sample data
         self.sample_data = {
+            "command" :"Unknown",
+            "mode" : "Unknown",
             "mount_type" : "Unknown",
-            "sample_height" : 0.0,
+            "sample_id" : "Unkown",
             "initial_height" : 0.0,
-            "sample_id" : "Unknown"
+            "layer_height" : 0.0,
+            "width" : 0.0,
+            "height" : 0.0
         }
 
         #Random sampling method json data
@@ -169,24 +173,29 @@ class MainApp(ctk.CTk):
         self.display_placeholder_image(right_frame)
 
         # Buttons on Left Side
-        create_sample_btn = ctk.CTkButton(left_frame, text = "Create a new sample", font = ("Arial", 20), width = 200, height = 100, fg_color = "green", command = lambda: self.open_sample_dialog())
-        sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_random_sampling_layout(8, right_frame))
-        scanning_btn = ctk.CTkButton(left_frame, text="Scanning", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_scanning_layout(7,6,right_frame))
+        create_sample_btn = ctk.CTkButton(left_frame, text = "Create a new sample", font = ("Arial", 20), 
+                                          width = 200, height = 100, fg_color = "green", command = lambda: self.open_sample_dialog())
+        sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.open_sampling_dialog(right_frame))
+        #sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_random_sampling_layout(8, right_frame))
+        scanning_btn = ctk.CTkButton(left_frame, text="Scanning", font=("Arial", 20), 
+                                        width = 200, height = 100, command = lambda: self.display_scanning_layout(7,6,right_frame))
 
         create_sample_btn.pack(pady=5, fill='x')
         sampling_btn.pack(pady=5, fill='x')
         scanning_btn.pack(pady=5, fill='x')
 
-        calibration_btn = ctk.CTkButton(left_frame, width = 200, height = 50, text="Calibration", font=("Arial", 20))
+        calibration_btn = ctk.CTkButton(left_frame, width = 200, height = 50, text="Calibration", font=("Arial", 20),
+                                        command=lambda :self.send_simple_command("exe_calibration", True))
         calibration_btn.pack(pady=5, fill='x')
 
-        home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white")
+        home_btn = ctk.CTkButton(left_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white",
+                                 command = lambda: self.open_homing_dialog())        
         home_btn.pack(pady=5, fill='x')
     
 
     # ------------------ Image Placeholder ------------------ #
     def display_placeholder_image(self, frame):
-        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures dog.jpg")  # Replace with your image path
+        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures/assy.png")  # Replace with your image path
         img = img.resize((2169, 1651), Image.LANCZOS)
         tilt_img = img.rotate(-1)
 
@@ -200,15 +209,14 @@ class MainApp(ctk.CTk):
         # Center the image within the frame using place() method
         img_label.place(relx=0.5, rely=0.5, anchor="center")  # This centers the image in the frame
 
-
 # ------------------ Sample Parameter Dialog ------------------ #
     def open_sample_dialog(self):
         #Window setup
         sample_window = ctk.CTkToplevel(self)
         sample_window.title("Enter Sample Parameters")
-        sample_window.geometry("320x390")
-        sample_window.minsize(320, 350)
-        sample_window.maxsize(320, 350)
+        sample_window.geometry("320x410")
+        sample_window.minsize(320, 410)
+        sample_window.maxsize(320, 410)
 
         sample_window.grab_set()
 
@@ -217,70 +225,276 @@ class MainApp(ctk.CTk):
         mount_type = ctk.CTkComboBox(sample_window, values=["Puck", "Stub"])
         mount_type.grid(row = 1, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
 
+        #sample id
+        ctk.CTkLabel(sample_window, text="Enter Sample ID:").grid(row=2, column=0, columnspan=4, padx=1, pady=1, sticky="ew")
+        sample_id = ctk.CTkEntry(sample_window, placeholder_text = "e.g. Sample_24_03_2025")
+        sample_id.grid(row=3, column=0, columnspan=4, padx=10, pady=5)
+
         #Sample height
-        ctk.CTkLabel(sample_window, text="Enter starting sample height:").grid(row = 2, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
-        sample_height = ctk.CTkEntry(sample_window, placeholder_text = "20")
-        sample_height.grid(row = 3, column = 1, columnspan = 2, padx=1, pady=1, sticky="ew")
+        ctk.CTkLabel(sample_window, text="Enter starting sample height:").grid(row = 4, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
+        initial_height = ctk.CTkEntry(sample_window, placeholder_text = "20")
+        initial_height.grid(row = 5, column = 1, columnspan = 2, padx=1, pady=1, sticky="ew")
 
         #Sample layer height
-        ctk.CTkLabel(sample_window, text="Enter sample layer height:").grid(row = 4, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
-        ctk.CTkLabel(sample_window, text="(i.e. Amount of material removed each layer):").grid(row = 5, column = 0, columnspan = 4, pady=1, sticky = "ew")
+        ctk.CTkLabel(sample_window, text="Enter sample layer height:").grid(row = 6, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
+        ctk.CTkLabel(sample_window, text="(i.e. Amount of material removed each layer):").grid(row = 7, column = 0, columnspan = 4, pady=1, sticky = "ew")
         layer_height = ctk.CTkEntry(sample_window)
-        layer_height. grid(row = 6, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
+        layer_height. grid(row = 8, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
 
         #------Bounding box -----
         #Width
-        ctk.CTkLabel(sample_window, text="Enter bounding box size:").grid(row = 7, column = 0, columnspan = 4, padx=5, pady=1, sticky="ew")
-        ctk.CTkLabel(sample_window, text="Width:").grid(row=8, column=0, padx=1, pady=1, sticky = "e")
+        ctk.CTkLabel(sample_window, text="Enter bounding box size:").grid(row = 9, column = 0, columnspan = 4, padx=5, pady=1, sticky="ew")
+        ctk.CTkLabel(sample_window, text="Width:").grid(row=10, column=0, padx=1, pady=1, sticky = "e")
         sample_width = ctk.CTkEntry(sample_window, width = 50)
-        sample_width.grid(row = 8, column = 1, padx=5, pady=5, sticky = "w")
+        sample_width.grid(row = 10, column = 1, padx=5, pady=5, sticky = "w")
 
         #Length
-        ctk.CTkLabel(sample_window, text="Length:").grid(row=8, column=2, padx=5, pady=5, sticky = "e")
+        ctk.CTkLabel(sample_window, text="Length:").grid(row=10, column=2, padx=5, pady=5, sticky = "e")
         sample_length = ctk.CTkEntry(sample_window, width = 50)
-        sample_length.grid(row = 8, column = 3, padx=5, pady=10, sticky = "w")
+        sample_length.grid(row = 10, column = 3, padx=5, pady=10, sticky = "w")
 
         #Ok button
-        #Closes the window and calls function send_sampleData() on ok
-        ok_button = ctk.CTkButton(sample_window, text="OK", command=lambda: [sample_window.destroy(), self.send_sampleData], width = 80)
-        ok_button.grid(row = 9, column = 0, padx=5, pady=5)
+        #Closes the window and calls function send_sample_data() on ok
+        ok_button = ctk.CTkButton(sample_window, text="OK", 
+                                  command=lambda: [self.send_sample_data(mount_type.get(), sample_id.get(),
+                                                      float(initial_height.get()), float(layer_height.get())), 
+                                                      float(sample_width.get()), float(sample_length.get()), sample_window.destroy()], width = 80)
+
+        ok_button.grid(row = 11, column = 0, padx=5, pady=5)
 
         #Cancel button, closes window
-        ctk.CTkButton(sample_window, text="Cancel", command=sample_window.destroy, width = 80).grid(row = 9, column = 3,columnspan = 2, padx=5, pady=5)
+        ctk.CTkButton(sample_window, text="Cancel", command=sample_window.destroy, width = 80).grid(row = 11, column = 3, columnspan = 2, padx=5, pady=5)
+
+#-----------------------Random Sampling Pop-up ---------------- #
+    def open_sampling_dialog(self, frame):
+        # Window setup
+        image_sampling_window = ctk.CTkToplevel(self)
+        image_sampling_window.title("Enter Sampling Parameters")
+        image_sampling_window.geometry("350x135")  # Set initial size
+        image_sampling_window.minsize(350, 135)   # Limit the minimum size
+        image_sampling_window.maxsize(350, 135)   # Limit the maximum size
+
+        image_sampling_window.grab_set()
+
+        # New prompt text
+        label = ctk.CTkLabel(image_sampling_window, text="Enter in the number of images taken for random sampling:")
+        label.grid(row=0, column=0, columnspan=4, padx=5, pady=10, sticky="ew")
+
+        # Total images input field
+        ctk.CTkLabel(image_sampling_window, text="Total Images:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        total_images = ctk.CTkEntry(image_sampling_window, placeholder_text="6")
+        total_images.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        # OK button (closes the window and processes input)
+        ok_button = ctk.CTkButton(image_sampling_window, text="OK", 
+                                command=lambda: [self.display_random_sampling_layout(int(total_images.get()), frame), 
+                                                self.send_sampling_data(int(total_images.get())),image_sampling_window.destroy()], 
+                                width=80, state="disabled")  # Initially disabled
+        ok_button.grid(row=2, column=0, padx=5, pady=10, sticky="ew")
+
+        # Cancel button (closes the window)
+        cancel_button = ctk.CTkButton(image_sampling_window, text="Cancel", command=image_sampling_window.destroy, width=80)
+        cancel_button.grid(row=2, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
+
+        # Ensure the buttons are always at the bottom of the window
+        image_sampling_window.grid_rowconfigure(3, weight=1)  # Add this line to allow the window to expand as needed
+        image_sampling_window.grid_rowconfigure(2, weight=0)  # Ensure row 2 (buttons) stays at the bottom
+
+        # Simple validation function
+        def validate_input(*args):
+            try:
+                value = int(total_images.get())
+                # Check if value is between 1 and 8
+                if 1 <= value <= 8:
+                    ok_button.configure(state="normal")  # Enable OK button
+                else:
+                    ok_button.configure(state="disabled")  # Disable OK button
+            except ValueError:
+                ok_button.configure(state="disabled")  # Disable OK button if input is not a number
+
+        # Trace the input changes and call validate_input
+        total_images.bind("<KeyRelease>", validate_input)
+
+    # ------------------ Scanning Parameter Dialog ------------------ #
+    def open_scanning_dialog(self, frame):
+        # Window setup
+        image_scanning_window = ctk.CTkToplevel(self)
+        image_scanning_window.title("Enter Scanning Parameters")
+        image_scanning_window.geometry("335x170")  # Set initial size
+        image_scanning_window.minsize(335, 170)   # Limit the minimum size
+        image_scanning_window.maxsize(335, 170)   # Limit the maximum size
+
+        image_scanning_window.grab_set()
+
+        # New prompt text
+        label = ctk.CTkLabel(image_scanning_window, text="Please enter the scanning bounding box:")
+        label.grid(row=0, column=0, columnspan=4, padx=5, pady=10, sticky="ew")
+
+        # Step x input field
+        ctk.CTkLabel(image_scanning_window, text="Step x:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        step_x = ctk.CTkEntry(image_scanning_window, placeholder_text="1")
+        step_x.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        # Step y input field
+        ctk.CTkLabel(image_scanning_window, text="Step y:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+        step_y = ctk.CTkEntry(image_scanning_window, placeholder_text="1")
+        step_y.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+
+        # OK button (closes the window, changes frame, sends scanning_data
+        ok_button = ctk.CTkButton(image_scanning_window, text="OK", 
+                                command=lambda: [
+                                    self.display_scanning_layout(int(step_x.get()), int(step_y.get()), frame),
+                                    self.send_scanning_data(int(step_x.get()), int(step_y.get())),
+                                    image_scanning_window.destroy()], 
+                                width=80, state="disabled")  # Initially disabled
+        ok_button.grid(row=3, column=0, padx=5, pady=10, sticky="ew")
+
+        # Cancel button (closes the window)
+        cancel_button = ctk.CTkButton(image_scanning_window, text="Cancel", command=image_scanning_window.destroy, width=80)
+        cancel_button.grid(row=3, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
+
+        # Ensure the buttons are always at the bottom of the window
+        image_scanning_window.grid_rowconfigure(4, weight=1)  # Add this line to allow the window to expand as needed
+        image_scanning_window.grid_rowconfigure(3, weight=0)  # Ensure row 3 (buttons) stays at the bottom
+
+        # Simple validation function for Step x and Step y
+        def validate_input(*args):
+            try:
+                value_x = float(step_x.get())
+                value_y = float(step_y.get())
+                # Check if both values are positive numbers
+                if value_x > 0 and value_y > 0:
+                    ok_button.configure(state="normal")  # Enable OK button
+                else:
+                    ok_button.configure(state="disabled")  # Disable OK button
+            except ValueError:
+                ok_button.configure(state="disabled")  # Disable OK button if input is not a valid number
+
+        # Trace the input changes and call validate_input
+        step_x.bind("<KeyRelease>", validate_input)
+        step_y.bind("<KeyRelease>", validate_input)
+
+    #------------- Homing Pop-up selection ---------------#
+    def open_homing_dialog(self):
+        # Window setup
+        homing_window = ctk.CTkToplevel(self)
+        homing_window.title("Select Homing Type")
+        homing_window.geometry("300x250")  # Set initial size
+        homing_window.minsize(300, 250)   # Limit the minimum size
+        homing_window.maxsize(300, 250)   # Limit the maximum size
+
+        homing_window.grab_set()  # Makes the window modal
+
+        # Prompt text
+        label = ctk.CTkLabel(homing_window, text="Select homing type:")
+        label.pack(pady=10)
+
+        # "Homing All" button
+        homing_all_button = ctk.CTkButton(homing_window, text="Homing All", 
+                                        command=lambda: [self.send_simple_command("exe_homing_xy", True),homing_window.destroy()], 
+                                        width=150)
+        homing_all_button.pack(pady=5)
+
+        # "Homing XY" button
+        homing_xy_button = ctk.CTkButton(homing_window, text="Homing XY", 
+                                        command=lambda: [self.send_simple_command("exe_homing_all", True),homing_window.destroy()], 
+                                        width=150)
+        homing_xy_button.pack(pady=5)
+
+        # Add vertical space before the cancel button
+        ctk.CTkLabel(homing_window, text="").pack(pady=10)
+
+        # Cancel button
+        cancel_button = ctk.CTkButton(homing_window, text="Cancel", command=homing_window.destroy, width=150)
+        cancel_button.pack(pady=5)
 
     # ------------------ Motion Tab ------------------ #
-    def display_motion_tab(self):
+    #Left frame
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
         right_frame = ctk.CTkFrame(self.content_frame)
         right_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
+        
+        #Middle frame
+        main_frame = ctk.CTkFrame(self.content_frame)
+        main_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
-        ctk.CTkButton(left_frame, text="Go To", font=("Arial", 20)).grid(row=0, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
+        coord_frame = ctk.CTkFrame(left_frame)
+        coord_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=10)
+
+        # Create a separate button frame inside left_frame (placed at the bottom)
+        button_frame = ctk.CTkFrame(left_frame)
+        button_frame.pack(side=ctk.BOTTOM, fill="x", padx=10, pady=10)
+
+        # Left Frame: Entry Boxes and Buttons
+        coord_label = ctk.CTkLabel(coord_frame, text="Enter in desired coordinates:", font=("Arial", 14, "bold"))
+        coord_label.grid(row=0, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Position Controls
-        self.create_position_control(left_frame, "X", self.x_pos, row=1)
-        self.create_position_control(left_frame, "Y", self.y_pos, row=2)
-        self.create_position_control(left_frame, "Z", self.z_pos, row=3)
+        self.create_position_control(coord_frame, "X", self.x_pos, row=1)
+        self.create_position_control(coord_frame, "Y", self.y_pos, row=2)
+        self.create_position_control(coord_frame, "Z", self.z_pos, row=3)
 
-        # Speed Control
-        ctk.CTkLabel(left_frame, text="Speed", font=("Arial", 18)).grid(row=4, column=0, padx=5, pady=30, sticky='w')
-        self.speed_entry = ctk.CTkEntry(left_frame, width=30)
-        self.speed_entry.insert(0, str(self.speed))
-        self.speed_entry.grid(row=4, column=2, padx=5, pady=30)
-
-        self.create_step_buttons(left_frame, self.speed_entry, step=1, row=4)
+        #Send coordinates button
+        send_coord_btn = ctk.CTkButton(coord_frame, text="Send Coordinates", font=("Arial", 14), 
+                                       command=lambda: self.send_goto_command("exe_goto"))
+        send_coord_btn.grid(row=4, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Additional Controls
-        ctk.CTkButton(left_frame, text="Disable Stepper Motors").grid(row=7, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
-        ctk.CTkButton(left_frame, text="Homing", fg_color="green").grid(row=8, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
-        ctk.CTkButton(left_frame, text="Calibration").grid(row=9, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
+        #Disable stepper motors, checks if Idle
+        disable_motors_btn = ctk.CTkButton(button_frame, text="Disable Stepper Motors", 
+                                           command=lambda: self.send_simple_command("exe_disable_motors", True))
+        disable_motors_btn.pack(pady=5, fill="x")
+
+        #homing_btn = ctk.CTkButton(button_frame, text="Homing", fg_color="green")
+        #homing_btn.pack(pady=5, fill="x")
+        #calibrate_btn = ctk.CTkButton(button_frame, text="Calibration")
+        #calibrate_btn.pack(pady=5, fill="x")
 
         # Graph Display
         self.create_graphs(right_frame)
 
-        ctk.CTkButton(right_frame, text="STOP", fg_color="red").pack(padx=10, pady=5)
-        ctk.CTkButton(right_frame, text="Finish").pack(padx=50, pady=5)
+        #Stop button, for if running GoTo
+        stop_btn = ctk.CTkButton(button_frame, text="STOP", fg_color="red")
+        stop_btn.pack(pady=5, fill="x")
+        #finish_btn = ctk.CTkButton(button_frame, text="Finish")
+        #finish_btn.pack(pady=5, fill="x")
+
+        #Data from Raspberry Pi in Main Tab
+
+        #Motors Enabled
+        motors_enabled_label = ctk.CTkLabel(main_frame, text="Motors Enabled")
+        motors_enabled_label.pack(pady=5, anchor='w')
+        self.rpi_motors_enabled_var = ctk.StringVar(value="--")  # Dynamic variable
+        self.rpi_motors_enabled_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_motors_enabled_var)
+        self.rpi_motors_enabled_label.pack(pady=5, fill='x')
+
+        # X position
+        x_pos_label = ctk.CTkLabel(main_frame, text="X Position (mm)")
+        x_pos_label.pack(pady=5, anchor='w')
+        self.rpi_x_pos_var = ctk.StringVar(value="--")
+        self.rpi_x_pos_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_x_pos_var)
+        self.rpi_x_pos_label.pack(pady=5, fill='x')
+
+        # Y position
+        y_pos_label = ctk.CTkLabel(main_frame, text="Y Position (mm)")
+        y_pos_label.pack(pady=5, anchor='w')
+        self.rpi_y_pos_var = ctk.StringVar(value="--")
+        self.rpi_y_pos_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_y_pos_var)
+        self.rpi_y_pos_label.pack(pady=5, fill='x')
+
+        # Y position
+        z_pos_label = ctk.CTkLabel(main_frame, text="Z Position (mm)")
+        z_pos_label.pack(pady=5, anchor='w')
+        self.rpi_z_pos_var = ctk.StringVar(value="--")
+        self.rpi_z_pos_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_z_pos_var)
+        self.rpi_z_pos_label.pack(pady=5, fill='x')
+
+        # Last Refreshed Label
+        self.last_refreshed_var = ctk.StringVar(value="Last Updated: --")
+        self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
+        self.last_refreshed_label.pack(pady=5)
 
 
     # ------------------ Position Control ------------------ #
@@ -337,6 +551,7 @@ class MainApp(ctk.CTk):
         # Red Position Indicator (Mock) for Z-Axis Graph (Now aligned vertically)
         ctk.CTkLabel(z_graph, text="           ", fg_color="red").place(
             relx=0.5, rely=1 - (self.z_pos * 0.001), anchor='center')  # Flipped to align vertically
+    
 
     # ------------------ Time Updater ------------------ #
     def update_time(self):
@@ -344,7 +559,7 @@ class MainApp(ctk.CTk):
         self.date_time_label.configure(text=now)
         self.after(1000, self.update_time)
 
-      # ------------------ Image Tab ------------------ #
+        # ------------------ Image Tab ------------------ #
     def display_image_tab(self):
         """Displays the Image tab layout with entry boxes on the left and image display on the right."""
 
@@ -352,14 +567,20 @@ class MainApp(ctk.CTk):
         for widget in self.content_frame.winfo_children():
             widget.destroy()
 
-        # Setup left and right frames
+        # Setup left, right, and main frames
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
         right_frame = ctk.CTkFrame(self.content_frame)
         right_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
 
+        main_frame = ctk.CTkFrame(self.content_frame)
+        main_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
+
         # Left Frame: Entry Boxes and Buttons
+        left_label = ctk.CTkLabel(left_frame, text="Enter in desired parameters:", font=("Arial", 14, "bold"))
+        left_label.pack(pady=10, anchor='w')
+
         # Exposure Time (microsec)
         exposure_time_label = ctk.CTkLabel(left_frame, text="Exposure Time (microsec):")
         exposure_time_label.pack(pady=5, anchor='w')
@@ -385,31 +606,75 @@ class MainApp(ctk.CTk):
         self.colour_temp_entry.pack(pady=5, fill='x')
 
         # Buttons below entry boxes
-        button_frame = ctk.CTkFrame(left_frame)
+        button_frame = ctk.CTkFrame(right_frame)
         button_frame.pack(pady=10, fill='x')
 
-        update_image_btn = ctk.CTkButton(button_frame, text="Update Image", font=("Arial", 16), command=self.update_image)
-        update_image_btn.pack(side="left", padx=10, fill='x', expand=True)
+        send_data_btn = ctk.CTkButton(left_frame, text="SEND DATA", font=("Arial", 16), 
+                                      command=lambda: self.send_camera_data(self.exposure_time_entry, self.analog_gain_entry, self.contrast_entry, self.colour_temp_entry))
+        send_data_btn.pack(pady=10)
 
-        save_image_btn = ctk.CTkButton(button_frame, text="Save Image", font=("Arial", 16), command=self.save_image)
-        save_image_btn.pack(side="right", padx=10, fill='x', expand=True)
-
-        # Right Frame: Image Display
         image_label = ctk.CTkLabel(right_frame, text="Image will appear here", fg_color="gray")
         image_label.pack(expand=True, fill='both')
 
-    # ------------------ Displaying Scanning Layout ------------------ #
+        #INCOMPLETE
+        update_image_btn = ctk.CTkButton(button_frame, text="Update Image", font=("Arial", 16))
+        update_image_btn.pack(side="left", padx=10, fill='x', expand=True)
+
+        #INCOMPLETE
+        save_image_btn = ctk.CTkButton(button_frame, text="Save Image", font=("Arial", 16))
+        save_image_btn.pack(side="right", padx=10, fill='x', expand=True)
+
+        # Main Frame: Display Raspberry Pi Parameters
+        main_label = ctk.CTkLabel(main_frame, text="Current Camera Parameters:", font=("Arial", 14, "bold"))
+        main_label.pack(pady=10, anchor='w')
+
+        #Data from Raspberry Pi
+        #Exposure
+        exposure_time_label_2 = ctk.CTkLabel(main_frame, text="Exposure Time (microsec):")
+        exposure_time_label_2.pack(pady=5, anchor='w')
+        self.rpi_exposure_var = ctk.StringVar(value="--")  # Dynamic variable
+        self.rpi_exposure_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_exposure_var)
+        self.rpi_exposure_label.pack(pady=5, fill='x')
+
+        # Analog Gain
+        analog_gain_label_2 = ctk.CTkLabel(main_frame, text="Analog Gain (1=no gain):")
+        analog_gain_label_2.pack(pady=5, anchor='w')
+        self.rpi_analog_gain_var = ctk.StringVar(value="--")
+        self.rpi_analog_gain_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_analog_gain_var)
+        self.rpi_analog_gain_label.pack(pady=5, fill='x')
+
+        # Contrast
+        contrast_label_2 = ctk.CTkLabel(main_frame, text="Contrast (0-32, 1=no value):")
+        contrast_label_2.pack(pady=5, anchor='w')
+        self.rpi_contrast_var = ctk.StringVar(value="--")
+        self.rpi_contrast_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_contrast_var)
+        self.rpi_contrast_label.pack(pady=5, fill='x')
+
+        # Colour Temperature
+        colour_temp_label_2 = ctk.CTkLabel(main_frame, text="Colour Temperature (K):")
+        colour_temp_label_2.pack(pady=5, anchor='w')
+        self.rpi_colour_temp_var = ctk.StringVar(value="--")
+        self.rpi_colour_temp_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_colour_temp_var)
+        self.rpi_colour_temp_label.pack(pady=5, fill='x')
+
+        # Last Refreshed Label
+        self.last_refreshed_var = ctk.StringVar(value="Last Updated: --")
+        self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
+        self.last_refreshed_label.pack(pady=5)
+
+    # --------------------- Displaying Scanning Layout ------------------ #
     def display_scanning_layout(self, images_x, images_y, frame):
         """Displays the Scanning layout with a large image grid."""
         for widget in frame.winfo_children():
             widget.destroy()
-    
+
+        # Create the scanning frame to hold the images
         scanning_frame = ctk.CTkFrame(frame)
-        scanning_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
+        scanning_frame.pack(side=ctk.TOP, expand=True, fill='both', padx=10, pady=10)
 
         self.scan_image_grid = []  # Store references to image labels
 
-        img = Image.open("C:/Users/a4iri/Desktop/Capstone/Test image.png")  # Replace with your image path
+        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures/dog.jpg")  # Replace with your image path
         img = img.resize((50, 50), Image.LANCZOS)
 
         # Create a CTkImage instance
@@ -418,29 +683,30 @@ class MainApp(ctk.CTk):
         # Create dynamic grid based on `images_x` and `images_y`
         for row in range(images_y):
             for col in range(images_x):
-                img_placeholder = ctk.CTkLabel(scanning_frame, text="", image = img_ctk)
+                img_placeholder = ctk.CTkLabel(scanning_frame, text="", image=img_ctk)
                 img_placeholder.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
                 img_placeholder.bind("<Button-1>", lambda e, img=img_placeholder: self.expand_image(img))
                 self.scan_image_grid.append(img_placeholder)
 
-        # STOP and Finish buttons
-         # Ensure button frame always appears, even if no images are loaded
-        button_frame = ctk.CTkFrame(scanning_frame)
-        button_frame.grid(row=images_y, column=images_x/2, columnspan=images_x, pady=15, sticky='ew')
+        # Create a frame for the buttons to always be at the bottom
+        button_frame = ctk.CTkFrame(frame)
+        button_frame.pack(side=ctk.BOTTOM, fill='x', pady=10)
 
-        button_frame.grid_columnconfigure(0, weight=1)
-        button_frame.grid_columnconfigure(1, weight=1)
+        # Create and place the buttons inside the button frame
+        #stop will send stop command, and switch to main
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
+                                    command=lambda: [self.send_simple_command("exe_stop", False), self.display_main_tab])
+        stop_button.pack(side=ctk.LEFT, expand=True, padx=5, pady=5)
 
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red")
-        stop_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
-
+        #Finish will switch to main
         finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
-        finish_button.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
+        finish_button.pack(side=ctk.LEFT, expand=True, padx=5, pady=5)
 
     def load_images_from_folder(self, folder):
         """Load image file paths from the specified folder."""
         return [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('png', 'jpg', 'jpeg', 'gif'))]
 
+    # --------------------- Displaying Random Sampling Layout ------------------ #
     def display_random_sampling_layout(self, num_images, frame):
         """Displays an evenly distributed grid layout for images, handling missing images gracefully."""
         
@@ -453,7 +719,7 @@ class MainApp(ctk.CTk):
         sampling_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
         # Load available images
-        images = self.load_images_from_folder(self.testing_pictures)
+        images = self.load_images_from_folder(self.image_folder)
         available_images = len(images)
 
         # Adjust num_images to the available images count
@@ -515,25 +781,14 @@ class MainApp(ctk.CTk):
         button_frame.grid_columnconfigure(0, weight=1)
         button_frame.grid_columnconfigure(1, weight=1)
 
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red")
+        #stop button sents stop command and switches to main tab
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
+                                    command=lambda:[self.send_simple_command("exe_stop", False), self.display_main_tab()])
         stop_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
 
+        #Finish button switches to main tab
         finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
         finish_button.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
-
-        # Call the update function every 5 seconds to check for changes in the folder
-        self.master.after(5000, self.check_for_new_images)
-
-    def check_for_new_images(self):
-        """Check for new images in the folder and update the layout."""
-        images = self.load_images_from_folder(self.testing_pictures)
-        available_images = len(images)
-
-        if available_images != len(self.image_labels):
-            self.display_random_sampling_layout()  # Re-display layout with updated images
-
-        # Schedule the next check in 5 seconds
-        self.master.after(5000, self.check_for_new_images)
 
     def expand_image(self, img_path):
         """Opens a new window displaying the image and resizes it based on the window size."""
@@ -644,12 +899,12 @@ class MainApp(ctk.CTk):
             else:
                 self.buttons[name].configure(state=ctk.DISABLED)
 
-
     #============================== Communcation ====================================#
     
     #Assign communication handler from main.py
-    def set_communication(self, comms):
+    def set_communication(self, comms, stop_event):
         self.comms = comms
+        self.stop_event = stop_event 
     
      #Send JSON file to raspberry pi, and handle errors
     def send_json_error_check(self, data, success_message):
@@ -678,7 +933,7 @@ class MainApp(ctk.CTk):
         self.mode = data.get("mode", "Unknown")
         self.alarm_status = data.get("alarm_status", "Unknown")
 
-        self.motors_enabled = data.get("motors_enabled", "Unknown")
+        self.motors_enabled = data.get("motors_enabled", False)
         self.x_pos = data.get("x_pos", 0)
         self.y_pos = data.get("y_pos", 0)
         self.z_pos = data.get("z_pos", 0)
@@ -704,8 +959,27 @@ class MainApp(ctk.CTk):
         self.unpack_pi_JSON(data)
 
         # Update all GUI elements
+
+        #Update top and bottom frame parts
         self.status_label.configure(text=f"Module Status: {self.module_status}")
         self.alarm_label.configure(text=f"Alarms: {self.alarm_status}")
+
+        #Update motor pane labels
+        self.rpi_motors_enabled_var.set(str(self.motors_enabled))
+        self.rpi_x_pos_var.set(str(self.x_pos))
+        self.rpi_y_pos_var.set(str(self.y_pos))
+        self.rpi_z_pos_var.set(str(self.z_pos))
+
+        #Update camera pane labels
+        self.rpi_exposure_var.set(str(self.exposure_time))
+        self.rpi_analog_gain_var.set(str(self.analog_gain))
+        self.rpi_contrast_var.set(str(self.contrast))
+        self.rpi_colour_temp_var.set(str(self.colour_temp))
+
+        # Update last refreshed time
+        #Used in camera and motor pane
+        self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+
 
         #Update buttons only during status changes
         if prev_module_status != self.module_status :
@@ -715,53 +989,61 @@ class MainApp(ctk.CTk):
             #Update images
             return
 
-
     #Function sends sample_data to raspberry pi
     #This function is called in function store_sample_data when the ok button is pressed
-    def send_sample_data(self, mount_type, sample_height, initial_height, sample_id):
+    def send_sample_data(self, mount_type, sample_id, initial_height, layer_height, width, height):
         """Stores sample data, sends it to the Raspberry Pi, and sends mode request."""
         # Store the sample data
+        self.sample_data['command'] = "create_sample"
+        self.sample_data['mode'] = "Manual"
         self.sample_data['mount_type'] = mount_type
-        self.sample_data['sample_height'] = sample_height
-        self.sample_data['initial_height'] = initial_height
         self.sample_data['sample_id'] = sample_id
+        self.sample_data['initial_height'] = initial_height
+        self.sample_data['layer_height'] = layer_height
+        self.sample_data['width'] = width
+        self.sample_data['height'] = height
 
         #Send sample data
         success_message = "Sample data sent."
         self.send_json_error_check(self.sample_data, success_message)
+        
+        #First sample loaded
+        self.sample_loaded = True
 
     #Send JSON data to raspberry pi to request to run a method
     #Use for simple requests: Homing_xy, update_image etc.
-    def send_simple_command(self, command, mode):
+    def send_simple_command(self, command, checkIdle):
         json_data = {
             "command" : command,
-            "mode" : mode,
+            "mode" : self.mode,
             "module_status" : self.module_status
         }
 
-        success_message = "JSON data sent."
-        self.send_json_error_check(json_data, success_message)
+        if self.module_status != "Idle" and checkIdle :
+            messagebox.showerror("Status not in idle, wait before sending request.")
+        else:
+            success_message = "JSON data sent."
+            self.send_json_error_check(json_data, success_message)
 
     #Send random samping data to raspberry pi
     #Called when ok is pressed in random sampling pop-up window
-    def send_sampling_data(self, mode, num_images):
+    def send_sampling_data(self, num_images):
         if self.module_status == "Idle":
             #Store random sampling data
             self.sampling_data['command'] = "exe_sampling"
-            self.sampling_data['mode'] = mode
+            self.sampling_data['mode'] = self.mode
             self.sampling_data['module_status'] = self.module_status
             self.sampling_data['num_images'] = num_images
 
             #Send random sampling data
             success_message = "Random sampling data sent."
             self.send_json_error_check(self.sampling_data, success_message)
-
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
     
     #Send scanning data to raspberry pi
     #Called when ok is pressed in scanning sampling pop-up window
-    def send_scanning_data(self, mode, step_x, step_y):
+    def send_scanning_data(self, step_x, step_y):
         if self.module_status == "Idle":
 
             #Check step if valid entry
@@ -771,7 +1053,7 @@ class MainApp(ctk.CTk):
 
             #Store scanning sampling data
             self.scanning_data['command'] = "exe_scanning"
-            self.scanning_data['mode'] = mode
+            self.scanning_data['mode'] = self.mode
             self.scanning_data['module_status'] = self.module_status
             self.scanning_data['step_x'] = step_x
             self.scanning_data['step_y'] = step_y
@@ -781,6 +1063,50 @@ class MainApp(ctk.CTk):
             self.send_json_error_check(self.scanning_data, success_message)
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
+    
+    #Change camera configuration from Image tab
+    def send_camera_data(self, exposure_time, analog_gain, contrast, colour_temp):
+        if self.module_status == "Idle":
+            camera_data = {
+                "command" : "exe_camera_settings",
+                "mode" : self.mode,
+                "module_status" : self.module_status,
+                "exposure_time" : exposure_time,
+                "analog_gain" : analog_gain,
+                "contrast" : contrast,
+                "colour_temp" : colour_temp
+            }
+
+            #Send scanning data
+            success_message = "Updated camera settings data sent."
+            self.send_json_error_check(camera_data, success_message)
+        else:
+            messagebox.showerror("Status not in idle, wait before modifying camera settings.")
+    
+    #GoTO functionality
+    def send_goto_command(self, req_x, req_y, req_z) :
+        if self.module_status == "Idle":
+
+            #Check step if valid entry
+            if req_x <= 0 or req_y <= 0 or req_z <= 0:
+                messagebox.showerror("Invalid input", "Step values must be positive numbers") 
+                return   
+
+            #Store scanning sampling data
+            goto_data = {
+                "command" : "exe_goto",
+                "mode" : self.mode,
+                "module_status" : self.module_status,
+                "req_x_pos" : req_x,
+                "req_y_pos" : req_y,
+                "req_z_pos" : req_z
+            }
+
+            #Send scanning data
+            success_message = "Go to data sent."
+            self.send_json_error_check(goto_data, success_message)
+        else:
+            messagebox.showerror("Status not in idle, wait to request scanning mode.")
 
     # =============================== Image Stitching ==========================================#
     def set_stitcher(self, stitcher) :
@@ -788,10 +1114,32 @@ class MainApp(ctk.CTk):
 
 
 #To do
-# populate labels with data (e.g. temperature, speed)
-# Implement button names and addButton function
-# Populate images as they come in
+
+#Details
+#instructions on how to use
+#Temperature
+#File directory
+
+#BUTTONS
+#addButton function
+#configure buttons, disable
+
+#Random sampling
+#Populate images
+#Updating images
+
+#Scanning images
+#Populating images
+#image stitching
+#expand image
+
+#Motion
+#Go to function
+#Imaging of location
 
 #Image tab
+#Add in default settings
+#Configure save image
+#Configure update image
 
 #Image stitching: calling it, threading, transferring files
