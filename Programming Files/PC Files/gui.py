@@ -41,10 +41,14 @@ class MainApp(ctk.CTk):
         #------ JSON Objects sent TO rapsberry pi ------#
         #Sample data
         self.sample_data = {
+            "command" :"Unknown",
+            "mode" : "Unknown",
             "mount_type" : "Unknown",
-            "sample_height" : 0.0,
+            "sample_id" : "Unkown",
             "initial_height" : 0.0,
-            "sample_id" : "Unknown"
+            "layer_height" : 0.0,
+            "width" : 0.0,
+            "height" : 0.0
         }
 
         #Random sampling method json data
@@ -191,7 +195,7 @@ class MainApp(ctk.CTk):
 
     # ------------------ Image Placeholder ------------------ #
     def display_placeholder_image(self, frame):
-        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures/dog.jpg")  # Replace with your image path
+        img = Image.open("C:/Users/Steph/OneDrive - UBC/4th Year/MANU 430/Programming/Test Pictures/assy.png")  # Replace with your image path
         img = img.resize((2169, 1651), Image.LANCZOS)
         tilt_img = img.rotate(-1)
 
@@ -210,9 +214,9 @@ class MainApp(ctk.CTk):
         #Window setup
         sample_window = ctk.CTkToplevel(self)
         sample_window.title("Enter Sample Parameters")
-        sample_window.geometry("320x390")
-        sample_window.minsize(320, 350)
-        sample_window.maxsize(320, 350)
+        sample_window.geometry("320x410")
+        sample_window.minsize(320, 410)
+        sample_window.maxsize(320, 410)
 
         sample_window.grab_set()
 
@@ -221,36 +225,45 @@ class MainApp(ctk.CTk):
         mount_type = ctk.CTkComboBox(sample_window, values=["Puck", "Stub"])
         mount_type.grid(row = 1, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
 
+        #sample id
+        ctk.CTkLabel(sample_window, text="Enter Sample ID:").grid(row=2, column=0, columnspan=4, padx=1, pady=1, sticky="ew")
+        sample_id = ctk.CTkEntry(sample_window, placeholder_text = "e.g. Sample_24_03_2025")
+        sample_id.grid(row=3, column=0, columnspan=4, padx=10, pady=5)
+
         #Sample height
-        ctk.CTkLabel(sample_window, text="Enter starting sample height:").grid(row = 2, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
-        sample_height = ctk.CTkEntry(sample_window, placeholder_text = "20")
-        sample_height.grid(row = 3, column = 1, columnspan = 2, padx=1, pady=1, sticky="ew")
+        ctk.CTkLabel(sample_window, text="Enter starting sample height:").grid(row = 4, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
+        initial_height = ctk.CTkEntry(sample_window, placeholder_text = "20")
+        initial_height.grid(row = 5, column = 1, columnspan = 2, padx=1, pady=1, sticky="ew")
 
         #Sample layer height
-        ctk.CTkLabel(sample_window, text="Enter sample layer height:").grid(row = 4, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
-        ctk.CTkLabel(sample_window, text="(i.e. Amount of material removed each layer):").grid(row = 5, column = 0, columnspan = 4, pady=1, sticky = "ew")
+        ctk.CTkLabel(sample_window, text="Enter sample layer height:").grid(row = 6, column = 0, columnspan = 4, padx=1, pady=1, sticky = "ew")
+        ctk.CTkLabel(sample_window, text="(i.e. Amount of material removed each layer):").grid(row = 7, column = 0, columnspan = 4, pady=1, sticky = "ew")
         layer_height = ctk.CTkEntry(sample_window)
-        layer_height. grid(row = 6, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
+        layer_height. grid(row = 8, column = 1, columnspan = 2, padx=1, pady=5, sticky="ew")
 
         #------Bounding box -----
         #Width
-        ctk.CTkLabel(sample_window, text="Enter bounding box size:").grid(row = 7, column = 0, columnspan = 4, padx=5, pady=1, sticky="ew")
-        ctk.CTkLabel(sample_window, text="Width:").grid(row=8, column=0, padx=1, pady=1, sticky = "e")
+        ctk.CTkLabel(sample_window, text="Enter bounding box size:").grid(row = 9, column = 0, columnspan = 4, padx=5, pady=1, sticky="ew")
+        ctk.CTkLabel(sample_window, text="Width:").grid(row=10, column=0, padx=1, pady=1, sticky = "e")
         sample_width = ctk.CTkEntry(sample_window, width = 50)
-        sample_width.grid(row = 8, column = 1, padx=5, pady=5, sticky = "w")
+        sample_width.grid(row = 10, column = 1, padx=5, pady=5, sticky = "w")
 
         #Length
-        ctk.CTkLabel(sample_window, text="Length:").grid(row=8, column=2, padx=5, pady=5, sticky = "e")
+        ctk.CTkLabel(sample_window, text="Length:").grid(row=10, column=2, padx=5, pady=5, sticky = "e")
         sample_length = ctk.CTkEntry(sample_window, width = 50)
-        sample_length.grid(row = 8, column = 3, padx=5, pady=10, sticky = "w")
+        sample_length.grid(row = 10, column = 3, padx=5, pady=10, sticky = "w")
 
         #Ok button
-        #Closes the window and calls function send_sampleData() on ok
-        ok_button = ctk.CTkButton(sample_window, text="OK", command=lambda: [sample_window.destroy(), self.send_sampleData], width = 80)
-        ok_button.grid(row = 9, column = 0, padx=5, pady=5)
+        #Closes the window and calls function send_sample_data() on ok
+        ok_button = ctk.CTkButton(sample_window, text="OK", 
+                                  command=lambda: [self.send_sample_data(mount_type.get(), sample_id.get(),
+                                                      float(initial_height.get()), float(layer_height.get())), 
+                                                      float(sample_width.get()), float(sample_length.get()), sample_window.destroy()], width = 80)
+
+        ok_button.grid(row = 11, column = 0, padx=5, pady=5)
 
         #Cancel button, closes window
-        ctk.CTkButton(sample_window, text="Cancel", command=sample_window.destroy, width = 80).grid(row = 9, column = 3,columnspan = 2, padx=5, pady=5)
+        ctk.CTkButton(sample_window, text="Cancel", command=sample_window.destroy, width = 80).grid(row = 11, column = 3, columnspan = 2, padx=5, pady=5)
 
 #-----------------------Random Sampling Pop-up ---------------- #
     def open_sampling_dialog(self, frame):
@@ -303,7 +316,6 @@ class MainApp(ctk.CTk):
         total_images.bind("<KeyRelease>", validate_input)
 
     # ------------------ Scanning Parameter Dialog ------------------ #
-    #---------------------- Scanning Parameter Dialog ---------------- #
     def open_scanning_dialog(self, frame):
         # Window setup
         image_scanning_window = ctk.CTkToplevel(self)
@@ -397,8 +409,7 @@ class MainApp(ctk.CTk):
         cancel_button.pack(pady=5)
 
     # ------------------ Motion Tab ------------------ #
-    def display_motion_tab(self):
-        #Left frame
+    #Left frame
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
@@ -409,7 +420,6 @@ class MainApp(ctk.CTk):
         main_frame = ctk.CTkFrame(self.content_frame)
         main_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
-        #Frame within left frame that holds coordinate stuff
         coord_frame = ctk.CTkFrame(left_frame)
         coord_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=10)
 
@@ -427,12 +437,14 @@ class MainApp(ctk.CTk):
         self.create_position_control(coord_frame, "Z", self.z_pos, row=3)
 
         #Send coordinates button
-        send_coord_btn = ctk.CTkButton(coord_frame, text="Send Coordinates", font=("Arial", 14))
+        send_coord_btn = ctk.CTkButton(coord_frame, text="Send Coordinates", font=("Arial", 14), 
+                                       command=lambda: self.send_goto_command("exe_goto"))
         send_coord_btn.grid(row=4, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Additional Controls
         #Disable stepper motors, checks if Idle
-        disable_motors_btn = ctk.CTkButton(button_frame, text="Disable Stepper Motors")
+        disable_motors_btn = ctk.CTkButton(button_frame, text="Disable Stepper Motors", 
+                                           command=lambda: self.send_simple_command("exe_disable_motors", True))
         disable_motors_btn.pack(pady=5, fill="x")
 
         #homing_btn = ctk.CTkButton(button_frame, text="Homing", fg_color="green")
@@ -448,6 +460,41 @@ class MainApp(ctk.CTk):
         stop_btn.pack(pady=5, fill="x")
         #finish_btn = ctk.CTkButton(button_frame, text="Finish")
         #finish_btn.pack(pady=5, fill="x")
+
+        #Data from Raspberry Pi in Main Tab
+
+        #Motors Enabled
+        motors_enabled_label = ctk.CTkLabel(main_frame, text="Motors Enabled")
+        motors_enabled_label.pack(pady=5, anchor='w')
+        self.rpi_motors_enabled_var = ctk.StringVar(value="--")  # Dynamic variable
+        self.rpi_motors_enabled_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_motors_enabled_var)
+        self.rpi_motors_enabled_label.pack(pady=5, fill='x')
+
+        # X position
+        x_pos_label = ctk.CTkLabel(main_frame, text="X Position (mm)")
+        x_pos_label.pack(pady=5, anchor='w')
+        self.rpi_x_pos_var = ctk.StringVar(value="--")
+        self.rpi_x_pos_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_x_pos_var)
+        self.rpi_x_pos_label.pack(pady=5, fill='x')
+
+        # Y position
+        y_pos_label = ctk.CTkLabel(main_frame, text="Y Position (mm)")
+        y_pos_label.pack(pady=5, anchor='w')
+        self.rpi_y_pos_var = ctk.StringVar(value="--")
+        self.rpi_y_pos_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_y_pos_var)
+        self.rpi_y_pos_label.pack(pady=5, fill='x')
+
+        # Y position
+        z_pos_label = ctk.CTkLabel(main_frame, text="Z Position (mm)")
+        z_pos_label.pack(pady=5, anchor='w')
+        self.rpi_z_pos_var = ctk.StringVar(value="--")
+        self.rpi_z_pos_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_z_pos_var)
+        self.rpi_z_pos_label.pack(pady=5, fill='x')
+
+        # Last Refreshed Label
+        self.last_refreshed_var = ctk.StringVar(value="Last Updated: --")
+        self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
+        self.last_refreshed_label.pack(pady=5)
 
 
     # ------------------ Position Control ------------------ #
@@ -614,23 +661,6 @@ class MainApp(ctk.CTk):
         self.last_refreshed_var = ctk.StringVar(value="Last Updated: --")
         self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
         self.last_refreshed_label.pack(pady=5)
-
-        # Refresh Button
-        refresh_button = ctk.CTkButton(main_frame, text="Refresh Data", command=self.refresh_camera_data)
-        refresh_button.pack(pady=10)
-
-    # Refresh camera data 
-    def refresh_camera_data(self):
-        """Fetch new data and update labels dynamically"""
-        self.rpi_exposure_var.set(str(self.exposure_time))
-        self.rpi_analog_gain_var.set(str(self.analog_gain))
-        self.rpi_contrast_var.set(str(self.contrast))
-        self.rpi_colour_temp_var.set(str(self.colour_temp))
-        
-        # Update last refreshed time
-        from datetime import datetime
-        self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
-
 
     # --------------------- Displaying Scanning Layout ------------------ #
     def display_scanning_layout(self, images_x, images_y, frame):
@@ -904,7 +934,7 @@ class MainApp(ctk.CTk):
         self.mode = data.get("mode", "Unknown")
         self.alarm_status = data.get("alarm_status", "Unknown")
 
-        self.motors_enabled = data.get("motors_enabled", "Unknown")
+        self.motors_enabled = data.get("motors_enabled", False)
         self.x_pos = data.get("x_pos", 0)
         self.y_pos = data.get("y_pos", 0)
         self.z_pos = data.get("z_pos", 0)
@@ -930,8 +960,27 @@ class MainApp(ctk.CTk):
         self.unpack_pi_JSON(data)
 
         # Update all GUI elements
+
+        #Update top and bottom frame parts
         self.status_label.configure(text=f"Module Status: {self.module_status}")
         self.alarm_label.configure(text=f"Alarms: {self.alarm_status}")
+
+        #Update motor pane labels
+        self.rpi_motors_enabled_var.set(str(self.motors_enabled))
+        self.rpi_x_pos_var.set(str(self.x_pos))
+        self.rpi_y_pos_var.set(str(self.y_pos))
+        self.rpi_z_pos_var.set(str(self.z_pos))
+
+        #Update camera pane labels
+        self.rpi_exposure_var.set(str(self.exposure_time))
+        self.rpi_analog_gain_var.set(str(self.analog_gain))
+        self.rpi_contrast_var.set(str(self.contrast))
+        self.rpi_colour_temp_var.set(str(self.colour_temp))
+
+        # Update last refreshed time
+        #Used in camera and motor pane
+        self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+
 
         #Update buttons only during status changes
         if prev_module_status != self.module_status :
@@ -943,17 +992,24 @@ class MainApp(ctk.CTk):
 
     #Function sends sample_data to raspberry pi
     #This function is called in function store_sample_data when the ok button is pressed
-    def send_sample_data(self, mount_type, sample_height, initial_height, sample_id):
+    def send_sample_data(self, mount_type, sample_id, initial_height, layer_height, width, height):
         """Stores sample data, sends it to the Raspberry Pi, and sends mode request."""
         # Store the sample data
+        self.sample_data['command'] = "create_sample"
+        self.sample_data['mode'] = "Manual"
         self.sample_data['mount_type'] = mount_type
-        self.sample_data['sample_height'] = sample_height
-        self.sample_data['initial_height'] = initial_height
         self.sample_data['sample_id'] = sample_id
+        self.sample_data['initial_height'] = initial_height
+        self.sample_data['layer_height'] = layer_height
+        self.sample_data['width'] = width
+        self.sample_data['height'] = height
 
         #Send sample data
         success_message = "Sample data sent."
         self.send_json_error_check(self.sample_data, success_message)
+        
+        #First sample loaded
+        self.sample_loaded = True
 
     #Send JSON data to raspberry pi to request to run a method
     #Use for simple requests: Homing_xy, update_image etc.
@@ -983,8 +1039,6 @@ class MainApp(ctk.CTk):
             #Send random sampling data
             success_message = "Random sampling data sent."
             self.send_json_error_check(self.sampling_data, success_message)
-
-            self.sample_loaded = True
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
     
@@ -1082,7 +1136,6 @@ class MainApp(ctk.CTk):
 
 #Motion
 #Go to function
-#Display current motor data
 #Imaging of location
 
 #Image tab
