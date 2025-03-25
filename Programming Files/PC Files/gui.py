@@ -168,6 +168,8 @@ class MainApp(ctk.CTk):
             self.display_motion_tab()
         elif tab_name == "Image":
             self.display_image_tab()
+        elif tab_name == "Details":
+            self.display_details_tab()
 
     #Main Tab Frames
     def display_main_tab(self):
@@ -431,7 +433,7 @@ class MainApp(ctk.CTk):
         cancel_button = ctk.CTkButton(homing_window, text="Cancel", command=homing_window.destroy, width=150)
         cancel_button.pack(pady=5)
 
-    #------------------------------- Motion, Image, Calibration, Deatils Frames ------------------------------------------#
+    #------------------------------- Motion, Image, Calibration, Details Tabs ------------------------------------------#
 
     # ------------------ Motion Tab ------------------ #
     def display_motion_tab(self):
@@ -715,6 +717,62 @@ class MainApp(ctk.CTk):
         self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
         self.last_refreshed_label.pack(pady=5)
     
+    # ------------------ Details Tab ------------------ #
+    def display_details_tab(self):
+        # Clear previous content in the content frame
+        self.clear_frame(self.content_frame)
+
+        # Main container frame (to hold both sections)
+        main_frame = ctk.CTkFrame(self.content_frame)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # ---------------- Instructions Section (Top) ---------------- #
+        instructions_frame = ctk.CTkFrame(main_frame)
+        instructions_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=5)
+
+        instructions_label = ctk.CTkLabel(instructions_frame, text="Instructions", font=("Arial", 18, "bold"), anchor="w")
+        instructions_label.pack(padx=10, pady=5, fill="x")
+
+        instructions_text = (
+            "1. Navigate through functionality using the tabs at the bottom of the GUI.\n\n"
+            "2. The two key methods 'Random Sampling' and 'Scanning' can be found on the main frame.\n\n"
+            "3. Before running one of the two methods, ensure you have loaded the sample data in "
+            "\"Create a New Sample\" located on the top left in the \"Main tab\"\n\n"
+            "4. Calibration is a routine that will give you a focused score on the cross-hairs on the platform. "
+            "This is intended for occasional use to level the platform and lens manually.\n\n"
+            "5. The motion tab provides functionality to disable the stepper motors, go to a coordinate, and home the system.\n\n"
+            "6. The image tab allows for changing the image and camera settings.\n\n"
+            "7. TIP: Whenever \"Stop\" is selected, the module will need to be homed again."
+        )
+
+        instructions_details = ctk.CTkLabel(instructions_frame, text=instructions_text, font=("Arial", 14), anchor="w", justify="left", wraplength=500)
+        instructions_details.pack(padx=10, pady=5, fill="x")
+
+        # ---------------- Folder Paths Section (Bottom) ---------------- #
+        folder_frame = ctk.CTkFrame(main_frame)
+        folder_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=5)
+
+        folder_label = ctk.CTkLabel(folder_frame, text="Image Directories", font=("Arial", 16, "bold"), anchor="w")
+        folder_label.pack(padx=10, pady=5, fill="x")
+
+        folders = [
+            ("GUI Images Folder", self.img_gui),
+            ("Scanning Folder", self.img_scanning_folder),
+            ("Sampling Folder", self.img_sampling_folder)
+        ]
+
+        for label, folder in folders:
+            entry_frame = ctk.CTkFrame(folder_frame)
+            entry_frame.pack(fill="x", padx=10, pady=2)
+
+            # Bold label
+            label_widget = ctk.CTkLabel(entry_frame, text=f"{label}: ", font=("Arial", 14, "bold"), anchor="w")
+            label_widget.pack(side="left")
+
+            # Folder path
+            folder_widget = ctk.CTkLabel(entry_frame, text=folder, font=("Arial", 14), anchor="w", justify="left", wraplength=500)
+            folder_widget.pack(side="left", fill="x", expand=True)
+
     # --------------------- Display Calibration Frame ------------------ #
     def display_calibration_layout(self, frame) :
         '''Displays Calibration Frame'''
@@ -964,7 +1022,6 @@ class MainApp(ctk.CTk):
             widget.destroy()
 
     #Incomplete
-    #Add button
     def add_button(self, frame, name, text, command=None, *args, **kwargs):
         """Helper function to create buttons and add them to the dictionary."""
 
@@ -976,7 +1033,6 @@ class MainApp(ctk.CTk):
         self.buttons[name] = button
 
     #Incomplete
-    #Disable buttons
     def disable_buttons(self, module_status, sample_data_loaded):
         '''Enable and Disable buttons based on status'''
         
@@ -1008,7 +1064,6 @@ class MainApp(ctk.CTk):
             else:
                 self.buttons[name].configure(state=ctk.DISABLED)
     
-    #Save image
     def save_image(self, save_dir: str, image_array = None, image_id = None, timestamp_on = False) :
         """
         Save an image using metadata from status data.
@@ -1321,7 +1376,7 @@ class MainApp(ctk.CTk):
     def start_stitching(self, grid_x, grid_y, input_dir, output_dir) :
         '''Creates thread for stitching'''
 
-        stitch_thread = Thread(target=self.image_stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir), daemon=True)
+        stitch_thread = Thread(target=self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir), daemon=True)
         stitch_thread.start()
 
 
@@ -1345,7 +1400,6 @@ class MainApp(ctk.CTk):
 
 #Scanning images
 #Populating images
-#image stitching
 #expand image
 
 #Motion
@@ -1356,5 +1410,3 @@ class MainApp(ctk.CTk):
 #Configure save image
 #Configure update image
 #Display image
-
-#Image stitching: calling it, threading, transferring files
