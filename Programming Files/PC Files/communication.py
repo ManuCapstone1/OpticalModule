@@ -15,11 +15,13 @@ class CommunicationHandler:
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
 
-    #Purpose: Send data to Raspberry Pi from PC, used as needed, called in gui.py
-    #Parameters: data: json object
-    #Return: response: json object response from raspberry pi
     def send_data(self, data, retries=3, delay=2):
-        """Send data to Raspberry Pi with retries in case of failure."""
+        '''
+        Purpose: Send data to Raspberry Pi from PC, used as needed, called in gui.py
+        Parameters: data: json object
+        Return: response: json object response from raspberry pi
+        '''
+
         for attempt in range(retries):
             try:
                 self.req_socket.send_json(data)
@@ -36,10 +38,11 @@ class CommunicationHandler:
                 print(f"Error sending data: {e}")
                 return {"error": "Send Error", "message": str(e)}
 
-    #Purpose: Receive updates in json file from raspberry pi as suscriber every ~1 second
-    #Parameters: gui.py
     def receive_status_updates(self, gui, stop_event):
-        """Listen for status updates from the Raspberry Pi and update the GUI."""
+        """
+        Purpose: Receive updates in json file from raspberry pi as suscriber every ~1 second
+        Parameters: gui.py
+        """
         while not stop_event.is_set():
             try:
                 # Receive the status update from Raspberry Pi
@@ -55,7 +58,11 @@ class CommunicationHandler:
                 time.sleep(1)  # Avoid flooding errors
 
     def close(self):
-        """Cleanup sockets when closing"""
+        """
+        Cleanup sockets when closing
+        Called when gui window closes
+        """
+
         self.req_socket.close()
         self.sub_socket.close()
         self.context.term()
