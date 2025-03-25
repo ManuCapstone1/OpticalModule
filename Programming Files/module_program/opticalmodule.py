@@ -73,8 +73,8 @@ class OpticalModule:
         self.stopLock = threading.Lock()
         self.motorStateLock = threading.Lock()
 
-    def add_sample(self, sampleID, sampleHeight, mmPerLayer):
-        self.currSample = Sample(sampleID, sampleHeight, mmPerLayer)
+    def add_sample(self, MountType, sampleID, initialHeight, mmPerLayer, width, height):
+        self.currSample = Sample(MountType, sampleID, initialHeight, mmPerLayer, width, height)
 
     def disable_motors(self):
         self.enPin.write(1)
@@ -481,7 +481,7 @@ class Camera:
         self.imageLock = threading.Lock()
 
 
-    def update_settings(self, exposureTime=None, analogGain=None, contrast=None, colorTemperature=None):
+    def update_settings(self, exposureTime=None, analogGain=None, contrast=None, colourTemperature=None):
         """
         Update the camera settings. For any parameter that is None, the existing setting is maintained.
         
@@ -498,8 +498,8 @@ class Camera:
                 self.currAnalogGain = analogGain
             if contrast is not None:
                 self.currContrast = contrast
-            if colorTemperature is not None:
-                self.currColourTemp = colorTemperature
+            if colourTemperature is not None:
+                self.currColourTemp = colourTemperature
 
         # Re-apply all settings after updates.
         self._apply_settings()
@@ -670,18 +670,43 @@ class LimitSwitch:
         return state 
 
 class Sample:
-    def __init__(self, sampleID, sampleHeight, mmPerLayer):
+    def __init__(self, mountType, sampleID, initialHeight, mmPerLayer, width, height):
+        self.mountType = mountType
         self.sampleID = sampleID
         self.mmPerLayer = mmPerLayer
-        self.sampleHeight = sampleHeight
+        self.sampleHeight = initialHeight
         self.boundingBox = [(0,0), (0,0), (0,0), (0,0)]
         self.boundingIsSet = False
-
+        self.set_bounding_box(width, height)
         self.currLayer = 0
 
-    def set_bounding_box(self, coordsList):
-        self.boundingBox = coordsList
+    def set_bounding_box(self, width: float, height: float):
+        """
+        Given the width and height in millimeters, compute the four corners of the bounding box.
+        
+        The center point of the bounding box is determined by the constant STAGECENTRE,
+        which is provided in steps and converted to mm using STEPDISTXY.
+        
+        Returns:
+            List of tuples representing the (x, y) coordinates of the bounding box corners.
+            Order: [bottom left, bottom right, top right, top left]
+        """
+        # Convert center from steps to mm.
+        center_x_mm = STAGECENTRE[0] * STEPDISTXY
+        center_y_mm = STAGECENTRE[1] * STEPDISTXY
+        
+        half_width = width / 2.0
+        half_height = height / 2.0
+
+        # Calculate corners of the bounding box
+        bottom_left  = (center_x_mm - half_width, center_y_mm - half_height)
+        bottom_right = (center_x_mm + half_width, center_y_mm - half_height)
+        top_right    = (center_x_mm + half_width, center_y_mm + half_height)
+        top_left     = (center_x_mm - half_width, center_y_mm + half_height)
+        
+        self.boundingBox = [bottom_left, bottom_right, top_right, top_left]
         self.boundingIsSet = True
+        return self.boundingBox
 
     def get_curr_height(self):
         return self.sampleHeight - (self.mmPerLayer * self.currLayer)

@@ -73,6 +73,24 @@ def handle_request():
             message = rep_socket.recv_json(flags=zmq.NOBLOCK)  # Non-blocking receive
             print(f"Received request: {message}")
             thread = threading.Thread()
+            if message["command"] is "update_settings" and not thread.is_alive():
+                thread = threading.Thread(target=shabam.cam.update_settings, kwargs={"exposureTime": message["exposure_time"], 
+                                                                                     "analogGain": message["analog_gain"], 
+                                                                                     "contrast": message["contrast"], 
+                                                                                     "colourTemperature": message["colour_temp"]})
+                thread.start()
+
+            if message["command"] is "create_sample" and not thread.is_alive():
+                thread = threading.Thread(target=shabam.add_sample, kwargs={"mountType": message["mount_type"],
+                                                                            "sampleID": message["sample_id"],
+                                                                            "initialHeight": message["initial_height"],
+                                                                            "mmPerLayer": message["layer_height"],
+                                                                            "width": message["width"],
+                                                                            "height": message["height"]})
+                                                                                      
+                                                                                     
+                thread.start()
+
             if message["command"] is "exe_sampling" and not thread.is_alive():
                 status_data["module_status"] = "Random Sampling Running"
                 status_data["total_image"] = message["total_image"]
@@ -93,6 +111,14 @@ def handle_request():
                 status_data["module_status"] = "Homing All" 
                 thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "home_all"})
                 # Execute homing routine
+            
+            if message["command"] is "exe_go_to" and not thread.is_alive():
+                status_data["module_status"] = "Changing Position" 
+                thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "go_to", 
+                                                                         "x": message["req_x_pos"],
+                                                                         "y": message["req_y_pos"],
+                                                                         "z": message["req_z_pos"]})
+                # Execute go to
 
             if message["command"] is "exe_update_image" and not thread.is_alive():
                 status_data["module_status"] = "Updating Image" 
