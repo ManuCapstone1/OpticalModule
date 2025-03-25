@@ -1,9 +1,11 @@
 import customtkinter as ctk
-from tkinter import filedialog, messagebox, font
+from tkinter import messagebox
 from PIL import Image, ImageTk
 from datetime import datetime
-import numpy as np
+
 import os
+import cv2
+from threading import Thread
 
 from communication import CommunicationHandler
 
@@ -96,8 +98,10 @@ class MainApp(ctk.CTk):
         ctk.set_appearance_mode("dark")  # Options: "dark", "light", "system"
 
         #Image related info from pi
-        #DIRECTORY
-        self.image_folder = "C:/Users/GraemeJF/Documents/Capstone/Test Pictures"
+        #dir
+        self.img_gui = "C:/Users/GraemeJF/Documents/Capstone/Images/GUI"
+        self.img_scanning_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/Stitching"
+        self.img_sampling_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/Sampling"
 
         # Top & Bottom Frames
         self.create_top_frame()
@@ -202,7 +206,8 @@ class MainApp(ctk.CTk):
     def display_placeholder_image(self, frame):
         '''Displays image on main tab in the right frame'''
 
-        img = Image.open("C:/Users/GraemeJF/Documents/Capstone/Test Pictures/assy_centered.png")  # Replace with your image path
+        #dir
+        img = Image.open(f"{self.img_gui}/assy_centered.png")  # Replace with your image path
         img = img.resize((1295, 1343), Image.LANCZOS)
         tilt_img = img.rotate(-1)
 
@@ -744,7 +749,8 @@ class MainApp(ctk.CTk):
         self.scan_image_grid = []  # Store references to image labels
 
         #Directory image path
-        img = Image.open("C:/Users/GraemeJF/Documents/Capstone/img.jpg")
+        #dir
+        img = Image.open(f"{self.img_scanning_folder}/img.jpg")
         img = img.resize((50, 50), Image.LANCZOS)
 
         # Create a CTkImage instance
@@ -789,7 +795,8 @@ class MainApp(ctk.CTk):
         sampling_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
         # Load available images
-        images = self.load_images_from_folder(self.image_folder)
+        #dir
+        images = self.load_images_from_folder(self.img_sampling_folder)
         available_images = len(images)
 
         # Adjust num_images to the available images count
@@ -1000,7 +1007,67 @@ class MainApp(ctk.CTk):
                 self.buttons[name].configure(state=ctk.NORMAL)
             else:
                 self.buttons[name].configure(state=ctk.DISABLED)
+    
+    #Save image
+    def save_image(self, save_dir: str, image_array = None, image_id = None, timestamp_on = False) :
+        """
+        Save an image using metadata from status data.
 
+        :param save_dir: Directory where the image will be saved
+        :param image_array: Array containing image metadata or image data
+        :param image_id: Identifier for the image (used in the filename)
+        :param timestamp_on: If True, append timestamp to the filename
+        
+        :return: The file path where the image was saved, or None if an error occurred
+        """
+
+        # Ensure the save directory exists
+        os.makedirs(save_dir, exist_ok=True)
+
+        #Add timestamp to filename if requested
+        if timestamp_on :
+            # Generate a unique filename using timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
+            filename = f"{image_id}_{timestamp}.jpg"
+        else :
+            filename = image_id
+        
+        file_path = os.path.join(save_dir, filename)
+
+        if image_id is None:
+                image_id = "0" #detaulf image_id
+
+        #Convert array to jpg
+        try:
+            if image_array is None or len(image_array) == 0:
+                print("Error: No image data provided.")
+                return None
+
+            # If current_image is a numpy array, convert it to RGB (OpenCV uses BGR by default)
+            # Assuming image_array is a 2D array (grayscale) or a 3D array (RGB)
+            if isinstance(image_array, np.ndarray):
+                if len(image_array.shape) == 2:  # Grayscale image
+                    image_rgb = cv2.cvtColor(image_array, cv2.COLOR_GRAY2RGB)
+                elif len(image_array.shape) == 3:  # RGB image
+                    image_rgb = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+                else:
+                    print("Error: Unsupported image format.")
+                    return None
+            else:
+                print("Error: Image data is not in the expected format.")
+                return None
+
+            # Save image
+            cv2.imwrite(file_path, image_rgb)
+            print(f"Image saved at: {file_path}")
+
+            return file_path  # Return the file path where the image was saved
+
+        except Exception as e:
+            # Log the error
+            print(f"Error saving image: {e}")
+            return None
+                    
     #============================== Communcation ====================================#
     
     #Setup communication
@@ -1097,17 +1164,21 @@ class MainApp(ctk.CTk):
         # Update last refreshed time
         #Used in camera and motor pane
         self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+
+        #Setup stitching routine
+        #dir
+        if prev_image_count != self.image_count and self.module_status == "Scanning" :
+            if self.current_image:
+                self.save_image(self.img_scanning_folder, self.current_image, f"sample_{self.image_count}", False)
+            
+            if self.image_count == self.total_image :
+                grid = self.total_image**0.5 #square root
+                self.start_stitching(grid, grid, self.img_scanning_folder, self.img_scanning_folder)
         
-        '''
-        #STILL NEED TO  TO DO
-        #Update buttons only during status changes
-        if prev_module_status != self.module_status :
-            self.disable_buttons(self.module_status, self.sample_loaded)
-        
-        if prev_image_count != self.image_count :
-            #Update images
-            return
-        '''
+        #Setup random sampling routinge
+        if prev_image_count != self.image_count and self.module_status == "Sampling" :
+            if self.current_image:
+                self.save_image(self.img_sampling_folder, self.current_image, f"{self.sample_id}_{self.image_count}", True)
 
     #Send sample data
     def send_sample_data(self, mount_type, sample_id, initial_height, layer_height, width, height):
@@ -1241,8 +1312,17 @@ class MainApp(ctk.CTk):
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
 
     # =============================== Image Stitching ==========================================#
+    
     def set_stitcher(self, stitcher) :
+        '''Creates object of stitcher'''
+
         self.stitcher = stitcher
+
+    def start_stitching(self, grid_x, grid_y, input_dir, output_dir) :
+        '''Creates thread for stitching'''
+
+        stitch_thread = Thread(target=self.image_stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir), daemon=True)
+        stitch_thread.start()
 
 
 #To do
