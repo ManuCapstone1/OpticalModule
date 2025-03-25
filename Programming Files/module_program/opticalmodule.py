@@ -10,8 +10,8 @@ import random
 # Constants
 STEPDISTXY = 0.212058/16
 STEPDISTZ = 0.01/16
-PULSEWIDTH = 100 / 1000000.0 # microseconds
-BTWNSTEPS = 1000 / 1000000.0
+PULSEWIDTH = 500 / 1000000.0 # microseconds
+BTWNSTEPS = 5000 / 1000000.0
 STAGEFOCUSHEIGHT = 85 # Need to determine real value
 STAGECENTRE = (8281, 7005) # Stage centre location in steps
 
@@ -63,6 +63,7 @@ class OpticalModule:
         }
         self.isHomed = False
         self.Stop = False
+        self.resetIdle = False
 
 
         # Threading Lock
@@ -73,8 +74,8 @@ class OpticalModule:
         self.stopLock = threading.Lock()
         self.motorStateLock = threading.Lock()
 
-    def add_sample(self, MountType, sampleID, initialHeight, mmPerLayer, width, height):
-        self.currSample = Sample(MountType, sampleID, initialHeight, mmPerLayer, width, height)
+    def add_sample(self, mountType, sampleID, initialHeight, mmPerLayer, width, height):
+        self.currSample = Sample(mountType, sampleID, initialHeight, mmPerLayer, width, height)
 
     def disable_motors(self):
         self.enPin.write(1)
@@ -171,7 +172,8 @@ class OpticalModule:
         print("Y")
         self.motorA.dir_pin.write(1)
         self.motorB.dir_pin.write(0)
-        while not self.limitSwitchY.is_pressed():      
+        while not self.limitSwitchY.is_pressed():  
+            print("here2")    
             self.motorA.step_pin.write(1)
             self.motorB.step_pin.write(1)
             time.sleep(PULSEWIDTH)
@@ -406,10 +408,15 @@ class OpticalModule:
         if callable(target):
             targetThread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
             targetThread.start()
+            print("here1")
             while True:
                 with self.stopLock:
+                    print(f"Stop: {self.Stop}")
+                    print(f"target: {targetThread.isDaemon()}")
                     if self.Stop or not targetThread.is_alive():
-                        break
+                        print("breaking")
+                        self.resetIdle = True
+                        return
                 time.sleep(0.01)
             return
         else:
@@ -662,6 +669,7 @@ class LimitSwitch:
 
     def is_pressed(self):
         """Returns True if the switch is triggered."""
+        print("ls")
         state = self.pin.read() == 0
         if self.pin.read() == 0:
             self.pin.mode = 1
