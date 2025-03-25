@@ -398,34 +398,56 @@ class MainApp(ctk.CTk):
 
     # ------------------ Motion Tab ------------------ #
     def display_motion_tab(self):
+        #Left frame
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
         right_frame = ctk.CTkFrame(self.content_frame)
         right_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
+        
+        #Middle frame
+        main_frame = ctk.CTkFrame(self.content_frame)
+        main_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
-        ctk.CTkButton(left_frame, text="Go To", font=("Arial", 20)).grid(row=0, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
+        #Frame within left frame that holds coordinate stuff
+        coord_frame = ctk.CTkFrame(left_frame)
+        coord_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=10)
+
+        # Create a separate button frame inside left_frame (placed at the bottom)
+        button_frame = ctk.CTkFrame(left_frame)
+        button_frame.pack(side=ctk.BOTTOM, fill="x", padx=10, pady=10)
+
+        # Left Frame: Entry Boxes and Buttons
+        coord_label = ctk.CTkLabel(coord_frame, text="Enter in desired coordinates:", font=("Arial", 14, "bold"))
+        coord_label.grid(row=0, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Position Controls
-        self.create_position_control(left_frame, "X", self.x_pos, row=1)
-        self.create_position_control(left_frame, "Y", self.y_pos, row=2)
-        self.create_position_control(left_frame, "Z", self.z_pos, row=3)
+        self.create_position_control(coord_frame, "X", self.x_pos, row=1)
+        self.create_position_control(coord_frame, "Y", self.y_pos, row=2)
+        self.create_position_control(coord_frame, "Z", self.z_pos, row=3)
+
+        #Send coordinates button
+        send_coord_btn = ctk.CTkButton(coord_frame, text="Send Coordinates", font=("Arial", 14))
+        send_coord_btn.grid(row=4, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Additional Controls
         #Disable stepper motors, checks if Idle
-        disable_motors_btn= ctk.CTkButton(left_frame, text="Disable Stepper Motors", command=lambda: self.send_simple_command("exe_disable_motors", True))
-        disable_motors_btn.grid(row=7, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
-        #ctk.CTkButton(left_frame, text="Homing", fg_color="green").grid(row=8, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
-        #ctk.CTkButton(left_frame, text="Calibration").grid(row=9, column=0, columnspan = 3, padx=5, pady=5, sticky='ew')
+        disable_motors_btn = ctk.CTkButton(button_frame, text="Disable Stepper Motors")
+        disable_motors_btn.pack(pady=5, fill="x")
+
+        #homing_btn = ctk.CTkButton(button_frame, text="Homing", fg_color="green")
+        #homing_btn.pack(pady=5, fill="x")
+        #calibrate_btn = ctk.CTkButton(button_frame, text="Calibration")
+        #calibrate_btn.pack(pady=5, fill="x")
 
         # Graph Display
         self.create_graphs(right_frame)
 
         #Stop button, for if running GoTo
-        stop_btn = ctk.CTkButton(right_frame, text="STOP", fg_color="red", command=lambda: self.send_simple_command("exe_stop", False))
-        stop_btn.pack(padx=10, pady=5)
-        #finish_btn = ctk.CTkButton(right_frame, text="Finish")
-        #finish_btn.pack(padx=50, pady=5)
+        stop_btn = ctk.CTkButton(button_frame, text="STOP", fg_color="red")
+        stop_btn.pack(pady=5, fill="x")
+        #finish_btn = ctk.CTkButton(button_frame, text="Finish")
+        #finish_btn.pack(pady=5, fill="x")
 
 
     # ------------------ Position Control ------------------ #
@@ -482,6 +504,7 @@ class MainApp(ctk.CTk):
         # Red Position Indicator (Mock) for Z-Axis Graph (Now aligned vertically)
         ctk.CTkLabel(z_graph, text="           ", fg_color="red").place(
             relx=0.5, rely=1 - (self.z_pos * 0.001), anchor='center')  # Flipped to align vertically
+    
 
     # ------------------ Time Updater ------------------ #
     def update_time(self):
@@ -1060,6 +1083,7 @@ class MainApp(ctk.CTk):
 #Motion
 #Go to function
 #Display current motor data
+#Imaging of location
 
 #Image tab
 #Add in default settings
