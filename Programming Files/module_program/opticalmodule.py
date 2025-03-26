@@ -27,7 +27,7 @@ class OpticalModule:
         # CNC Shield Arduino pins
         self.enPin = self.board.get_pin('d:8:o') 
         self.enPin.write(0)
-        self.motorsEnabled = True
+        #self.motorsEnabled = True
         self.motorA = StepperMotor(2, 5, self.board)
         self.motorB = StepperMotor(3, 6, self.board)
         self.motorZ = StepperMotor(4, 7, self.board)
@@ -61,33 +61,33 @@ class OpticalModule:
             "contrast" : self.cam.currContrast,
             "colour_temp" : self.cam.currColourTemp
         }
-        self.isHomed = False
-        self.Stop = False
-        self.resetIdle = False
+        #self.isHomed = False
+        #self.Stop = False
+        #self.resetIdle = False
 
 
         # Threading Lock
         self.positionLock = threading.Lock()
         self.cameraLock = threading.Lock()
         self.imageCountLock = threading.Lock()
-        self.homeLock = threading.Lock()
-        self.stopLock = threading.Lock()
-        self.motorStateLock = threading.Lock()
+        #self.homeLock = threading.Lock()
+        #self.motorStateLock = threading.Lock()
+        self.stop = threading.Event()
+        self.resetIdle = threading.Event()
+        self.isHomed = threading.Event()
+        self.motorsEnabled = threading.Event()
 
     def add_sample(self, mountType, sampleID, initialHeight, mmPerLayer, width, height):
         self.currSample = Sample(mountType, sampleID, initialHeight, mmPerLayer, width, height)
 
     def disable_motors(self):
         self.enPin.write(1)
-        with self.motorStateLock:
-            self.motorsEnabled = False
-        with self.homeLock:
-            self.isHomed = False
+        self.motorsEnabled.clear()
+        self.isHomed.clear()
 
     def enable_motors(self):
         self.enPin.write(0)
-        with self.motorStateLock:
-            self.motorsEnabled = True
+        self.motorsEnabled.set()
 
     def _move_ab(self, deltaA: int, deltaB: int):
         steps = abs(deltaA)
@@ -103,6 +103,10 @@ class OpticalModule:
             self.motorB.dir_pin.write(0)
 
         for i in range(steps):
+            if self.stop.is_set():
+                self.resetIdle.set()
+                self.isHomed.clear()
+                return
             self.motorA.step_pin.write(1)
             self.motorB.step_pin.write(1)
             time.sleep(PULSEWIDTH)
@@ -139,6 +143,10 @@ class OpticalModule:
             self.motorZ.dir_pin.write(0)
 
         for i in range(steps):
+            if self.stop.is_set():
+                self.resetIdle.set()
+                self.isHomed.clear()
+                return
             self.motorZ.step_pin.write(1)
             time.sleep(PULSEWIDTH)
             self.motorZ.step_pin.write(0)
@@ -173,7 +181,10 @@ class OpticalModule:
         self.motorA.dir_pin.write(1)
         self.motorB.dir_pin.write(0)
         while not self.limitSwitchY.is_pressed():  
-            print("here2")    
+            if self.stop.is_set():
+                self.resetIdle.set()
+                self.isHomed.clear()
+                return
             self.motorA.step_pin.write(1)
             self.motorB.step_pin.write(1)
             time.sleep(PULSEWIDTH)
@@ -185,7 +196,11 @@ class OpticalModule:
         print("X")
         self.motorA.dir_pin.write(1)
         self.motorB.dir_pin.write(1)
-        while not self.limitSwitchX.is_pressed():      
+        while not self.limitSwitchX.is_pressed():
+            if self.stop.is_set():
+                self.resetIdle.set()
+                self.isHomed.clear()
+                return      
             self.motorA.step_pin.write(1)
             self.motorB.step_pin.write(1)
             time.sleep(PULSEWIDTH)
@@ -196,19 +211,23 @@ class OpticalModule:
             self.currX = 0
     
     def home_all(self):
+        self.stop.clear()
+
         self.home_xy()
 
         print("Z")
         self.motorZ.dir_pin.write(0)
-        while not self.limitSwitchZ.is_pressed():      
+        while not self.limitSwitchZ.is_pressed():
+            if self.stop.is_set():
+                self.resetIdle.set()
+                return      
             self.motorZ.step_pin.write(1)
             time.sleep(PULSEWIDTH)
             self.motorZ.step_pin.write(0)
             time.sleep(BTWNSTEPS)
         with self.positionLock:
             self.currZ = 0
-        with self.homeLock:
-            self.isHomed = True
+            self.isHomed.set()
 
     # # Returns image from camera in array format
     # def get_image_array(self, updateImage=False) -> any:
@@ -285,6 +304,9 @@ class OpticalModule:
 
         # Move from zMin to zMax in steps of stepSize
         for z in range(zMinMicron, zMaxMicron + stepSizeMicron, stepSizeMicron):
+            if self.stop.is_set():
+                self.resetIdle.set()
+                return
             # Move to the current z position using go_to
             self.go_to(z=z/1000)
 
@@ -326,9 +348,7 @@ class OpticalModule:
         if self.cam.calculate_focus_score() < 1:
             print("Sample not detected or not in focus")
             return
-        with self.homeLock:
-            isHomed = self.isHomed
-        if not isHomed:
+        if not self.isHomed.is_set():
             self.home_all()
         with self.imageCountLock:   
             self.totalImages = numImages
@@ -347,6 +367,9 @@ class OpticalModule:
         with self.imageCountLock:
             self.cam.imageCount = 0
         for point in random_points:
+            if self.stop.is_set():
+                self.resetIdle.set()
+                return
             self.go_to(x=point[0], y=point[1])
             with self.imageCountLock:
                 self.cam.imageCount = self.cam.imageCount + 1
@@ -368,9 +391,7 @@ class OpticalModule:
         if self.cam.calculate_focus_score() < 1:
             print("Sample not detected or not in focus")
             return
-        with self.homeLock:
-            isHomed = self.isHomed
-        if not isHomed:
+        if not self.isHomed.is_set():
             self.home_all()
 
         capturedImages = []
@@ -388,6 +409,9 @@ class OpticalModule:
             self.cam.imageCount = 0
         for x in x_positions:
             for y in y_positions:
+                if self.stop.is_set():
+                    self.resetIdle.set()
+                    return
                 self.go_to(x=x, y=y)
                 time.sleep(0.5)  # Allow system to stabilize
                 with self.imageCountLock:
@@ -408,17 +432,10 @@ class OpticalModule:
         if callable(target):
             targetThread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
             targetThread.start()
+            targetThread.join()
+            self.resetIdle.set()
+
             print("here1")
-            while True:
-                with self.stopLock:
-                    print(f"Stop: {self.Stop}")
-                    print(f"target: {targetThread.isDaemon()}")
-                    if self.Stop or not targetThread.is_alive():
-                        print("breaking")
-                        self.resetIdle = True
-                        return
-                time.sleep(0.01)
-            return
         else:
             raise AttributeError(f"'{type(self).__name__}' has no callable method '{targetMethod}'")
 

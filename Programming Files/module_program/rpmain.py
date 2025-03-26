@@ -64,9 +64,9 @@ def update_status_data():
     with shabam.cam.imageLock:
         status_data["current_image"] = shabam.cam.currImage
         status_data["image_metadata"] = shabam.currImageMetadata
-    if shabam.resetIdle == True:
+    if shabam.resetIdle.is_set():
         status_data["module_status"] = "Idle"
-        shabam.resetIdle = False
+        shabam.resetIdle.clear()
 
 
 # Handler for receiving data from the PC
@@ -78,7 +78,16 @@ def handle_request():
         try:            
             message = rep_socket.recv_json()  # blocking receive
             print(f"Received request: {message}")
-            
+            response = {"status": "received", "error": None}
+
+            if thread.is_alive():
+                response["error"] = "Process Incomplete"
+                rep_socket.send_json(response)
+                continue
+                
+            if shabam.stop.is_set():
+                response["error"] = "System stopped; homing required"
+
             if message["command"] == "update_settings" and not thread.is_alive():
                 thread = threading.Thread(target=shabam.cam.update_settings, kwargs={"exposureTime": message["exposure_time"], 
                                                                                      "analogGain": message["analog_gain"], 
@@ -129,21 +138,16 @@ def handle_request():
                 # Execute go to
 
             if message["command"] == "exe_update_image" and not thread.is_alive():
-                status_data["module_status"] = "Updating Image" 
                 thread = threading.Thread(target=shabam.update_image)
                 thread.start()
                 # Execute update image
 
             if message["command"] == "exe_stop":
                 status_data["module_status"] = "Stopping..."
-                
-                with shabam.stopLock:
-                    shabam.Stop = True
-                with shabam.homeLock:
-                    shabam.isHomed = False
+                shabam.stop.set()
                 # Execute stopping routine
 
-            rep_socket.send_json({"status": "received"})  # Acknowledge request
+            rep_socket.send_json(response)  # Acknowledge request
             #print(thread.is_alive())
         except zmq.Again:  # No message received, continue loop
             if status_data["module_status"] != "Idle" and thread.is_alive() == False:
