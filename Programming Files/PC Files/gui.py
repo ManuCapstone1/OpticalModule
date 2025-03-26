@@ -1385,11 +1385,6 @@ class MainApp(ctk.CTk):
 #Calibration
 #Fill in frame
 
-#Details
-#instructions on how to use
-#Temperature
-#File directory
-
 #BUTTONS
 #addButton function
 #configure buttons, disable
