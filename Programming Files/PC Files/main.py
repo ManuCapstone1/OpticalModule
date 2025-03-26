@@ -6,12 +6,10 @@ from stitcher import ImageStitcher
 
 def main():
 
-    #Instantiate gui app
-    gui = MainApp() 
+    gui = MainApp() #Instantiate gui
+    stop_event = threading.Event()  #Stop event for killing theads when gui closes
 
-    stop_event = threading.Event()
-
-    #--------------Setup communication and thread for raspberry pi -----------------------
+    '''Setup communication and thread for raspberry pi'''
     try:
         comms = CommunicationHandler() #instantiate communication handler
 
@@ -22,24 +20,21 @@ def main():
         status_thread = threading.Thread(target=comms.receive_status_updates, args=(gui, stop_event), daemon=True)
         status_thread.start()
      
-
-        #Event in GUI to destroy thread if GUI closes
         gui.stop_event = stop_event
 
     #Throw exception if raspberry pi is offline   
     except Exception as e:
         messagebox.showerror("Error", f"Could not establish communcation: {e}")
 
-    #------------------------- Setup image stitcher --------------------------------
+    '''Image stitcher setup'''
     try:
         stitcher = ImageStitcher() #instantiate image stitcher
         gui.set_stitcher(stitcher) #Setup stitcher in gui
-        
-    #Throw error if image stitcher fails
+
     except Exception as e:
         messagebox.showerror("Error", f"Could not setup image stitcher: {e}")
 
-    # Handle cleanup on close
+    #Closes sockets and gui
     def on_closing():
         stop_event.set()  # Signal the thread to stop
         gui.destroy()  # Close the GUI
@@ -47,9 +42,8 @@ def main():
 
     gui.protocol("WM_DELETE_WINDOW", on_closing)
 
-    #Open and start GUI app
-    gui.mainloop()
+    gui.mainloop() #Start gui
 
-#START ALL PC CODE HERE
+#START
 if __name__ == "__main__":
     main()
