@@ -355,6 +355,8 @@ class OpticalModule:
         # Save image
         cv2.imwrite(file_path, image_rgb)
         self.update_image_metadata(True)
+
+        return image
     
     def random_sampling(self, numImages, saveImages: bool):
         if self.currSample is None or not self.currSample.boundingIsSet:
@@ -392,8 +394,7 @@ class OpticalModule:
             if saveImages: 
                 imageArr = self.cam.save_image(self.saveDir, self.currSample)
             else:
-                imageArr = self.cam.update_curr_image(self.currSample)
-            self.update_image_metadata()
+                imageArr = self.update_image()
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
         self.currSample.currLayer = self.currSample.currLayer + 1
         self.home_xy()
@@ -434,7 +435,7 @@ class OpticalModule:
                 if saveImages:
                     imageArr = self.cam.save_image(self.saveDir, self.currSample)
                 else:    
-                    imageArr = self.cam.update_curr_image(self.currSample)
+                    imageArr = self.update_image()
                 capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))              
         self.currSample.currLayer = self.currSample.currLayer + 1
         self.home_xy()
