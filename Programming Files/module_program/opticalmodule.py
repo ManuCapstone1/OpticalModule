@@ -7,6 +7,7 @@ from picamera2 import Picamera2, Preview
 import threading
 import os
 import random
+import json
 
 # Constants
 STEPDISTXY = 0.212058/16
@@ -65,7 +66,7 @@ class OpticalModule:
         #self.isHomed = False
         #self.Stop = False
         #self.resetIdle = False
-
+        self.bufferDir = "/home/microscope/image_buffer"
 
         # Threading Lock
         self.positionLock = threading.Lock()
@@ -324,38 +325,36 @@ class OpticalModule:
 
         return bestFocusValue
     
-    def update_image_metadata(self):
-        print(0)
+    def update_image_metadata(self, save=False):
         self.currImageMetadata["image_name"] = self.cam.currImageName
-        print(1)
         self.currImageMetadata["sample_id"] = self.currSample.sampleID
-        print(2)
         self.currImageMetadata["timestamp"] = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
-        print(3)
         self.currImageMetadata["sample_layer"] = self.currSample.currLayer
-        print(4)
         self.currImageMetadata["image_number"] = self.cam.imageCount
-        print(5)
         self.currImageMetadata["image_x_pos"] = self.get_curr_pos_mm('x')
-        print(6)
         self.currImageMetadata["image_y_pos"] = self.get_curr_pos_mm('y')
-        print(7)
         self.currImageMetadata["image_z_pos"] = self.get_curr_pos_mm('z')
-        print(8)
         self.currImageMetadata["exposure_time"] = self.cam.currExposureTime
-        print(9)
         self.currImageMetadata["analog_gain"] = self.cam.currAnalogGain
-        print(10)
         self.currImageMetadata["contrast"] = self.cam.currContrast
-        print(11)
         self.currImageMetadata["colour_temp"] = self.cam.currColourTemp
-        print(12)
+        if save:
+            filepath = os.path.join(self.bufferDir, f"{self.currImageMetadata[F"image_name"]}.txt")
+            with open(filepath, "w") as file:
+                json.dump(self.currImageMetadata, file, indent=4)
 
     def update_image(self):
         print("update Image")
-        self.cam.update_curr_image(self.currSample)
-        print("image complete")
-        self.update_image_metadata()
+        image = self.cam.update_curr_image(self.currSample)
+        filename = f"{self.currImageMetadata[F"image_name"]}.jpg"
+        file_path = os.path.join(self.bufferDir, filename)
+
+        # Convert image to RGB for saving
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Save image
+        cv2.imwrite(file_path, image_rgb)
+        self.update_image_metadata(True)
     
     def random_sampling(self, numImages, saveImages: bool):
         if self.currSample is None or not self.currSample.boundingIsSet:

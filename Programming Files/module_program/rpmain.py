@@ -34,8 +34,6 @@ status_data = {
     "colour_temp" : shabam.cam.currColourTemp,
     "total_image": 0,
     "image_count": 0,
-    "current_image" : shabam.cam.currImage.tolist(),
-    "image_metadata" : shabam.currImageMetadata,
     "motors_enabled" : shabam.motorsEnabled.is_set()
 }
 
@@ -62,12 +60,6 @@ def update_status_data():
     with shabam.imageCountLock:
         status_data["image_count"] = shabam.cam.imageCount
         status_data["total_image"] = shabam.totalImages
-    with shabam.cam.imageLock:
-        print(type(shabam.cam.currImage))
-        imageList = shabam.cam.currImage.tolist()
-        print("pookie")
-        status_data["current_image"] =imageList
-        status_data["image_metadata"] = shabam.currImageMetadata
     if shabam.resetIdle.is_set():
         status_data["module_status"] = "Idle"
         shabam.resetIdle.clear()
