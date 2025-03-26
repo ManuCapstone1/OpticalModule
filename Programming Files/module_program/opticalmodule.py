@@ -2,6 +2,7 @@ import pyfirmata
 import time
 import math
 import cv2
+import numpy as np
 from picamera2 import Picamera2, Preview
 import threading
 import os
@@ -9,9 +10,9 @@ import random
 
 # Constants
 STEPDISTXY = 0.212058/16
-STEPDISTZ = 0.01/16
-PULSEWIDTH = 500 / 1000000.0 # microseconds
-BTWNSTEPS = 5000 / 1000000.0
+STEPDISTZ = 0.01/4
+PULSEWIDTH = 100 / 1000000.0 # microseconds
+BTWNSTEPS = 1000 / 1000000.0
 STAGEFOCUSHEIGHT = 85 # Need to determine real value
 STAGECENTRE = (8281, 7005) # Stage centre location in steps
 
@@ -212,7 +213,7 @@ class OpticalModule:
     
     def home_all(self):
         self.stop.clear()
-
+        self.enable_motors()
         self.home_xy()
 
         print("Z")
@@ -324,21 +325,36 @@ class OpticalModule:
         return bestFocusValue
     
     def update_image_metadata(self):
+        print(0)
         self.currImageMetadata["image_name"] = self.cam.currImageName
+        print(1)
         self.currImageMetadata["sample_id"] = self.currSample.sampleID
+        print(2)
         self.currImageMetadata["timestamp"] = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
+        print(3)
         self.currImageMetadata["sample_layer"] = self.currSample.currLayer
+        print(4)
         self.currImageMetadata["image_number"] = self.cam.imageCount
+        print(5)
         self.currImageMetadata["image_x_pos"] = self.get_curr_pos_mm('x')
+        print(6)
         self.currImageMetadata["image_y_pos"] = self.get_curr_pos_mm('y')
+        print(7)
         self.currImageMetadata["image_z_pos"] = self.get_curr_pos_mm('z')
+        print(8)
         self.currImageMetadata["exposure_time"] = self.cam.currExposureTime
+        print(9)
         self.currImageMetadata["analog_gain"] = self.cam.currAnalogGain
+        print(10)
         self.currImageMetadata["contrast"] = self.cam.currContrast
+        print(11)
         self.currImageMetadata["colour_temp"] = self.cam.currColourTemp
+        print(12)
 
     def update_image(self):
+        print("update Image")
         self.cam.update_curr_image(self.currSample)
+        print("image complete")
         self.update_image_metadata()
     
     def random_sampling(self, numImages, saveImages: bool):
@@ -484,8 +500,8 @@ class Camera:
         self.picam = Picamera2(0)
         
         # Create variables for camera settings
-        self.currExposureTime = 10000       # Example exposure time in microseconds
-        self.currAnalogGain = 1.0           # Default analogue gain (1.0 = no gain)
+        self.currExposureTime = 100000       # Example exposure time in microseconds
+        self.currAnalogGain = 2           # Default analogue gain (1.0 = no gain)
         self.currContrast = 1.0             # Default contrast (1.0 is neutral)
         self.currColourTemp = 6000          # Default colour temperature in Kelvin
 
@@ -496,7 +512,7 @@ class Camera:
         self._apply_settings()
 
         # Misc Variables
-        self.currImage = []
+        self.currImage = np.array([])
         self.currImageName = "None"
         self.imageCount = 0
 
@@ -548,6 +564,7 @@ class Camera:
         self.picam.set_controls(controls)
     
     def update_curr_image(self, sample):
+        print("in cam")
         self.update_image_name(sample)
         return self.get_image_array(True)
 
@@ -567,7 +584,7 @@ class Camera:
         return laplacian.var()
     
     def get_image_array(self, updateImage=False) -> any:
-
+        print("getting image arr")
         try:
             self.picam.start()
             array = self.picam.capture_array("main")
@@ -686,7 +703,7 @@ class LimitSwitch:
 
     def is_pressed(self):
         """Returns True if the switch is triggered."""
-        print("ls")
+
         state = self.pin.read() == 0
         if self.pin.read() == 0:
             self.pin.mode = 1
