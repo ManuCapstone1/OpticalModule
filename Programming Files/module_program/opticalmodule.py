@@ -346,7 +346,7 @@ class OpticalModule:
     def update_image(self):
         print("update Image")
         image = self.cam.update_curr_image(self.currSample)
-        filename = f"{self.currImageMetadata[F"image_name"]}.jpg"
+        filename = f"{self.cam.currImageName}.jpg"
         file_path = os.path.join(self.bufferDir, filename)
 
         # Convert image to RGB for saving
