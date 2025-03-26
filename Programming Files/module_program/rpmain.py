@@ -34,9 +34,9 @@ status_data = {
     "colour_temp" : shabam.cam.currColourTemp,
     "total_image": 0,
     "image_count": 0,
-    "current_image" : shabam.cam.currImage,
+    "current_image" : shabam.cam.currImage.tolist(),
     "image_metadata" : shabam.currImageMetadata,
-    "motors_enabled" : shabam.motorsEnabled
+    "motors_enabled" : shabam.motorsEnabled.is_set()
 }
 
 # Send status updates periodically with JSON file
@@ -44,9 +44,10 @@ def send_status_updates():
     while True:
         # Simulate the Raspberry Pi periodically updating status data
         update_status_data()
+        print("sending")
         pub_socket.send_json(status_data)
         print("Sent status update to the PC...")
-        time.sleep(1)  # Wait 1 second before sending the next update
+        time.sleep(10)  # Wait 1 second before sending the next update
 
 def update_status_data():
     with shabam.positionLock:
@@ -62,11 +63,15 @@ def update_status_data():
         status_data["image_count"] = shabam.cam.imageCount
         status_data["total_image"] = shabam.totalImages
     with shabam.cam.imageLock:
-        status_data["current_image"] = shabam.cam.currImage
+        print(type(shabam.cam.currImage))
+        imageList = shabam.cam.currImage.tolist()
+        print("pookie")
+        status_data["current_image"] =imageList
         status_data["image_metadata"] = shabam.currImageMetadata
     if shabam.resetIdle.is_set():
         status_data["module_status"] = "Idle"
         shabam.resetIdle.clear()
+    status_data["motors_enabled"] = shabam.motorsEnabled.is_set()
 
 
 # Handler for receiving data from the PC
@@ -78,21 +83,24 @@ def handle_request():
         try:            
             message = rep_socket.recv_json()  # blocking receive
             print(f"Received request: {message}")
-            response = {"status": "received", "error": None}
+            response = {"status": "received"}
 
             if thread.is_alive():
-                response["error"] = "Process Incomplete"
-                rep_socket.send_json(response)
-                continue
+                #response["error"] = "Process Incomplete"
+                #rep_socket.send_json(response)
+                pass
                 
             if shabam.stop.is_set():
-                response["error"] = "System stopped; homing required"
-
+                #response["error"] = "System stopped; homing required"
+                pass
             if message["command"] == "update_settings" and not thread.is_alive():
                 thread = threading.Thread(target=shabam.cam.update_settings, kwargs={"exposureTime": message["exposure_time"], 
                                                                                      "analogGain": message["analog_gain"], 
                                                                                      "contrast": message["contrast"], 
                                                                                      "colourTemperature": message["colour_temp"]})
+                thread.start()
+            if message["command"] == "exe_disable_motors" and not thread.is_alive():
+                thread = threading.Thread(target=shabam.disable_motors)
                 thread.start()
 
             if message["command"] == "create_sample" and not thread.is_alive():
@@ -114,7 +122,8 @@ def handle_request():
 
             if message["command"] == "exe_scanning" and not thread.is_alive():
                 status_data["module_status"] = "Scanning Running"
-                # Execute scanning routine
+                thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "scanning_images", "step_size_x": message["step_x"], "step_size_y": message["step_y"], "saveImages": False})
+                thread.start()
 
             if message["command"] == "exe_homing_xy" and not thread.is_alive():
                 status_data["module_status"] = "Homing XY" 
@@ -128,7 +137,7 @@ def handle_request():
                 thread.start()
                 # Execute homing routine
             
-            if message["command"] == "exe_go_to" and not thread.is_alive():
+            if message["command"] == "exe_goto" and not thread.is_alive():
                 status_data["module_status"] = "Changing Position" 
                 thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "go_to", 
                                                                          "x": message["req_x_pos"],
