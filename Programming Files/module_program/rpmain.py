@@ -32,6 +32,7 @@ status_data = {
     "analog_gain" : shabam.cam.currAnalogGain,
     "contrast" : shabam.cam.currContrast,
     "colour_temp" : shabam.cam.currColourTemp,
+    "curr_sample_id": "None",
     "total_image": 0,
     "image_count": 0,
     "motors_enabled" : shabam.motorsEnabled.is_set()
@@ -45,7 +46,7 @@ def send_status_updates():
         print("sending")
         pub_socket.send_json(status_data)
         print("Sent status update to the PC...")
-        time.sleep(10)  # Wait 1 second before sending the next update
+        time.sleep(1)  # Wait 1 second before sending the next update
 
 def update_status_data():
     with shabam.positionLock:
@@ -64,7 +65,8 @@ def update_status_data():
         status_data["module_status"] = "Idle"
         shabam.resetIdle.clear()
     status_data["motors_enabled"] = shabam.motorsEnabled.is_set()
-
+    if shabam.currSample != None:
+        status_data["curr_sample_id"] = shabam.currSample.sampleID
 
 # Handler for receiving data from the PC
 def handle_request():
