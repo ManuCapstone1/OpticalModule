@@ -14,7 +14,7 @@ STEPDISTXY = 0.212058/16
 STEPDISTZ = 0.01/4
 PULSEWIDTH = 100 / 1000000.0 # microseconds
 BTWNSTEPS = 1000 / 1000000.0
-STAGEFOCUSHEIGHT = 85 # Need to determine real value
+STAGEFOCUSHEIGHT = 36860*STEPDISTZ 
 STAGECENTRE = (8281, 7005) # Stage centre location in steps
 
 class OpticalModule:
@@ -295,8 +295,8 @@ class OpticalModule:
     # Finds and moves the platform to the best focus position 
     def auto_focus(self, zMin=None, zMax=None, stepSize=None, blur=5):
         if zMin is None or zMax is None or stepSize is None:
-            zMin = self.currSample.get_curr_height() + STAGEFOCUSHEIGHT - 1
-            zMax = self.currSample.get_curr_height() + STAGEFOCUSHEIGHT + 1
+            zMin = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() - 1
+            zMax = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() + 1
             stepSize = 0.05
         bestFocusValue = -1
         bestZPosition = zMin
@@ -339,7 +339,7 @@ class OpticalModule:
         self.currImageMetadata["contrast"] = self.cam.currContrast
         self.currImageMetadata["colour_temp"] = self.cam.currColourTemp
         if save:
-            filepath = os.path.join(self.bufferDir, f"{self.currImageMetadata[F"image_name"]}.txt")
+            filepath = os.path.join(self.bufferDir, f"{self.currImageMetadata['image_name']}.txt")
             with open(filepath, "w") as file:
                 json.dump(self.currImageMetadata, file, indent=4)
 
@@ -362,11 +362,14 @@ class OpticalModule:
         if self.currSample is None or not self.currSample.boundingIsSet:
             print("Bounding box not set. Cannot take images.")
             return
+        
+        if not self.isHomed.is_set():
+            self.home_all()
+        self.go_to(x=STAGECENTRE[0]*STEPDISTXY, y=STAGECENTRE[1]*STEPDISTXY)
+        self.auto_focus()
         if self.cam.calculate_focus_score() < 1:
             print("Sample not detected or not in focus")
             return
-        if not self.isHomed.is_set():
-            self.home_all()
         with self.imageCountLock:   
             self.totalImages = numImages
         # Create list of captured images
@@ -397,6 +400,9 @@ class OpticalModule:
                 imageArr = self.update_image()
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
         self.currSample.currLayer = self.currSample.currLayer + 1
+        #limit switches need to be reset.
+        self.limitSwitchX.is_pressed()
+        self.limitSwitchY.is_pressed()
         self.home_xy()
         return capturedImages
     
@@ -409,7 +415,8 @@ class OpticalModule:
             return
         if not self.isHomed.is_set():
             self.home_all()
-
+        self.go_to(x=STAGECENTRE[0]*STEPDISTXY, y=STAGECENTRE[1]*STEPDISTXY)
+        self.auto_focus()
         capturedImages = []
 
         x_coords = [point[0] for point in self.currSample.boundingBox]
@@ -557,9 +564,8 @@ class Camera:
             "ExposureTime": self.currExposureTime,
             "AnalogueGain": self.currAnalogGain,
             "Contrast": self.currContrast,
-            "ColourGains": (redGain, blueGain)
         }
-        
+        #            "ColourGains": (redGain, blueGain)
         # Apply the controls to the camera.
         self.picam.set_controls(controls)
     
