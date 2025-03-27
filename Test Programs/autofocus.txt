@@ -1,222 +1,223 @@
-1.357117325260732
+Sent status update to the PC...
+0.981151677919043
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.2732484791876102
+1.3328463997759141
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.3711967216409968
+1.3579687281715214
 getting image arr
 sending
 Sent status update to the PC...
-1.3790681012937362
-getting image arr
-sending
-Sent status update to the PC...
-sending
-Sent status update to the PC...
-1.392471840954115
+1.3589886866869951
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.4116611135994344
+1.379632999782826
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.43785544024354
-getting image arr
-sending
-Sent status update to the PC...
-1.4660100693117852
+1.4157000998158065
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.5000664488459066
+1.4286957918093877
+getting image arr
+sending
+Sent status update to the PC...
+1.449771590786295
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.5573057506523027
+1.4773364505210211
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.6160484844079852
+1.511246604504382
 getting image arr
 sending
 Sent status update to the PC...
-1.662839165357153
+1.5630937700685594
+sending
+Sent status update to the PC...
 getting image arr
 sending
 Sent status update to the PC...
-sending
-Sent status update to the PC...
-1.721194126302566
-getting image arr
-sending
-Sent status update to the PC...
-sending
-Sent status update to the PC...
-1.7916704228059297
+1.6175444543043798
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.8865623315141122
-getting image arr
-sending
-Sent status update to the PC...
-7.98930709307962
+1.694625868146822
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-2.1607126044381135
+1.7635974370207992
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-2.3892258912969897
+1.8258446713086736
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-2.629143821717701
+1.9635348811334856
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-3.4046847425300215
+2.120664750457117
 getting image arr
 sending
 Sent status update to the PC...
-4.076925915326836
-getting image arr
-sending
-Sent status update to the PC...
-sending
-Sent status update to the PC...
-4.508213681673151
+2.4955219308781347
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-5.017263464993619
+2.8093347736270484
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-5.17792684201915
-getting image arr
-sending
-Sent status update to the PC...
-4.430596565700529
+3.2610988377419194
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-4.784877314024183
+3.7605666502225024
+getting image arr
+sending
+Sent status update to the PC...
+4.423779342368697
+sending
+Sent status update to the PC...
+getting image arr
+sending
+Sent status update to the PC...
+4.9564555649928215
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-4.269946137787279
+5.241725140751019
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-3.866502192979285
+5.005630466222141
+getting image arr
+sending
+Sent status update to the PC...
+4.757232732579217
+sending
+Sent status update to the PC...
+getting image arr
+sending
+Sent status update to the PC...
+3.067055088406209
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-3.3585221915066508
-getting image arr
-sending
-Sent status update to the PC...
-2.7343972758404154
+3.6803649672124443
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-2.5022219895300437
+3.2043493878339206
+getting image arr
+sending
+Sent status update to the PC...
+2.691208144550838
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-8.700697178178926
+2.437592102851844
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-2.149084148556034
-getting image arr
-sending
-Sent status update to the PC...
-1.998203494372958
+2.259604110676271
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.8253328940068227
+2.053427480404277
+getting image arr
+sending
+Sent status update to the PC...
+1.914220971985889
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.7301591580788143
-getting image arr
-sending
-Sent status update to the PC...
-1.6710193793986106
+1.7942047621343509
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.6138551502773517
+1.719354665109036
+getting image arr
+sending
+Sent status update to the PC...
+1.534323392015904
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.5318779130526679
+1.5838671964035729
 getting image arr
 sending
 Sent status update to the PC...
 sending
 Sent status update to the PC...
-1.505982743392737
+1.530689615805156
 getting image arr
 sending
 Sent status update to the PC...
-1.4761250657790486
+sending
+Sent status update to the PC...
+1.492819171916158
+getting image arr
+sending
+Sent status update to the PC...
+1.4709173001196387
 sending
