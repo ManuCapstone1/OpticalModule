@@ -3,6 +3,7 @@ from gui import MainApp
 from communication import CommunicationHandler
 from tkinter import messagebox
 from stitcher import ImageStitcher
+from transfer_files import RaspberryPiTransfer
 
 def main():
 
@@ -34,7 +35,17 @@ def main():
     except Exception as e:
         messagebox.showerror("Error", f"Could not setup image stitcher: {e}")
 
-    #Closes sockets and gui
+    '''Raspberry Pi file transfer setup'''
+    try:
+        # Raspberry Pi file transfer setup
+        transfer = RaspberryPiTransfer()
+        gui.set_rpi_transfer(transfer)
+
+    except Exception as e:
+        messagebox.showerror("Error", f"Could not transfer files: {e}")
+    
+
+    '''Closes sockets and gui'''
     def on_closing():
         stop_event.set()  # Signal the thread to stop
         gui.destroy()  # Close the GUI
