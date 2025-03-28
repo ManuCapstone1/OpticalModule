@@ -47,7 +47,8 @@ class CommunicationHandler:
             try:
                 # Receive the status update from Raspberry Pi
                 status_data = self.sub_socket.recv_json(flags=zmq.NOBLOCK)
-                print(f"Received status update: {status_data}")
+                #Status updates sent to terminal for debugging
+                print(f"Received status update: {status_data['module_status']} {status_data['image_count']} {status_data['total_image']} {status_data['curr_sample_id']}")
 
                 # Update the GUI with received status data
                 gui.after(0, gui.update_status_data, status_data)

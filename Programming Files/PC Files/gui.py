@@ -2,9 +2,12 @@ import customtkinter as ctk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 from datetime import datetime
+import time
+import json
+import re
 
 import os
-import cv2
+
 from threading import Thread
 
 from communication import CommunicationHandler
@@ -37,8 +40,7 @@ class MainApp(ctk.CTk):
 
         self.total_image = 0
         self.image_count = 0
-        self.current_image = []
-        self.image_metadata = {}
+        self.curr_sample_id = "Unknown"
 
         #------ JSON Objects sent to rapsberry pi ------#
         #Sample data
@@ -46,7 +48,7 @@ class MainApp(ctk.CTk):
             "command" :"Unknown",
             "mode" : "Unknown",
             "mount_type" : "Unknown",
-            "sample_id" : "Unkown",
+            "sample_id" : "Unknown",
             "initial_height" : 0.0,
             "layer_height" : 0.0,
             "width" : 0.0,
@@ -72,6 +74,8 @@ class MainApp(ctk.CTk):
 
         #-------------- Flags -----------------------#
         self.sample_loaded = False
+        self.req_download_sampling = False
+        self.req_download_scanning = False
 
         #----------------- Status Labels ---------------#
         #Update motor pane labels
@@ -100,8 +104,9 @@ class MainApp(ctk.CTk):
         #Image related info from pi
         #dir
         self.img_gui = "C:/Users/GraemeJF/Documents/Capstone/Images/GUI"
-        self.img_scanning_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/Stitching"
+        self.img_scanning_folder = r"C:\\Users\\GraemeJF\\Documents\\Capstone\\Images\\Stitching"
         self.img_sampling_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/Sampling"
+        self.img_testing_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/Testing"
 
         # Top & Bottom Frames
         self.create_top_frame()
@@ -110,6 +115,9 @@ class MainApp(ctk.CTk):
         # Content Frame
         self.content_frame = ctk.CTkFrame(self)
         self.content_frame.pack(expand=True, fill='both')
+
+        #Raspberry Pi files
+        self.rpi_transfer = None
 
         self.display_main_tab()
 
@@ -134,8 +142,8 @@ class MainApp(ctk.CTk):
         self.mode_label = ctk.CTkLabel(top_frame, text=f"Mode: {self.mode}")
         self.mode_label.pack(side=ctk.LEFT, padx=30)
 
-        self.sample_label = ctk.CTkLabel(top_frame, text=f"Current Sample: {self.sample_data['sample_id']}")
-        self.sample_label.pack(side=ctk.LEFT, padx=80)
+        self.sample_label = ctk.CTkLabel(top_frame, text=f"Current Sample: {self.curr_sample_id}")
+        self.sample_label.pack(side=ctk.LEFT, padx=30)
 
         self.alarm_label = ctk.CTkLabel(top_frame, text=f"Alarms: {self.alarm_status}")
         self.alarm_label.pack(side=ctk.RIGHT, padx=10)
@@ -181,20 +189,22 @@ class MainApp(ctk.CTk):
         left_frame = ctk.CTkFrame(self.content_frame)
         left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
 
-        right_frame = ctk.CTkFrame(self.content_frame, width=400, height=400)
-        right_frame.pack(side=ctk.RIGHT, expand=True, fill='both')
+        #Stephie main frame
+        self.main_right_frame = ctk.CTkFrame(self.content_frame, width=400, height=400)
+        self.main_right_frame.pack(side=ctk.RIGHT, expand=True, fill='both')
 
 
         # Image Display on Right
-        self.display_placeholder_image(right_frame)
+        self.display_placeholder_image(self.main_right_frame)
 
         # Buttons on Left Side
         create_sample_btn = ctk.CTkButton(left_frame, text = "Create a New Sample", font = ("Arial", 20), 
                                           width = 200, height = 100, fg_color = "green", command = lambda: self.open_sample_dialog())
-        sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.open_sampling_dialog(right_frame))
+        sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.open_sampling_dialog(self.main_right_frame))
         #sampling_btn = ctk.CTkButton(left_frame, text="Random Sampling", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_random_sampling_layout(8, right_frame))
-        scanning_btn = ctk.CTkButton(left_frame, text="Scanning", font=("Arial", 20), 
-                                        width = 200, height = 100, command = lambda: self.display_scanning_layout(7,6,right_frame))
+        #scanning_btn = ctk.CTkButton(left_frame, text="Scanning", font=("Arial", 20), width = 200, height = 100, command = lambda: self.display_scanning_layout(7,6,right_frame))
+        #Stephie fixed
+        scanning_btn = ctk.CTkButton(left_frame, text="Scanning", font=("Arial", 20), width = 200, height = 100, command = lambda: self.open_scanning_dialog(self.main_right_frame))
 
         create_sample_btn.pack(pady=5, fill='x')
         sampling_btn.pack(pady=5, fill='x')
@@ -293,7 +303,7 @@ class MainApp(ctk.CTk):
         image_sampling_window.title("Enter Sampling Parameters")
         image_sampling_window.geometry("350x135")  # Set initial size
         image_sampling_window.minsize(350, 135)   # Limit the minimum size
-        image_sampling_window.maxsize(350, 135)   # Limit the maximum size
+        #image_sampling_window.maxsize(400, 135)   # Limit the maximum size
 
         image_sampling_window.grab_set()
 
@@ -302,15 +312,15 @@ class MainApp(ctk.CTk):
         label.grid(row=0, column=0, columnspan=4, padx=5, pady=10, sticky="ew")
 
         # Total images input field
-        ctk.CTkLabel(image_sampling_window, text="Total Images:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        ctk.CTkLabel(image_sampling_window, text="Total Number of Images:").grid(row=1, column=0, columnspan = 2, padx=5, pady=5, sticky="e")
         total_images = ctk.CTkEntry(image_sampling_window, placeholder_text="6")
         total_images.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
         # OK button (closes the window and processes input)
         ok_button = ctk.CTkButton(image_sampling_window, text="OK", 
-                                command=lambda: [self.display_random_sampling_layout(int(total_images.get()), frame), 
-                                                self.send_sampling_data(int(total_images.get())),image_sampling_window.destroy()], 
-                                width=80, state="disabled")  # Initially disabled
+                                command=lambda: [self.send_sampling_data(int(total_images.get())),
+                                                self.display_random_sampling_layout(int(total_images.get()), frame), 
+                                                image_sampling_window.destroy()], width=80, state="disabled")  # Initially disabled
         ok_button.grid(row=2, column=0, padx=5, pady=10, sticky="ew")
 
         # Cancel button (closes the window)
@@ -325,8 +335,8 @@ class MainApp(ctk.CTk):
         def validate_input(*args):
             try:
                 value = int(total_images.get())
-                # Check if value is between 1 and 8
-                if 1 <= value <= 8:
+                # Check if value is between 1 and 15
+                if 1 <= value <= 40 and self.module_status == "Idle" :
                     ok_button.configure(state="normal")  # Enable OK button
                 else:
                     ok_button.configure(state="disabled")  # Disable OK button
@@ -364,9 +374,9 @@ class MainApp(ctk.CTk):
         step_y.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
 
         # OK button (closes the window, changes frame, sends scanning_data
+        #Stephie changes
         ok_button = ctk.CTkButton(image_scanning_window, text="OK", 
                                 command=lambda: [
-                                    self.display_scanning_layout(int(step_x.get()), int(step_y.get()), frame),
                                     self.send_scanning_data(int(step_x.get()), int(step_y.get())),
                                     image_scanning_window.destroy()], 
                                 width=80, state="disabled")  # Initially disabled
@@ -468,7 +478,7 @@ class MainApp(ctk.CTk):
 
         #Send coordinates button
         send_coord_btn = ctk.CTkButton(coord_frame, text="Send Coordinates", font=("Arial", 14), 
-                                       command=lambda: self.send_goto_command(int(self.x_entry.get()),int(self.y_entry.get()),int(self.z_entry.get())))
+                                       command=lambda: self.send_goto_command(float(self.x_entry.get()),float(self.y_entry.get()),float(self.z_entry.get())))
         send_coord_btn.grid(row=4, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
 
         #Refresh the coordinates with the current ones
@@ -623,14 +633,15 @@ class MainApp(ctk.CTk):
         self.clear_frame(self.content_frame)
 
         # Setup left, right, and main frames
-        left_frame = ctk.CTkFrame(self.content_frame)
-        left_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
+        left_frame = ctk.CTkFrame(self.content_frame, width=200)  # Set width for the left_frame
+        left_frame.grid(row=0, column=0, sticky="ns", padx=10, pady=10)
 
         right_frame = ctk.CTkFrame(self.content_frame)
-        right_frame.pack(side=ctk.RIGHT, expand=True, fill='both', padx=10, pady=10)
+        right_frame.grid(row=0, column=2, sticky="nswe", padx=10, pady=10)  # Use "nswe" to make it fill both vertically and horizontally
 
-        main_frame = ctk.CTkFrame(self.content_frame)
-        main_frame.pack(side=ctk.LEFT, fill='y', padx=10, pady=10)
+        main_frame = ctk.CTkFrame(self.content_frame)  # Set width for the main_frame
+        main_frame.grid(row=0, column=1, sticky="nswe", padx=10, pady=10)  # Use "nswe" to make it fill both vertically and horizontally
+
 
         # Left Frame: Entry Boxes and Buttons
         left_label = ctk.CTkLabel(left_frame, text="Enter in desired parameters:", font=("Arial", 14, "bold"))
@@ -665,19 +676,31 @@ class MainApp(ctk.CTk):
         button_frame.pack(pady=10, fill='x')
 
         send_data_btn = ctk.CTkButton(left_frame, text="SEND DATA", font=("Arial", 16), 
-                                      command=lambda: self.send_camera_data(self.exposure_time_entry, self.analog_gain_entry, self.contrast_entry, self.colour_temp_entry))
+                                      command=lambda: self.send_camera_data(float(self.exposure_time_entry.get()), 
+                                                                            float(self.analog_gain_entry.get()), 
+                                                                            float(self.contrast_entry.get()), 
+                                                                            float(self.colour_temp_entry.get())))
         send_data_btn.pack(pady=10)
 
-        image_label = ctk.CTkLabel(right_frame, text="Image will appear here", fg_color="gray")
+        image_label = ctk.CTkLabel(right_frame, text="Image will appear here", fg_color="gray", width=300, height=300) 
         image_label.pack(expand=True, fill='both')
 
-        #INCOMPLETE
-        update_image_btn = ctk.CTkButton(button_frame, text="Update Image", font=("Arial", 16))
-        update_image_btn.pack(side="left", padx=10, fill='x', expand=True)
+        #Send request to raspberry pi
+        req_image_btn = ctk.CTkButton(button_frame, text="Request Image", font=("Arial", 16),
+                                       command=lambda:self.send_simple_command("exe_update_image", True))
+        req_image_btn.pack(side="right", padx=10, fill='x', expand=True)
 
-        #INCOMPLETE
-        save_image_btn = ctk.CTkButton(button_frame, text="Save Image", font=("Arial", 16))
-        save_image_btn.pack(side="right", padx=10, fill='x', expand=True)
+        #Get image from raspberry pi
+        grab_image_btn = ctk.CTkButton(button_frame, text="Grab Image", font=("Arial", 16),
+                                         command=lambda:(self.transfer_folder(self.img_testing_folder, False)))
+        grab_image_btn.pack(side="left", padx=10, fill='x', expand=True)
+
+        #Display stored image
+        display_image_btn = ctk.CTkButton(button_frame, text="Display Image", font=("Arial", 16),
+                                         command=lambda:(self.show_image(self.img_testing_folder, image_label)))
+        display_image_btn.pack(side="left", padx=10, fill='x', expand=True)
+
+
 
         # Main Frame: Display Raspberry Pi Parameters
         main_label = ctk.CTkLabel(main_frame, text="Current Camera Parameters:", font=("Arial", 14, "bold"))
@@ -716,7 +739,38 @@ class MainApp(ctk.CTk):
         self.last_refreshed_var = ctk.StringVar(value="Last Updated: --")
         self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
         self.last_refreshed_label.pack(pady=5)
+
+    def show_image(self, image_folder, image_label):
+        """Function to update the image displayed in the right frame from a sent!path in the folder."""
     
+        try:
+            # Get the first image file in the folder (adjust as needed for multiple images)
+            image_files = [f for f in os.listdir(image_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            
+            if image_files:
+                image_path = os.path.join(image_folder, image_files[0])  # Take the first image
+
+                # Normalize the image path (in case of backslashes or other inconsistencies)
+                image_path = os.path.normpath(image_path)
+
+                # Open the image using PIL
+                img_pil = Image.open(image_path)
+
+                # Convert the image to a format that can be used with Tkinter
+                img_tk = ImageTk.PhotoImage(img_pil)
+
+                # Update the label to show the image
+                image_label.configure(image=img_tk)
+                image_label.image = img_tk  # Store a reference to the image to avoid garbage collection
+
+                print("Image updated successfully :)")
+            else:
+                print("No image files found in the specified folder.")
+                image_label.configure(text="No image found", fg_color="red")
+        except Exception as e:
+            print(f"Error displaying image: {e}")
+            image_label.configure(text="Failed to display image", fg_color="red")
+
     # ------------------ Details Tab ------------------ #
     def display_details_tab(self):
         # Clear previous content in the content frame
@@ -726,7 +780,7 @@ class MainApp(ctk.CTk):
         main_frame = ctk.CTkFrame(self.content_frame)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # ---------------- Instructions Section (Top) ---------------- #
+        #Instructions frame
         instructions_frame = ctk.CTkFrame(main_frame)
         instructions_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=5)
 
@@ -748,7 +802,7 @@ class MainApp(ctk.CTk):
         instructions_details = ctk.CTkLabel(instructions_frame, text=instructions_text, font=("Arial", 14), anchor="w", justify="left", wraplength=500)
         instructions_details.pack(padx=10, pady=5, fill="x")
 
-        # ---------------- Folder Paths Section (Bottom) ---------------- #
+        #Folder path
         folder_frame = ctk.CTkFrame(main_frame)
         folder_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=5)
 
@@ -794,73 +848,152 @@ class MainApp(ctk.CTk):
         finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
         finish_button.pack(side=ctk.LEFT, expand=True, padx=5, pady=5)
 
+    def get_image_layout_parameters(self,images_x, images_y):
+        """
+        Dynamically calculate image size and spacing based on grid size.
+
+        Returns:
+            tuple: (img_size, spacing)
+        """
+        grid_size = max(images_x, images_y)
+
+        # Clamp grid_size to a minimum of 1 to avoid division by zero
+        grid_size = max(grid_size, 1)
+
+        # Dynamically interpolate img_size and spacing
+        # Formula makes img_size shrink as grid grows
+        img_size = int(300 / (0.35 * grid_size + 1))   # More generous base size + slower shrink
+        spacing  = int(8 / (0.4 * grid_size + 1))      # Tighter spacing + quicker shrink
+
+
+
+        return img_size, spacing
+
     # --------------------- Displaying Scanning Layout ------------------ #
     def display_scanning_layout(self, images_x, images_y, frame):
-        """Displays the Scanning layout with a large image grid."""
-
+        """Displays the Scanning layout with a large image grid that updates as images are captured."""
         self.clear_frame(frame)
 
-        # Create the scanning frame to hold the images
-        scanning_frame = ctk.CTkFrame(frame)
-        scanning_frame.pack(side=ctk.TOP, expand=True, fill='both', padx=10, pady=10)
+        self.expected_image_count = images_x * images_y
+        self.current_image_index = 0
+        self.image_folder_path = self.img_scanning_folder  # Save path for reuse
 
-        self.scan_image_grid = []  # Store references to image labels
-
-        #Directory image path
-        #dir
-        img = Image.open(f"{self.img_scanning_folder}/img.jpg")
-        img = img.resize((50, 50), Image.LANCZOS)
-
-        # Create a CTkImage instance
-        img_ctk = ctk.CTkImage(img, size=(50, 50))
-
-        # Create dynamic grid based on `images_x` and `images_y`
-        for row in range(images_y):
-            for col in range(images_x):
-                img_placeholder = ctk.CTkLabel(scanning_frame, text="", image=img_ctk)
-                img_placeholder.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
-                img_placeholder.bind("<Button-1>", lambda e, img=img_placeholder: self.expand_image(img))
-                self.scan_image_grid.append(img_placeholder)
-
-        # Create a frame for the buttons to always be at the bottom
+        # ----- Buttons -----
         button_frame = ctk.CTkFrame(frame)
-        button_frame.pack(side=ctk.BOTTOM, fill='x', pady=10)
+        button_frame.pack(side=ctk.TOP, fill='x', pady=10)
 
-        # Create and place the buttons inside the button frame
-        #stop will send stop command, and switch to main
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
-                                    command=lambda: [self.send_simple_command("exe_stop", False), self.display_main_tab])
-        stop_button.pack(side=ctk.LEFT, expand=True, padx=5, pady=5)
+        self.complete_image_btn = ctk.CTkButton(button_frame, text="Show complete image", fg_color="green", command="self.show_complete_image", width=150, height=30, state="disabled")
+        self.complete_image_btn.pack(side=ctk.LEFT, expand=True, padx=5, pady=1)
 
-        #Finish will switch to main
         finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
-        finish_button.pack(side=ctk.LEFT, expand=True, padx=5, pady=5)
+        finish_button.pack(side=ctk.RIGHT, expand=True, padx=1, pady=1)
 
-    #Loads images from a folder
-    def load_images_from_folder(self, folder):
-        """Load image file paths from the specified folder."""
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", command=lambda:[self.display_main_tab(),self.send_simple_command("exe_stop",False)])
+        stop_button.pack(side=ctk.RIGHT, expand=True, padx=5, pady=1)
 
-        return [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('png', 'jpg', 'jpeg', 'gif'))]
+        # ----- Layout -----
+        scanning_frame = ctk.CTkFrame(frame)
+        scanning_frame.pack(side=ctk.BOTTOM, expand=True, fill='both')
 
-    # --------------------- Display Random Sampling Layout ------------------ #
+        grid_container = ctk.CTkFrame(scanning_frame)
+        grid_container.grid(row=0, column=0, padx=40, pady=40)
+
+        scanning_frame.grid_columnconfigure(0, weight=1)
+        scanning_frame.grid_rowconfigure(0, weight=1)
+
+        for i in range(images_y):
+            grid_container.grid_rowconfigure(i, weight=1)
+        for j in range(images_x):
+            grid_container.grid_columnconfigure(j, weight=1)
+
+        # ----- Image Grid -----
+        self.scan_image_grid = []
+        self.image_labels = []  # Store label references for updating
+        img_size, _ = self.get_image_layout_parameters(images_x, images_y)
+
+        # Initialize blank placeholders
+        for i in range(self.expected_image_count):
+            col = i // images_y
+            row = (images_y - 1) - (i % images_y)
+
+            placeholder_label = ctk.CTkLabel(grid_container, text="")
+            placeholder_label.grid(row=row, column=col, padx=0, pady=0, sticky='nsew')
+            self.image_labels.append(placeholder_label)
+
+        # Start watching for new images
+        self.poll_for_new_images()
+
+    
+    def load_images_from_folder(self, folder_path):
+        supported_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')
+        images = []
+
+        for filename in sorted(os.listdir(folder_path)):
+            if filename.lower().endswith(supported_extensions) and not filename.startswith("._"):
+                full_path = os.path.join(folder_path, filename)
+                try:
+                    with Image.open(full_path) as img:
+                        img.verify()
+                    images.append(full_path)
+                except Exception:
+                    print(f"Skipping invalid image: {filename}")
+        return images
+    # ------------------ Displaying Random Sampling Layout ------------------ #
     def display_random_sampling_layout(self, num_images, frame):
-        """Displays an evenly distributed grid layout for images, handling missing images gracefully."""
+        """Displays an evenly distributed grid layout for random sampling with live updates."""
         
         # Clear previous content
         self.clear_frame(frame)
-        # Create a new frame
-        sampling_frame = ctk.CTkFrame(frame)
-        sampling_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
-        # Load available images
-        #dir
+        self.image_labels = []
+        self.random_sampling_frame = ctk.CTkFrame(frame)  # Store for use in polling
+        self.random_sampling_frame.pack(expand=True, fill='both', padx=10, pady=10)
+
+        self.target_num_images = num_images
+        self.img_size = 200  # You can use dynamic scaling if needed
+
+        # Initial population
         images = self.load_images_from_folder(self.img_sampling_folder)
-        available_images = len(images)
+        self.populate_image_grid(self.random_sampling_frame, images, num_images, self.img_size)
 
-        # Adjust num_images to the available images count
-        num_images = min(num_images, available_images)  # Prevents out-of-range errors
+        # Start polling folder for new images
+        self.random_sampling_image_update()
 
-        self.image_labels = []  # Store image labels for reference
+        
+        # Create buttons (appear regardless of image count)
+        button_frame = ctk.CTkFrame(self.random_sampling_frame)
+        #eidted column span from 2 originall
+        button_frame.grid(row=2, column=0, columnspan=((num_images + 1) // 2), pady=15, sticky='ew')
+
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", command=lambda: [self.send_simple_command("exe_stop", False), self.display_main_tab()])
+        stop_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
+
+        finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
+        #Test stephie, column originally 2
+        finish_button.grid(row=0, column=((num_images + 1) // 2), padx=5, pady=5, sticky='e')
+
+        '''
+        # Create buttons (appear regardless of image count)
+        button_frame = ctk.CTkFrame(self.random_sampling_frame)
+        button_frame.pack(side='bottom', fill='x', padx=10, pady=15)
+
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", command=lambda: [self.send_simple_command("exe_stop", False), self.display_main_tab()])
+        stop_button.pack(side='left', padx=5, pady=5)
+
+        finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
+        finish_button.pack(side='right', padx=5, pady=5)
+        '''
+
+        
+# ------------------Populating image grid for the random sampling method ------------------ #
+    def populate_image_grid(self, parent_frame, images, num_images, img_size):
+        """Populate the image grid with images."""
+
+        # Clear previous image labels
+        for label in self.image_labels:
+            label.destroy()
+
+        self.image_labels = []  # Reset the list
 
         # Calculate row distribution
         first_row_count = (num_images + 1) // 2  # First row gets one extra if odd
@@ -869,26 +1002,23 @@ class MainApp(ctk.CTk):
         # Determine the maximum number of columns
         total_columns = max(first_row_count, second_row_count)
 
-        #Scaling the image size depending on the number of images
-        img_size = 200
-
         # Configure grid to center images
         for col in range(total_columns):
-            sampling_frame.grid_columnconfigure(col, weight=1)  # Make columns expand evenly
+            parent_frame.grid_columnconfigure(col, weight=1)  # Make columns expand evenly
 
-        sampling_frame.grid_rowconfigure(0, weight=1)  # Ensure images are centered
-        sampling_frame.grid_rowconfigure(1, weight=1)
-        sampling_frame.grid_rowconfigure(2, weight=0)  # Ensure buttons stay at bottom
+        parent_frame.grid_rowconfigure(0, weight=1)  # Ensure images are centered
+        parent_frame.grid_rowconfigure(1, weight=1)
+        parent_frame.grid_rowconfigure(2, weight=0)  # Ensure buttons stay at bottom
 
         # Display first row (only if images exist)
         for col in range(first_row_count):
-            if col >= available_images:  # Prevent index error
+            if col >= len(images):  # Prevent index error
                 break
             img = Image.open(images[col])
             img = img.resize((img_size, img_size), Image.LANCZOS)
             img_ctk = ctk.CTkImage(img, size=(img_size, img_size))
 
-            img_label = ctk.CTkLabel(sampling_frame, image=img_ctk, text="")
+            img_label = ctk.CTkLabel(parent_frame, image=img_ctk, text="")
             img_label.grid(row=0, column=col, padx=10, pady=10, sticky='nsew')
 
             img_label.bind("<Button-1>", lambda e, img_path=images[col]: self.expand_image(img_path))
@@ -897,33 +1027,74 @@ class MainApp(ctk.CTk):
         # Display second row (only if images exist)
         for col in range(second_row_count):
             image_index = first_row_count + col
-            if image_index >= available_images:  # Prevent index error
+            if image_index >= len(images):  # Prevent index error
                 break
             img = Image.open(images[image_index])
             img = img.resize((img_size, img_size), Image.LANCZOS)
             img_ctk = ctk.CTkImage(img, size=(img_size, img_size))
 
-            img_label = ctk.CTkLabel(sampling_frame, image=img_ctk, text="")
+            img_label = ctk.CTkLabel(parent_frame, image=img_ctk, text="")
             img_label.grid(row=1, column=col, padx=10, pady=10, sticky='nsew')
 
             img_label.bind("<Button-1>", lambda e, img_path=images[image_index]: self.expand_image(img_path))
             self.image_labels.append(img_label)
 
-        # Ensure button frame always appears, even if no images are loaded
-        button_frame = ctk.CTkFrame(sampling_frame)
-        button_frame.grid(row=2, column=0, columnspan=total_columns, pady=15, sticky='ew')
 
-        button_frame.grid_columnconfigure(0, weight=1)
-        button_frame.grid_columnconfigure(1, weight=1)
+    # ------------------ RANDOM SAMPLING Update the number of expected images ------------------ #
+    def random_sampling_image_update(self):
+        images = self.load_images_from_folder(self.img_sampling_folder)
+        available = len(images)
 
-        #stop button sents stop command and switches to main tab
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
-                                    command=lambda:[self.send_simple_command("exe_stop", False), self.display_main_tab()])
-        stop_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
+        if available == 0:
+            self.after(1000, self.random_sampling_image_update)
+            return
 
-        #Finish button switches to main tab
-        finish_button = ctk.CTkButton(button_frame, text="Finish", command=self.display_main_tab)
-        finish_button.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
+
+        # Limit to desired number of images
+        images_to_show = images[:self.target_num_images]
+
+        # Only update if number of images changed
+        if len(images_to_show) != len(self.image_labels):
+            self.populate_image_grid(self.random_sampling_frame, images_to_show, self.target_num_images, self.img_size)
+
+        # Stop polling if all expected images are loaded
+        if len(images_to_show) < self.target_num_images:
+            self.after(1000, self.random_sampling_image_update)  # Check again after 1 sec
+
+    # ------------------ SCANNING Update the number of expected images ------------------ #
+    def poll_for_new_images(self):
+        images = self.load_images_from_folder(self.image_folder_path)
+
+        # Match filenames that start with an integer index (e.g., "0_img.jpg", "15_picture.png")
+        def extract_index(filename):
+            match = re.match(r'^(\d+)', os.path.basename(filename))
+            return int(match.group(1)) if match else float('inf')  # Put invalid files at the end
+
+        # Sort based on extracted numeric index
+        images = sorted(images, key=extract_index)
+
+        # Only process up to the expected number of images
+        for index, img_path in enumerate(images[:self.expected_image_count]):
+            try:
+                img = Image.open(img_path)
+                img = img.resize((int(1.3342 * self.get_image_layout_parameters(1, 1)[0]),
+                                self.get_image_layout_parameters(1, 1)[0]), Image.LANCZOS)
+                img_ctk = ctk.CTkImage(img, size=(self.get_image_layout_parameters(1, 1)[0],
+                                                self.get_image_layout_parameters(1, 1)[0]))
+
+                label = self.image_labels[index]
+                label.configure(image=img_ctk, text="")
+                label.image = img_ctk  # Prevent garbage collection
+                label.bind("<Button-1>", lambda e, path=img_path: self.expand_image(path))
+
+            except Exception as e:
+                print(f"Failed to load image {img_path}: {e}")
+
+        # Enable button if all images are filled
+        if len(images) >= self.expected_image_count:
+            self.complete_image_btn.configure(state="normal")
+        else:
+            self.after(1000, self.poll_for_new_images)
 
     #Expand images
     def expand_image(self, img_path):
@@ -1064,65 +1235,39 @@ class MainApp(ctk.CTk):
             else:
                 self.buttons[name].configure(state=ctk.DISABLED)
     
-    def save_image(self, save_dir: str, image_array = None, image_id = None, timestamp_on = False) :
-        """
-        Save an image using metadata from status data.
-
-        :param save_dir: Directory where the image will be saved
-        :param image_array: Array containing image metadata or image data
-        :param image_id: Identifier for the image (used in the filename)
-        :param timestamp_on: If True, append timestamp to the filename
+    #Get unique positions for calculating grid for image stitching
+    def extract_unique_positions(self, directory):
+        """Extracts unique x and y positions from JSON objects in text files within the specified directory."""
         
-        :return: The file path where the image was saved, or None if an error occurred
-        """
+        unique_x_positions = set()  # Set to store unique x positions
+        unique_y_positions = set()  # Set to store unique y positions
 
-        # Ensure the save directory exists
-        os.makedirs(save_dir, exist_ok=True)
+        # Iterate through all files in the specified directory
+        for filename in os.listdir(directory):
+            if filename.endswith(".txt"):  # Only process text files
+                file_path = os.path.join(directory, filename)
+                
+                with open(file_path, 'r') as file:
+                    try:
+                        # Assuming the file contains one JSON object per line or a single JSON object
+                        data = json.load(file)  # Load the JSON object from the file
+                        
+                        # Extract the x and y positions
+                        x_pos = round(data.get("image_x_pos"))
+                        y_pos = round(data.get("image_y_pos"))
+                        
+                        if x_pos is not None:
+                            unique_x_positions.add(x_pos)  # Add to the set of unique x positions
+                        if y_pos is not None:
+                            unique_y_positions.add(y_pos)  # Add to the set of unique y positions
+                    except json.JSONDecodeError:
+                        print(f"Error decoding JSON in file {filename}")
+                    except Exception as e:
+                        print(f"An error occurred while processing file {filename}: {e}")
 
-        #Add timestamp to filename if requested
-        if timestamp_on :
-            # Generate a unique filename using timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
-            filename = f"{image_id}_{timestamp}.jpg"
-        else :
-            filename = image_id
-        
-        file_path = os.path.join(save_dir, filename)
+        # Return the unique x and y positions
+        return len(unique_x_positions), len(unique_y_positions)
 
-        if image_id is None:
-                image_id = "0" #detaulf image_id
-
-        #Convert array to jpg
-        try:
-            if image_array is None or len(image_array) == 0:
-                print("Error: No image data provided.")
-                return None
-
-            # If current_image is a numpy array, convert it to RGB (OpenCV uses BGR by default)
-            # Assuming image_array is a 2D array (grayscale) or a 3D array (RGB)
-            if isinstance(image_array, np.ndarray):
-                if len(image_array.shape) == 2:  # Grayscale image
-                    image_rgb = cv2.cvtColor(image_array, cv2.COLOR_GRAY2RGB)
-                elif len(image_array.shape) == 3:  # RGB image
-                    image_rgb = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
-                else:
-                    print("Error: Unsupported image format.")
-                    return None
-            else:
-                print("Error: Image data is not in the expected format.")
-                return None
-
-            # Save image
-            cv2.imwrite(file_path, image_rgb)
-            print(f"Image saved at: {file_path}")
-
-            return file_path  # Return the file path where the image was saved
-
-        except Exception as e:
-            # Log the error
-            print(f"Error saving image: {e}")
-            return None
-                    
     #============================== Communcation ====================================#
     
     #Setup communication
@@ -1132,6 +1277,47 @@ class MainApp(ctk.CTk):
         self.comms = comms
         self.stop_event = stop_event 
     
+    #Setup raspberry pi paramiko
+    def set_rpi_transfer(self, transfer_obj):
+        """Sets the RaspberryPiTransfer instance in the GUI."""
+        self.rpi_transfer = transfer_obj
+    
+    #Get everything from raspberry pi folder and put in another folder
+    def transfer_folder(self, destination_path, new_filename):
+        """Call the transfer_folder method of RaspberryPiTransfer."""
+        if not self.rpi_transfer:
+            messagebox.showerror("Error", "Raspberry Pi connection is not established.")
+            return
+
+        remote_folder = "/home/microscope/image_buffer"
+        local_folder = destination_path
+        
+        try:
+            self.rpi_transfer.connect_sftp()
+            self.rpi_transfer.transfer_folder(remote_folder, local_folder, new_filename)
+            self.rpi_transfer.close_sftp_connection()
+            print("Success", "Files successfully transferred!")
+        except Exception as e:
+            print("Error", f"File transfer failed: {e}")
+    
+    def empty_folder(self, remote_folder="/home/microscope/image_buffer") :
+        """Empty image_buffer on raspberry pi."""
+        if not self.rpi_transfer:
+            messagebox.showerror("Error", "Raspberry Pi connection is not established.")
+            return
+        
+        try:
+            self.rpi_transfer.connect_ssh()
+            print("connected")
+            self.rpi_transfer.empty_folder(remote_folder)
+            print("Emptied folder")
+            self.rpi_transfer.close_ssh_connection()
+            print("closed  connection")
+            print("Success", f"Files successfully removed from {remote_folder}")
+        except Exception as e:
+            print("Error", f"Emptying folder failed: {e}")
+        
+
     #Send json data
     def send_json_error_check(self, data, success_message):
         '''Send a JSON file to the rapsberry pi and communicate different errors'''
@@ -1174,8 +1360,8 @@ class MainApp(ctk.CTk):
 
             self.total_image = data.get("total_image", 0)
             self.image_count = data.get("image_count", 0)
-            self.current_image = data.get("current_image", [])
-            self.image_metadata = data.get("image_metadata", {})
+            self.curr_sample_id = data.get("curr_sample_id", "Unknown")
+
         except Exception as e:
             print(f"Error unpacking JSON data: {e}")
     
@@ -1188,21 +1374,22 @@ class MainApp(ctk.CTk):
 
         #Store previous status before update
         prev_module_status = self.module_status
-        prev_image_count = self.image_count
+        #prev_image_count = self.image_count
 
         # Extract values from the received data dictionary, with defaults for missing keys
         self.unpack_pi_JSON(data)
 
         #Update GUI elements on seperate thread
-        self.content_frame.after(0, self.update_gui_elements, prev_module_status, prev_image_count)
+        self.content_frame.after(0, self.update_gui_elements, prev_module_status)
 
     #Update GUI elements
-    def update_gui_elements(self, prev_module_status, prev_image_count):   
+    def update_gui_elements(self, prev_module_status):   
         '''Update GUI elements. Function created to be completed on the main thread'''   
 
         #Update top and bottom frame parts
         self.status_label.configure(text=f"Module Status: {self.module_status}")
         self.alarm_label.configure(text=f"Alarms: {self.alarm_status}")
+        self.sample_label.configure(text=f"Current Sample: {self.curr_sample_id}")
         
         #Update motor pane labels
         self.rpi_motors_enabled_var.set(str(self.motors_enabled))
@@ -1220,20 +1407,42 @@ class MainApp(ctk.CTk):
         #Used in camera and motor pane
         self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
 
-        #Setup stitching routine
-        #dir
-        if prev_image_count != self.image_count and self.module_status == "Scanning" :
-            if self.current_image:
-                self.save_image(self.img_scanning_folder, self.current_image, f"sample_{self.image_count}", False)
-            
-            if self.image_count == self.total_image :
-                grid = self.total_image**0.5 #square root
-                self.start_stitching(grid, grid, self.img_scanning_folder, self.img_scanning_folder)
+        #Stitching Image Process
+        #Set flag to request stitching
+        if (self.total_image - 1) == self.image_count and self.total_image != 0 and self.module_status == "Scanning Running" and not self.req_download_scanning :
+            print("set flag for scanning")
+            self.req_download_scanning = True
         
-        #Setup random sampling routinge
-        if prev_image_count != self.image_count and self.module_status == "Sampling" :
-            if self.current_image:
-                self.save_image(self.img_sampling_folder, self.current_image, f"{self.sample_id}_{self.image_count}", True)
+        #Start stitching and start thread
+        if self.req_download_scanning and self.total_image == 0 :
+            print("pt 1, inside")
+            self.transfer_folder(self.img_scanning_folder, True)
+            print(" pt2, folders transferred")
+            self.req_download_scanning = False
+
+            print(self.img_scanning_folder)
+            self.scanning_grid_x , self.scanning_grid_y = self.extract_unique_positions(self.img_scanning_folder) 
+            print(self.scanning_grid_x)
+            print(self.scanning_grid_y)
+            self.start_stitching(self.scanning_grid_x, self.scanning_grid_y, self.img_scanning_folder, self.img_scanning_folder, self.curr_sample_id)
+            print(" pt3, start thread")
+            #Stephie changes
+            self.display_scanning_layout(self.scanning_grid_x, self.scanning_grid_y, self.main_right_frame)
+            print(" pt4 gui")
+            self.empty_folder()
+    
+        
+        #Random Samping Image Processing
+        #Setup f,lag to notify system to download images
+        if (self.total_image - 1) == self.image_count and self.total_image != 0 and self.module_status == "Random Sampling Running" and not self.req_download_sampling :
+            self.req_download_sampling = True
+
+        #Use flag to download random sampling iamges
+        if self.req_download_sampling and self.total_image == 0 :
+            self.transfer_folder(self.img_sampling_folder, False)
+            self.req_download_sampling = False
+            self.empty_folder()
+
 
     #Send sample data
     def send_sample_data(self, mount_type, sample_id, initial_height, layer_height, width, height):
@@ -1284,7 +1493,7 @@ class MainApp(ctk.CTk):
             self.sampling_data['command'] = "exe_sampling"
             self.sampling_data['mode'] = self.mode
             self.sampling_data['module_status'] = self.module_status
-            self.sampling_data['num_images'] = num_images
+            self.sampling_data['total_image'] = num_images
 
             #Send random sampling data
             success_message = "Random sampling data sent."
@@ -1301,7 +1510,7 @@ class MainApp(ctk.CTk):
         if self.module_status == "Idle":
 
             #Check step if valid entry
-            if step_x <= 0 or step_y <= 0:
+            if step_x < 0 or step_y < 0:
                 messagebox.showerror("Invalid input", "Step values must be positive numbers") 
                 return   
 
@@ -1346,7 +1555,7 @@ class MainApp(ctk.CTk):
         if self.module_status == "Idle":
 
             #Check step if valid entry
-            if req_x <= 0 or req_y <= 0 or req_z <= 0:
+            if req_x < 0 or req_y < 0 or req_z < 0:
                 messagebox.showerror("Invalid input", "Step values must be positive numbers") 
                 return   
 
@@ -1366,6 +1575,7 @@ class MainApp(ctk.CTk):
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
 
+
     # =============================== Image Stitching ==========================================#
     
     def set_stitcher(self, stitcher) :
@@ -1373,10 +1583,14 @@ class MainApp(ctk.CTk):
 
         self.stitcher = stitcher
 
-    def start_stitching(self, grid_x, grid_y, input_dir, output_dir) :
+    def start_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id) :
         '''Creates thread for stitching'''
 
-        stitch_thread = Thread(target=self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir), daemon=True)
+        #stitch_thread = Thread(target=self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id), daemon=True)
+        #stitch_thread.start()
+
+        # Using a lambda function to pass the arguments to run_stitching
+        stitch_thread = Thread(target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id), daemon=True)
         stitch_thread.start()
 
 
@@ -1405,3 +1619,13 @@ class MainApp(ctk.CTk):
 #Configure save image
 #Configure update image
 #Display image
+
+'''
+import os
+
+# Create a single folder (will raise error if it exists)
+os.mkdir("my_folder")
+
+# Create nested folders safely (does not raise error if it exists)
+os.makedirs("parent_folder/child_folder", exist_ok=True)
+'''
