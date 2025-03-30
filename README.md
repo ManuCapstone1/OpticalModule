@@ -10,3 +10,4 @@ The [Programming](Programming_Files/) folder will have all programming files for
 
 [Images](Images/) hold some sample images of diferent aspects of the project.
 
+[Documentation](Documentation/) lists documents relating to design, use and assemly (e.g. BOM, manual).
