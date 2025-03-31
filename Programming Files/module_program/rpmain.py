@@ -2,6 +2,7 @@ import zmq
 import time
 import json
 import threading
+
 from opticalmodule import OpticalModule
 
 #----------------------Zero MQ setup and communication -----------------------------#
@@ -20,6 +21,7 @@ pub_socket.bind("tcp://*:5556")  # Bind to port 5556
 # Setup as JSON file
 shabam = OpticalModule()
 
+
 #=========================NEED TO REPLACE WITH REAL DATA=============================#
 status_data = {
     "module_status": "Unknown",
@@ -37,6 +39,7 @@ status_data = {
     "image_count": 0,
     "motors_enabled" : shabam.motorsEnabled.is_set()
 }
+
 
 # Send status updates periodically with JSON file
 def send_status_updates():
@@ -61,6 +64,8 @@ def update_status_data():
     with shabam.imageCountLock:
         status_data["image_count"] = shabam.cam.imageCount
         status_data["total_image"] = shabam.totalImages
+    with shabam.alarmLock:
+        status_data["alarm_status"] = shabam.alarmStatus
     if shabam.resetIdle.is_set():
         status_data["module_status"] = "Idle"
         shabam.resetIdle.clear()
@@ -70,6 +75,7 @@ def update_status_data():
 
 # Handler for receiving data from the PC
 def handle_request():
+    
     thread = threading.Thread()
     status_data["module_status"] = "Idle"
     while True:
@@ -87,6 +93,7 @@ def handle_request():
             if shabam.stop.is_set():
                 #response["error"] = "System stopped; homing required"
                 pass
+               
             if message["command"] == "update_settings" and not thread.is_alive():
                 thread = threading.Thread(target=shabam.cam.update_settings, kwargs={"exposureTime": message["exposure_time"], 
                                                                                      "analogGain": message["analog_gain"], 
@@ -111,11 +118,16 @@ def handle_request():
             if message["command"] == "exe_sampling" and not thread.is_alive():
                 status_data["module_status"] = "Random Sampling Running"
                 status_data["total_image"] = message["total_image"]
+                status_data["image_count"] = 0
                 thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "random_sampling", "numImages": message["total_image"], "saveImages": False})
                 thread.start()
 
             if message["command"] == "exe_scanning" and not thread.is_alive():
+                print("t1")
                 status_data["module_status"] = "Scanning Running"
+                status_data["total_image"] = 0
+                status_data["image_count"] = 0
+                
                 thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "scanning_images", "step_size_x": message["step_x"], "step_size_y": message["step_y"], "saveImages": False})
                 thread.start()
 
@@ -144,10 +156,16 @@ def handle_request():
                 thread = threading.Thread(target=shabam.update_image)
                 thread.start()
                 # Execute update image
+                
+            if message["command"] == "exe_reset_alarm_status" and not thread.is_alive():
+                with shabam.alarmLock:
+                    shabam.alarmStatus = "None"
 
             if message["command"] == "exe_stop":
                 status_data["module_status"] = "Stopping..."
                 shabam.stop.set()
+                #time.sleep(2)
+                status_data["module_status"] = "Idle"
                 # Execute stopping routine
 
             rep_socket.send_json(response)  # Acknowledge request
@@ -169,7 +187,8 @@ print(request_thread.is_alive())
 
 # Keep the Raspberry Pi running
 try:
-    while True:
+    while True :
         time.sleep(1)  # Keep the main thread alive
 except KeyboardInterrupt:
     print("Server interrupted and shutting down.")
+
