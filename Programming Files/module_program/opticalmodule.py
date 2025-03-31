@@ -67,11 +67,13 @@ class OpticalModule:
         #self.Stop = False
         #self.resetIdle = False
         self.bufferDir = "/home/microscope/image_buffer"
+        self.alarmStatus = "None"
 
         # Threading Lock
         self.positionLock = threading.Lock()
         self.cameraLock = threading.Lock()
         self.imageCountLock = threading.Lock()
+        self.alarmLock = threading.Lock()
         #self.homeLock = threading.Lock()
         #self.motorStateLock = threading.Lock()
         self.stop = threading.Event()
@@ -179,6 +181,13 @@ class OpticalModule:
         else: return 0
 
     def home_xy(self):
+        for i in range(10):
+            if not self.limitSwitchY.is_pressed() and not self.limitSwitchX.is_pressed():
+                break
+            if i == 9:
+                print('limit reset failed')
+                with self.alarmLock:
+                    self.alarmStatus = "Limit Switch Failed"
         print("Y")
         self.motorA.dir_pin.write(1)
         self.motorB.dir_pin.write(0)
@@ -216,7 +225,13 @@ class OpticalModule:
         self.stop.clear()
         self.enable_motors()
         self.home_xy()
-
+        for i in range(10):
+            if not self.limitSwitchZ.is_pressed():
+                break
+            if i == 9:
+                print('limit reset failed')
+                with self.alarmLock:
+                    self.alarmStatus = "Limit Switch Failed"
         print("Z")
         self.motorZ.dir_pin.write(0)
         while not self.limitSwitchZ.is_pressed():
@@ -295,8 +310,8 @@ class OpticalModule:
     # Finds and moves the platform to the best focus position 
     def auto_focus(self, zMin=None, zMax=None, stepSize=None, blur=5):
         if zMin is None or zMax is None or stepSize is None:
-            zMin = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() - 1
-            zMax = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() + 1
+            zMin = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() - 1 
+            zMax = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() + 1 
             stepSize = 0.05
         bestFocusValue = -1
         bestZPosition = zMin
@@ -361,14 +376,18 @@ class OpticalModule:
     def random_sampling(self, numImages, saveImages: bool):
         if self.currSample is None or not self.currSample.boundingIsSet:
             print("Bounding box not set. Cannot take images.")
+            with self.alarmLock:
+                    self.alarmStatus = "No Bounding Box Set"
             return
         
-        if not self.isHomed.is_set():
+        if not self.isHomed.is_set() or self.stop.is_set():
             self.home_all()
         self.go_to(x=STAGECENTRE[0]*STEPDISTXY, y=STAGECENTRE[1]*STEPDISTXY)
         self.auto_focus()
         if self.cam.calculate_focus_score() < 1:
             print("Sample not detected or not in focus")
+            with self.alarmLock:
+                    self.alarmStatus = "Sample not detected or not in focus"
             return
         with self.imageCountLock:   
             self.totalImages = numImages
@@ -391,32 +410,42 @@ class OpticalModule:
                 self.resetIdle.set()
                 return
             self.go_to(x=point[0], y=point[1])
-            with self.imageCountLock:
-                self.cam.imageCount = self.cam.imageCount + 1
+            
             time.sleep(0.5)
             if saveImages: 
                 imageArr = self.cam.save_image(self.saveDir, self.currSample)
             else:
                 imageArr = self.update_image()
+            with self.imageCountLock:
+                self.cam.imageCount = self.cam.imageCount + 1
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
+        with self.imageCountLock:
+            self.totalImages = 0
+            self.cam.imageCount = 0
         self.currSample.currLayer = self.currSample.currLayer + 1
         #limit switches need to be reset.
-        self.limitSwitchX.is_pressed()
-        self.limitSwitchY.is_pressed()
+
         self.home_xy()
         return capturedImages
     
     def scanning_images(self, step_size_x, step_size_y, saveImages: bool):
+        print("t2")
         if self.currSample is None or not self.currSample.boundingIsSet:
             print("Bounding box not set. Cannot take images.")
+            with self.alarmLock:
+                    self.alarmStatus = "No Bounding Box Set"
             return
-        if self.cam.calculate_focus_score() < 1:
-            print("Sample not detected or not in focus")
-            return
-        if not self.isHomed.is_set():
+        print(self.isHomed.is_set())
+        if not self.isHomed.is_set() or self.stop.is_set():
             self.home_all()
         self.go_to(x=STAGECENTRE[0]*STEPDISTXY, y=STAGECENTRE[1]*STEPDISTXY)
+        print("t3")
         self.auto_focus()
+        if self.cam.calculate_focus_score() < 1:
+            print("Sample not detected or not in focus")
+            with self.alarmLock:
+                    self.alarmStatus = "Sample not detected or not in focus"
+            return
         capturedImages = []
 
         x_coords = [point[0] for point in self.currSample.boundingBox]
@@ -437,17 +466,40 @@ class OpticalModule:
                     return
                 self.go_to(x=x, y=y)
                 time.sleep(0.5)  # Allow system to stabilize
-                with self.imageCountLock:
-                    self.cam.imageCount = self.cam.imageCount + 1
+                
                 if saveImages:
                     imageArr = self.cam.save_image(self.saveDir, self.currSample)
                 else:    
                     imageArr = self.update_image()
-                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))              
+                with self.imageCountLock:
+                    self.cam.imageCount = self.cam.imageCount + 1
+                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))  
+        self.totalImages = 0
+        self.imageCount = 0
         self.currSample.currLayer = self.currSample.currLayer + 1
         self.home_xy()
         return capturedImages
-
+        
+    def calibrate_platform(self):
+        self.home_all()
+        self.go_to(x=49, y=28)
+        self.auto_focus(88,94,0.05)
+        Z1 = self.currZ
+        print(Z1)
+        self.go_to(x=46, y=155)
+        self.auto_focus(88,94,0.05)
+        Z2 = self.currZ
+        print(Z2)
+        self.go_to(x=173, y=155.5)
+        self.auto_focus(88,94,0.05)
+        Z3 = self.currZ
+        print(Z3)
+        self.go_to(x=172.5, y=30)
+        self.auto_focus(88,94,0.05)
+        Z4 = self.currZ
+        print(Z4)
+        zdistlist = [Z1,Z2,Z3,Z4]
+        return zdistlist
     
     def execute(self, targetMethod, **kwargs):
         # Get the target method
@@ -461,6 +513,8 @@ class OpticalModule:
             print("here1")
         else:
             raise AttributeError(f"'{type(self).__name__}' has no callable method '{targetMethod}'")
+            
+    
 
     # This method was written by copilot and still requires testing
     def call_method_from_console(self):
