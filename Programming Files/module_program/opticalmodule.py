@@ -246,66 +246,6 @@ class OpticalModule:
             self.currZ = 0
             self.isHomed.set()
 
-    # # Returns image from camera in array format
-    # def get_image_array(self, updateImage=False) -> any:
-
-    #     self.cam.start()
-    #     array = self.cam.capture_array("main")
-    #     self.cam.stop()
-
-    #     return array
-    
-    # def capture_and_save_image(self, dir: str) -> str:
-    #     """
-    #     Captures an image using Picamera2 and saves it to the specified directory.
-
-    #     :return: The full path of the saved image.
-    #     """
-        
-    #     # Ensure the save directory exists
-    #     os.makedirs(dir, exist_ok=True)
-
-    #     # Generate a unique filename using timestamp
-    #     timestamp = time.strftime("%Y%m%d_%H%M%S")  # Format: YYYYMMDD_HHMMSS
-    #     filename = f"{self.currSample.sampleID}_({self.get_curr_pos_mm('x')},{self.get_curr_pos_mm('y')},{self.get_curr_pos_mm('z')})_{timestamp}.jpg"
-    #     file_path = os.path.join(dir, filename)
-
-
-    #     try:
-    #         # Start camera
-    #         self.cam.start()
-    #         time.sleep(0.5)  # Allow camera to adjust
-
-    #         # Capture image
-    #         image = self.cam.capture_array("main")
-
-    #         # Convert image to RGB for saving
-    #         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-    #         # Save image
-    #         cv2.imwrite(file_path, image_rgb)
-    #         print(f"Image saved at: {file_path}")
-
-    #         # Stop camera
-    #         self.cam.stop()
-
-    #         return file_path
-
-    #     except Exception as e:
-    #         print(f"Error capturing image: {e}")
-    #         return ""
-
-    # def calculate_focus_score(self, imageArray, blur):
-
-    #     # Apply filter to image to reduce impact of noise
-    #     imageFiltered = cv2.medianBlur(imageArray, blur)
-
-    #     # Apply the Laplacian filter to detect edges
-    #     laplacian = cv2.Laplacian(imageFiltered, cv2.CV_64F)
-
-    #     # Calculate the variance of the Laplacian (a measure of sharpness)
-    #     #print(laplacian.var())
-    #     return laplacian.var()
     
     # Finds and moves the platform to the best focus position 
     def auto_focus(self, zMin=None, zMax=None, stepSize=None, blur=5):
@@ -624,11 +564,24 @@ class Camera:
         self.picam.set_controls(controls)
     
     def update_curr_image(self, sample):
-        print("in cam")
+        """
+        Updates the currImageName and currImage fields of the Camera object
+        """
         self.update_image_name(sample)
         return self.get_image_array(True)
 
     def calculate_focus_score(self, imageArray=None, blur=5):
+        """
+        Calculates the focus of an image using the Laplacian variance.
+
+        Parameters:
+            imageArray: Image used to calculate focus score (image will be captured if not provided).
+            blur: level of blur applied (to reduce impact of noise)
+
+        Returns:
+            Focus score (Laplacian variance) 
+        
+        """
 
         if imageArray is None:
             imageArray = self.get_image_array()
@@ -644,6 +597,16 @@ class Camera:
         return laplacian.var()
     
     def get_image_array(self, updateImage=False) -> any:
+        """
+        Captures image from Raspberry Pi camera.
+
+        Parameters:
+            updateImage: Updates captured image to Camera object currImage field if True
+
+        Returns:
+            Captured image as an array
+
+        """
         print("getting image arr")
         try:
             self.picam.start()
@@ -660,14 +623,20 @@ class Camera:
             print(f"Error capturing image: {e}")
             return ""
     
-    def save_image(self, dir: str, sample, image=None) -> str:
+    def save_image(self, dir: str, sample, image=None):
         """
         Captures an image using Picamera2 and saves it to the specified directory.
 
-        :return: The full path of the saved image.
+        Parameters:
+            dir: Directory to save image as a string
+            sample: Sample object - used to update image name
+            image: Optionally pass image array to be saved
+
+        Returns:
+            image as an array
         """
         
-        # Ensure the save directory exists
+        # Ensure the save directory exists 
         os.makedirs(dir, exist_ok=True)
 
         # Generate a unique filename using timestamp
@@ -694,6 +663,18 @@ class Camera:
             print(f"Error capturing image: {e}")
             return ""
     def update_image_name(self, sample, imageCount=None):
+        """
+        Updates the currImageName field of the camera object.
+
+        Parameters:
+            sample: Sample object - currLayer and sampleID included in image name
+            imageCount: image number in current sampling or scanning operation (taken from Camera imageCount field if not provided)
+        
+        Returns:
+            New image name as a string
+
+
+        """
         if imageCount is None: imageCount = self.imageCount
         imageName = f"{imageCount}_{sample.currLayer}_{sample.sampleID}"
         with self.imageLock:
