@@ -276,6 +276,95 @@ class OpticalModule:
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
         return capturedImages
     
+    def matrix_transform(self):
+        if not self.isHomed.is_set():
+            self.home_all()
+
+        capturedImages = []
+
+        self.auto_focus()
+        self.go_to(cross_x,cross_y)
+        imageArr1 = self.cam.save_image(self.saveDir, self.currSample)
+        capturedImages.append(cv2.cvtColor(imageArr1, cv2.COLOR_BGR2RGB))
+        self.go_to(cross_,y2)
+        imageArr2 = self.cam.save_image(self.saveDir, self.currSample)
+        capturedImages.append(cv2.cvtColor(imageArr2, cv2.COLOR_BGR2RGB))
+        self.go_to(x3,y3)
+        imageArr3 = self.cam.save_image(self.saveDir, self.currSample)
+        capturedImages.append(cv2.cvtColor(imageArr3, cv2.COLOR_BGR2RGB))
+
+        # Convert to grayscale for feature detection
+        gray1 = cv2.cvtColor(imageArr1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(imageArr2, cv2.COLOR_BGR2GRAY)
+        gray3 = cv2.cvtColor(imageArr3, cv2.COLOR_BGR2GRAY)
+
+        # Initialize ORB detector
+        orb = cv2.ORB_create()
+
+        # Detect features in all images
+        kp1, des1 = orb.detectAndCompute(gray1, None)
+        kp2, des2 = orb.detectAndCompute(gray2, None)
+        kp3, des3 = orb.detectAndCompute(gray3, None)
+
+        # Create BFMatcher with cross-check
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+        # Match Image1 with Image2 and Image3
+        matches_12 = bf.match(des1, des2)
+        matches_13 = bf.match(des1, des3)
+
+        # Create dictionaries for quick lookup
+        match12_dict = {m.queryIdx: m for m in matches_12}
+        match13_dict = {m.queryIdx: m for m in matches_13}
+
+        # Find common features present in all matches
+        common_features = []
+        for q_idx in set(match12_dict.keys()) & set(match13_dict.keys()):
+            m12 = match12_dict[q_idx]
+            m13 = match13_dict[q_idx]
+            total_distance = m12.distance + m13.distance
+            common_features.append((
+                q_idx,        # Image1 keypoint index
+                m12.trainIdx,  # Image2 keypoint index
+                m13.trainIdx,  # Image3 keypoint index
+                total_distance
+            ))
+
+        # Sort by match quality (lower distance = better)
+        common_features.sort(key=lambda x: x[3])
+
+        # Select top 1 common feature
+        top_matches = common_features[:1]
+
+        # Draw markers on all images
+        colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]  # Red, Green, Blue
+        marker_type = cv2.MARKER_CROSS
+        marker_size = 500
+        thickness = 25
+
+        for i, (q_idx, t12_idx, t13_idx, _) in enumerate(top_matches):
+            # Image 1
+            x1, y1 = map(int, kp1[q_idx].pt)
+            cv2.drawMarker(img1, (x1, y1), colors[i],
+                        marker_type, marker_size, thickness)
+
+            # Image 2
+            x2, y2 = map(int, kp2[t12_idx].pt)
+            cv2.drawMarker(img2, (x2, y2), colors[i],
+                        marker_type, marker_size, thickness)
+
+            # Image 3
+            x3, y3 = map(int, kp3[t13_idx].pt)
+            cv2.drawMarker(img3, (x3, y3), colors[i],
+                        marker_type, marker_size, thickness)
+
+        # Save and display results
+        cv2.imwrite('image1_3matches.jpg', img1)
+        cv2.imwrite('image2_3matches.jpg', img2)
+        cv2.imwrite('image3_3matches.jpg', img3)
+        return capturedImages,
+        
+
     def execute(self, targetMethod, **kwargs):
         # Get the target method
         target = getattr(self, targetMethod, None)
