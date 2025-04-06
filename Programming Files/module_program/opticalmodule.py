@@ -280,23 +280,17 @@ class OpticalModule:
         if not self.isHomed.is_set():
             self.home_all()
 
-        capturedImages = []
-
-        self.auto_focus()
-        self.go_to(cross_x,cross_y)
-        imageArr1 = self.cam.save_image(self.saveDir, self.currSample)
-        capturedImages.append(cv2.cvtColor(imageArr1, cv2.COLOR_BGR2RGB))
-        self.go_to(cross_,y2)
-        imageArr2 = self.cam.save_image(self.saveDir, self.currSample)
-        capturedImages.append(cv2.cvtColor(imageArr2, cv2.COLOR_BGR2RGB))
-        self.go_to(x3,y3)
-        imageArr3 = self.cam.save_image(self.saveDir, self.currSample)
-        capturedImages.append(cv2.cvtColor(imageArr3, cv2.COLOR_BGR2RGB))
+        self.go_to(x=49, y=28)
+        img1 = self.get_image_array(True)
+        self.go_to(x=49, y=27)
+        img2 = self.get_image_array(True)
+        self.go_to(x=50, y=27)
+        img3 = self.get_image_array(True)
 
         # Convert to grayscale for feature detection
-        gray1 = cv2.cvtColor(imageArr1, cv2.COLOR_BGR2GRAY)
-        gray2 = cv2.cvtColor(imageArr2, cv2.COLOR_BGR2GRAY)
-        gray3 = cv2.cvtColor(imageArr3, cv2.COLOR_BGR2GRAY)
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        gray3 = cv2.cvtColor(img3, cv2.COLOR_BGR2GRAY)
 
         # Initialize ORB detector
         orb = cv2.ORB_create()
@@ -362,7 +356,17 @@ class OpticalModule:
         cv2.imwrite('image1_3matches.jpg', img1)
         cv2.imwrite('image2_3matches.jpg', img2)
         cv2.imwrite('image3_3matches.jpg', img3)
-        return capturedImages,
+
+        camera_pts = np.float32([kp1[q_idx].pt, kp2[t12_idx].pt, kp3[t13_idx].pt])
+        print(camera_pts)
+
+        stage_pts = np.float32([[0,0], [0,1], [1,1]])
+        print(camera_pts)
+
+        # Compute affine transformation matrix
+        T = cv2.getAffineTransform(stage_pts, camera_pts)
+
+        return T
         
 
     def execute(self, targetMethod, **kwargs):
