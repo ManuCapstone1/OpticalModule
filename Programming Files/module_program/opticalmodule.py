@@ -252,7 +252,8 @@ class OpticalModule:
         self.go_to(z=bestZPosition)
 
         return bestFocusValue
-    
+
+    #TESTED ON RPI, BUT NOT IMPLEMENTED ON GUI
     def random_sampling(self, numImages, saveImages: bool):
         # Create list of captured images
         capturedImages = []
@@ -276,17 +277,17 @@ class OpticalModule:
             capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
         return capturedImages
     
-    def matrix_transform(self):
+       def matrix_transform(self):
         if not self.isHomed.is_set():
             self.home_all()
 
         self.go_to(x=49, y=28)
         self.auto_focus(88,94,0.05)
-        img1 = self.get_image_array(True)
+        img1 = self.cam.get_image_array(True)
         self.go_to(x=49, y=27)
-        img2 = self.get_image_array(True)
+        img2 = self.cam.get_image_array(True)
         self.go_to(x=50, y=27)
-        img3 = self.get_image_array(True)
+        img3 = self.cam.get_image_array(True)
 
         # Convert to grayscale for feature detection
         gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
@@ -335,7 +336,7 @@ class OpticalModule:
         colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]  # Red, Green, Blue
         marker_type = cv2.MARKER_CROSS
         marker_size = 500
-        thickness = 25
+        thickness = 10
 
         for i, (q_idx, t12_idx, t13_idx, _) in enumerate(top_matches):
             # Image 1
@@ -354,15 +355,13 @@ class OpticalModule:
                         marker_type, marker_size, thickness)
 
         # Save and display results
-        cv2.imwrite('image1_3matches.jpg', img1)
-        cv2.imwrite('image2_3matches.jpg', img2)
-        cv2.imwrite('image3_3matches.jpg', img3)
+        cv2.imwrite('image1_x=49_y=28.jpg', img1)
+        cv2.imwrite('image2_x=49_y=27.jpg', img2)
+        cv2.imwrite('image3_x=50_y=27.jpg', img3)
 
         camera_pts = np.float32([kp1[q_idx].pt, kp2[t12_idx].pt, kp3[t13_idx].pt])
-        print(camera_pts)
 
         stage_pts = np.float32([[0,0], [0,1], [1,1]])
-        print(camera_pts)
 
         # Compute affine transformation matrix
         T = cv2.getAffineTransform(stage_pts, camera_pts)
