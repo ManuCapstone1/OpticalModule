@@ -9,7 +9,7 @@ class ImageStitcher:
     
     #Runs the image stitching macro in Fiji/ImageJ.
     def run_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id):
-        
+         
         try:
             macro_args = f'{grid_x},{grid_y},{input_dir},{output_dir},{sample_id}'
 

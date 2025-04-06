@@ -1,6 +1,5 @@
 import threading
 import paramiko
-import zmq
 from gui import MainApp
 from communication import CommunicationHandler
 from tkinter import messagebox
@@ -86,8 +85,17 @@ def main():
     '''Call function to start Raspberry Pi Python script in a separate thread'''
     #threading.Thread(target=run_rpi_python_file, daemon=True).start()  # Run in background thread
 
+    def send_shutdown_signal():
+        """Send a shutdown command to the Raspberry Pi"""
+        shutdown_message = {"command": "exe_shutdown"}
+        try:
+            comms.send_data(shutdown_message)  # Send the shutdown message to Raspberry Pi
+        except Exception as e:
+            print(f"Error sending shutdown signal: {e}")
+
     '''Closes sockets and gui'''
-    def on_closing():
+    def on_closing():  
+        #send_shutdown_signal()  # Signal Raspberry Pi to shut down
         stop_event.set()  # Signal the thread to stop
         gui.destroy()  # Close the GUI
         comms.close() # Close ZMQ sockets
