@@ -53,6 +53,24 @@ class RaspberryPiTransfer:
             print(f"Error connecting to Raspberry Pi for SSH: {e}")
             raise
     
+    def close_sftp_connection(self):
+        """
+        Close the SFTP connection.
+        """
+        if self.sftp:
+            self.sftp.close()
+        if self.transport:
+            self.transport.close()
+        print("SFTP connection closed.")
+
+    def close_ssh_connection(self):
+        """
+        Close the SSH connection.
+        """
+        if self.ssh_client:
+            self.ssh_client.close()
+        print("SSH connection closed.")
+    
     def transfer_folder(self, remote_folder, local_folder, new_filename=False):
         """
         Transfer all files from a remote Raspberry Pi folder to a local folder using SFTP.
@@ -97,13 +115,12 @@ class RaspberryPiTransfer:
             print(f"Error accessing remote directory: {e}")
 
 
-
     def empty_folder(self, remote_folder):
         """
         Delete all files and subdirectories in a remote folder using SSH.
 
         Args:
-            remote_folder (str): Path to the remote folder to be cleared.
+            remote_folder (str): Path to the remote folder (on rpi) to be cleared.
         """
         try:
             # Use SSH to remove all files and directories in the remote folder
@@ -119,20 +136,4 @@ class RaspberryPiTransfer:
         except Exception as e:
             print(f"Error emptying folder: {e}")
 
-    def close_sftp_connection(self):
-        """
-        Close the SFTP connection.
-        """
-        if self.sftp:
-            self.sftp.close()
-        if self.transport:
-            self.transport.close()
-        print("SFTP connection closed.")
 
-    def close_ssh_connection(self):
-        """
-        Close the SSH connection.
-        """
-        if self.ssh_client:
-            self.ssh_client.close()
-        print("SSH connection closed.")
