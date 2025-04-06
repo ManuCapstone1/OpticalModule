@@ -6,8 +6,7 @@ from tkinter import messagebox
 from stitcher import ImageStitcher
 from transfer_files import RaspberryPiTransfer
 
-#Currently not being used
-#Starting remotely works!
+#Currently not being used, starting remotely works!
 #BUT need to figure out how to close sockets on Raspberry Pi upon closing GUI on PC
 def run_rpi_python_file():
     """
@@ -108,7 +107,6 @@ def main():
     # Optional: Run Raspberry Pi Python script via SSH in the background
     # threading.Thread(target=run_rpi_python_file, daemon=True).start()
 
-    '''Closes sockets and gui'''
     def on_closing():  
         """
         Callback function for closing the GUI window.

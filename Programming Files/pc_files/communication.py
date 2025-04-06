@@ -57,7 +57,7 @@ class CommunicationHandler:
         Continuously receives status updates from the Raspberry Pi and updates the GUI.
 
         Args:
-            gui (object): Reference to the GUI object containing the `update_status_data` method.
+            gui (object): Reference to the GUI object containing the `update_status_data` method. MainApp()
             stop_event (threading.Event): Event to signal when to stop receiving updates.
 
         Returns:
