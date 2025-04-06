@@ -281,6 +281,7 @@ class OpticalModule:
             self.home_all()
 
         self.go_to(x=49, y=28)
+        self.auto_focus(88,94,0.05)
         img1 = self.get_image_array(True)
         self.go_to(x=49, y=27)
         img2 = self.get_image_array(True)
