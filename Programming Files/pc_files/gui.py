@@ -274,9 +274,9 @@ class MainApp(ctk.CTk):
         #Window setup
         sample_window = ctk.CTkToplevel(self)
         sample_window.title("Enter Sample Parameters")
-        sample_window.geometry("330x420")
-        sample_window.minsize(330, 440)
-        sample_window.maxsize(330, 440)
+        sample_window.geometry("330x450")
+        sample_window.minsize(330, 450)
+        sample_window.maxsize(330, 450)
 
         sample_window.grab_set()
 
@@ -352,7 +352,6 @@ class MainApp(ctk.CTk):
         ok_button = ctk.CTkButton(image_sampling_window, text="OK", 
                                 command=lambda: [self.send_sampling_data(int(total_images.get())),
                                                 self.display_random_sampling_layout(int(total_images.get()), self.main_right_frame),
-                                                self.empty_folder_rpi(),
                                                 image_sampling_window.destroy()], width=80, state="disabled")  # Initially disabled
         ok_button.grid(row=2, column=0, padx=5, pady=10, sticky="ew")
 
@@ -422,7 +421,6 @@ class MainApp(ctk.CTk):
                                 command=lambda: [
                                     self.send_scanning_data(int(step_x.get()), int(step_y.get())),
                                     self.display_loading_frame(frame),
-                                    self.empty_folder_rpi(),
                                     image_scanning_window.destroy()], 
                                 width=80, state="disabled")  # Initially disabled
         ok_button.grid(row=4, column=0, padx=5, pady=10, sticky="ew")
