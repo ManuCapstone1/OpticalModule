@@ -21,6 +21,7 @@ class RaspberryPiTransfer:
         self.sftp = None
         self.ssh_client = None 
 
+
     def connect_sftp(self):
         """
         Establish an SFTP connection to the Raspberry Pi.
@@ -36,6 +37,7 @@ class RaspberryPiTransfer:
         except Exception as e:
             print(f"Error connecting to Raspberry Pi for SFTP: {e}")
             raise
+
 
     def connect_ssh(self):
         """
@@ -53,6 +55,7 @@ class RaspberryPiTransfer:
             print(f"Error connecting to Raspberry Pi for SSH: {e}")
             raise
     
+
     def close_sftp_connection(self):
         """
         Close the SFTP connection.
@@ -63,6 +66,7 @@ class RaspberryPiTransfer:
             self.transport.close()
         print("SFTP connection closed.")
 
+
     def close_ssh_connection(self):
         """
         Close the SSH connection.
@@ -70,6 +74,7 @@ class RaspberryPiTransfer:
         if self.ssh_client:
             self.ssh_client.close()
         print("SSH connection closed.")
+    
     
     def transfer_folder(self, remote_folder, local_folder, new_filename=False):
         """

@@ -117,7 +117,7 @@ class MainApp(ctk.CTk):
         self.complete_stitching_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/complete/stitching"
         self.complete_sampling_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/complete/sampling"
 
-        #Raspberry Pi files
+        #Raspberry Pi files transfer object
         self.rpi_transfer = None
 
         #--------------------- GUI Appearance Variables ---------------------------#
@@ -164,6 +164,7 @@ class MainApp(ctk.CTk):
         self.alarm_label = ctk.CTkLabel(top_frame, text=f"Alarms: {self.alarm_status}")
         self.alarm_label.pack(side=ctk.RIGHT, padx=10)
 
+
     def create_bottom_frame(self):
         '''
         Creates Bottom Frame with tab buttons and date and time
@@ -180,6 +181,7 @@ class MainApp(ctk.CTk):
         self.date_time_label = ctk.CTkLabel(bottom_frame, text="", font = ("Arial", 14))
         self.date_time_label.pack(side=ctk.RIGHT, padx=5)
         self.update_time()
+
 
     def switch_tab(self, tab_name):
         '''
@@ -203,7 +205,7 @@ class MainApp(ctk.CTk):
         elif tab_name == "Details":
             self.display_details_tab()
 
-    #Main Tab Frames
+
     def display_main_tab(self):
         """
         Displays the Main Frame with buttons on the left, and picture holder on the right
@@ -235,10 +237,10 @@ class MainApp(ctk.CTk):
 
         #Calibration button. Uncomment to use
         #"exe_calibration" is NOT currently seupt in Raspberry Pi (April 5, 2025)
-
         #calibration_btn = ctk.CTkButton(left_frame, width = 200, height = 50, text="Calibration", font=("Arial", 20),
         #                                command=lambda :self.send_simple_command("exe_calibration", True))
         #calibration_btn.pack(pady=5, fill='x')
+
 
     def display_placeholder_image(self, frame):
         '''
@@ -262,7 +264,6 @@ class MainApp(ctk.CTk):
 
         # Center the image within the frame using place() method
         img_label.place(relx=0.5, rely=0.5, anchor="center")
-
 
     #------------------------------- Pop-up Windows ------------------------------------------#
 
@@ -323,6 +324,7 @@ class MainApp(ctk.CTk):
 
         # Cancel button - closes window
         ctk.CTkButton(sample_window, text="Cancel", command=sample_window.destroy, width = 80).grid(row = 12, column = 3, columnspan = 2, padx=5, pady=5)
+
 
     def open_sampling_dialog(self):
         '''
@@ -449,6 +451,7 @@ class MainApp(ctk.CTk):
         # Trace the input changes and call validate_input
         step_x.bind("<KeyRelease>", validate_input)
         step_y.bind("<KeyRelease>", validate_input)
+
 
     def open_homing_dialog(self):
         '''
@@ -588,6 +591,7 @@ class MainApp(ctk.CTk):
         self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
         self.last_refreshed_label.pack(pady=5)
 
+
     def refresh_motor_coord(self):
         """
         Fetch live data being updated from Raspberry Pi and update entries dynamically.
@@ -603,6 +607,7 @@ class MainApp(ctk.CTk):
 
         self.z_entry.delete(0, "end")
         self.z_entry.insert(0, str(self.z_pos))
+
 
     def create_position_control(self, parent, label, value, row):
         """
@@ -637,6 +642,7 @@ class MainApp(ctk.CTk):
         elif label == "Z":
             self.z_entry = entry
 
+
     def create_step_buttons(self, parent, entry_widget, step=1, row=0):
         """
         Creates step adjustment buttons for modifying the position value by a fixed step.
@@ -661,6 +667,7 @@ class MainApp(ctk.CTk):
         # Down button: Decreases position value by the step
         ctk.CTkButton(btn_frame, text="▼", width=30, command=lambda: self.adjust_value(entry_widget, -step)).grid(row=0, column=1, padx=2)
     
+
     def adjust_value(self, entry, step):
         """
         Adjusts the value in the provided entry widget by the specified step (increment or decrement).
@@ -682,6 +689,7 @@ class MainApp(ctk.CTk):
             # If the entry is not a valid number, reset to 0
             entry.delete(0, ctk.END)
             entry.insert(0, "0")
+
 
     #Incomplete, not in use. Raspberry Pi coord not connected to grids.
     def create_graphs(self, parent):
@@ -715,7 +723,6 @@ class MainApp(ctk.CTk):
         ctk.CTkLabel(z_graph, text="           ", fg_color="red").place(
             relx=0.5, rely=1 - (self.z_pos * 0.001), anchor='center')  # Flipped to align vertically
 
-    
     # --------------------------- Image Tab ----------------------------- #
 
     def display_image_tab(self):
@@ -835,6 +842,7 @@ class MainApp(ctk.CTk):
         image_label = ctk.CTkLabel(right_frame, text="Image will appear here", fg_color="gray", width=400, height=400)
         image_label.pack(expand=True, fill='both', pady=20)
 
+
     def refresh_camera_entries(self):
         """
         Fetch data being updated from Raspberry Pi and update entries dynamically.
@@ -851,6 +859,7 @@ class MainApp(ctk.CTk):
 
         self.colour_temp_entry.delete(0, "end")
         self.colour_temp_entry.insert(0, self.colour_temp)
+
 
     def show_image(self, image_folder, image_label):
         """
@@ -1063,6 +1072,7 @@ class MainApp(ctk.CTk):
 
         stop_button.pack(side='bottom', pady=5)
     
+
     def get_image_layout_parameters(self,images_x, images_y):
         """
         Dynamically calculates image size and spacing based on grid size.
@@ -1085,6 +1095,7 @@ class MainApp(ctk.CTk):
 
         return img_size, spacing # Return type: tuple (int, int)
  
+
     def display_scanning_layout(self, images_x, images_y, frame):
         """
         Displays the scanning layout with all the images that were scanned
@@ -1236,6 +1247,7 @@ class MainApp(ctk.CTk):
                                       command=lambda:[self.display_main_tab(),self.create_transfer_folder_pc(self.buffer_sampling_folder,new_folder_path)])
         finish_button.pack(side='right',fill = 'x', padx=5, pady=5)
 
+
     def populate_image_grid(self, parent_frame, images, num_images, img_size):
         """
         Populate the image grid with images.
@@ -1300,6 +1312,7 @@ class MainApp(ctk.CTk):
             img_label.bind("<Button-1>", lambda e, img_path=images[image_index]: self.expand_image(img_path))
             self.image_labels.append(img_label)
 
+
     def random_sampling_image_update(self):
         """
         Updates the random sampling layout by polling the image folder for new images.
@@ -1328,6 +1341,7 @@ class MainApp(ctk.CTk):
         # Stop polling if all expected images are loaded
         if len(images_to_show) < self.target_num_images:
             self.after(1000, self.random_sampling_image_update)  # Check again after 1 sec
+
 
     def poll_for_new_images(self):
         """
@@ -1420,6 +1434,7 @@ class MainApp(ctk.CTk):
         back_button = ctk.CTkButton(expanded_window, text="Back", command=expanded_window.destroy)
         back_button.grid(row=1, column=0, padx=5, pady=10, sticky='ew')  # Positioned at the bottom
 
+
         def resize_image_periodically():
             """
             Periodically resize the image based on window size.
@@ -1459,7 +1474,7 @@ class MainApp(ctk.CTk):
         expanded_window.grid_rowconfigure(1, weight=0)  # Keep the back button at the bottom
         expanded_window.grid_columnconfigure(0, weight=1)
 
-    #Update time
+
     def update_time(self):
         '''
         Updates the time displayed in the bottom frame.
@@ -1474,7 +1489,7 @@ class MainApp(ctk.CTk):
         self.date_time_label.configure(text=now)
         self.after(1000, self.update_time)
 
-    #Clear frame
+
     def clear_frame(self, frame):
         """
         Destroys all widgets inside the given frame.
@@ -1526,6 +1541,7 @@ class MainApp(ctk.CTk):
         except Exception as e:
             print(f"Error: {e}")
     
+
     def empty_folder_pc(self, dir_path):
         """
         Empties the specified folder by removing all files and subdirectories.
@@ -1556,6 +1572,7 @@ class MainApp(ctk.CTk):
         else:
             print(f"The directory {dir_path} does not exist or is not a valid folder.")
         
+
     def extract_unique_positions(self, directory):
         """
         Extracts unique x and y positions from JSON objects in text files within the specified directory.
@@ -1599,6 +1616,7 @@ class MainApp(ctk.CTk):
         # Return the unique x and y positions
         return len(unique_x_positions), len(unique_y_positions)
     
+
     def set_rpi_transfer(self, transfer_obj):
         """
         Sets the RaspberryPiTransfer instance for use in the GUI.
@@ -1614,6 +1632,7 @@ class MainApp(ctk.CTk):
         """
         self.rpi_transfer = transfer_obj
     
+
     def transfer_folder_rpi(self, destination_path, new_filename):
         """
         Transfers a folder from the Raspberry Pi to the local machine (PC).
@@ -1644,6 +1663,7 @@ class MainApp(ctk.CTk):
         except Exception as e:
             print("Error", f"File transfer failed: {e}")
     
+
     def empty_folder_rpi(self, remote_folder="/home/microscope/image_buffer") :
         """
         Empties the specified folder on the Raspberry Pi.
@@ -1689,6 +1709,7 @@ class MainApp(ctk.CTk):
 
         self.comms = comms
         self.stop_event = stop_event 
+
 
     def send_json_error_check(self, data, success_message):
         """
@@ -2073,6 +2094,7 @@ class MainApp(ctk.CTk):
 
         self.stitcher = stitcher
 
+
     def start_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id) :
         """
         
@@ -2093,20 +2115,3 @@ class MainApp(ctk.CTk):
         # Using a lambda function to pass the arguments to run_stitching
         self.stitching_thread = Thread(target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id), daemon=True)
         self.stitching_thread.start()
-
-
-
-#To do
-
-#Calibration
-#Fill in frame
-#connect routine
-
-#Camera settings
-#Settings are properly sent to the raspberry Pi, but it doesn't actually uppdate
-
-#Motion tab
-#Graph is setup on the GUI, but it doesn't update based on Raspberry Pi live data
-
-
-#Close sockets on raspberry pi on gui closing

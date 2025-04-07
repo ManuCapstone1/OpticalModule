@@ -5,8 +5,12 @@ class CommunicationHandler:
     """
     Handles ZeroMQ communication between the PC and Raspberry Pi.
 
-    This class sets up a REQ socket for sending commands to the Raspberry Pi
-    and a SUB socket for receiving periodic status updates.
+    - Sets up a REQ socket for sending commands to the Raspberry Pi
+    - Function send_data for sending requests.
+    - Sets up SUB socket for receiving periodic status updates.
+    - Function receive_status_updates for receiving live data from Raspberry Pi.
+    - Includes function for closing sockets.
+    
     """
         
     def __init__(self):
@@ -52,6 +56,7 @@ class CommunicationHandler:
                 print(f"Error sending data: {e}")
                 return {"error": "Send Error", "message": str(e)}
 
+
     def receive_status_updates(self, gui, stop_event):
         """
         Continuously receives status updates from the Raspberry Pi and updates the GUI.
@@ -80,6 +85,7 @@ class CommunicationHandler:
             except Exception as e:
                 print(f"Error receiving status update: {e}")
                 time.sleep(1)  # Avoid flooding errors
+
 
     def close(self):
         """
