@@ -1881,24 +1881,27 @@ class MainApp(ctk.CTk):
         Returns:
             None
         """
+        if self.module_status == "Idle":
+            
+            # Store the sample data
+            self.sample_data['command'] = "create_sample"
+            self.sample_data['mode'] = "Manual"
+            self.sample_data['mount_type'] = mount_type
+            self.sample_data['sample_id'] = sample_id
+            self.sample_data['initial_height'] = initial_height
+            self.sample_data['layer_height'] = layer_height
+            self.sample_data['width'] = width
+            self.sample_data['height'] = height
 
-        # Store the sample data
-        self.sample_data['command'] = "create_sample"
-        self.sample_data['mode'] = "Manual"
-        self.sample_data['mount_type'] = mount_type
-        self.sample_data['sample_id'] = sample_id
-        self.sample_data['initial_height'] = initial_height
-        self.sample_data['layer_height'] = layer_height
-        self.sample_data['width'] = width
-        self.sample_data['height'] = height
-
-        #Send sample data
-        success_message = "Sample parameters sent."
-        self.send_json_error_check(self.sample_data, success_message)
-        
-        #First sample loaded
-        self.sample_loaded = True
-
+            #Send sample data
+            success_message = "Sample parameters sent."
+            self.send_json_error_check(self.sample_data, success_message)
+            
+            #First sample loaded
+            self.sample_loaded = True
+            
+        else:
+            messagebox.showerror("Status not in idle, wait to request scanning mode.")
 
     def send_simple_command(self, command, checkIdle):
         """
