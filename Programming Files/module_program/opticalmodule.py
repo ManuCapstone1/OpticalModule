@@ -455,6 +455,7 @@ class OpticalModule:
 
         return image
     
+
     def random_sampling(self, numImages, saveImages: bool):
         """
         Takes images at a specified number of random positions within the sample bounding box.
@@ -669,6 +670,98 @@ class OpticalModule:
         zdistlist = [Z1,Z2,Z3,Z4]
         return zdistlist
     
+       def matrix_transform(self):
+        if not self.isHomed.is_set():
+            self.home_all()
+
+        self.go_to(x=49, y=28)
+        self.auto_focus(88,94,0.05)
+        img1 = self.cam.get_image_array(True)
+        self.go_to(x=49, y=27)
+        img2 = self.cam.get_image_array(True)
+        self.go_to(x=50, y=27)
+        img3 = self.cam.get_image_array(True)
+
+        # Convert to grayscale for feature detection
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        gray3 = cv2.cvtColor(img3, cv2.COLOR_BGR2GRAY)
+
+        # Initialize ORB detector
+        orb = cv2.ORB_create()
+
+        # Detect features in all images
+        kp1, des1 = orb.detectAndCompute(gray1, None)
+        kp2, des2 = orb.detectAndCompute(gray2, None)
+        kp3, des3 = orb.detectAndCompute(gray3, None)
+
+        # Create BFMatcher with cross-check
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+        # Match Image1 with Image2 and Image3
+        matches_12 = bf.match(des1, des2)
+        matches_13 = bf.match(des1, des3)
+
+        # Create dictionaries for quick lookup
+        match12_dict = {m.queryIdx: m for m in matches_12}
+        match13_dict = {m.queryIdx: m for m in matches_13}
+
+        # Find common features present in all matches
+        common_features = []
+        for q_idx in set(match12_dict.keys()) & set(match13_dict.keys()):
+            m12 = match12_dict[q_idx]
+            m13 = match13_dict[q_idx]
+            total_distance = m12.distance + m13.distance
+            common_features.append((
+                q_idx,        # Image1 keypoint index
+                m12.trainIdx,  # Image2 keypoint index
+                m13.trainIdx,  # Image3 keypoint index
+                total_distance
+            ))
+
+        # Sort by match quality (lower distance = better)
+        common_features.sort(key=lambda x: x[3])
+
+        # Select top 1 common feature
+        top_matches = common_features[:1]
+
+        # Draw markers on all images
+        colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]  # Red, Green, Blue
+        marker_type = cv2.MARKER_CROSS
+        marker_size = 500
+        thickness = 10
+
+        for i, (q_idx, t12_idx, t13_idx, _) in enumerate(top_matches):
+            # Image 1
+            x1, y1 = map(int, kp1[q_idx].pt)
+            cv2.drawMarker(img1, (x1, y1), colors[i],
+                        marker_type, marker_size, thickness)
+
+            # Image 2
+            x2, y2 = map(int, kp2[t12_idx].pt)
+            cv2.drawMarker(img2, (x2, y2), colors[i],
+                        marker_type, marker_size, thickness)
+
+            # Image 3
+            x3, y3 = map(int, kp3[t13_idx].pt)
+            cv2.drawMarker(img3, (x3, y3), colors[i],
+                        marker_type, marker_size, thickness)
+
+        # Save and display results
+        cv2.imwrite('image1_x=49_y=28.jpg', img1)
+        cv2.imwrite('image2_x=49_y=27.jpg', img2)
+        cv2.imwrite('image3_x=50_y=27.jpg', img3)
+
+        camera_pts = np.float32([kp1[q_idx].pt, kp2[t12_idx].pt, kp3[t13_idx].pt])
+
+        stage_pts = np.float32([[0,0], [0,1], [1,1]])
+
+        # Compute affine transformation matrix
+        T = cv2.getAffineTransform(stage_pts, camera_pts)
+
+        return T
+        
+
     def execute(self, targetMethod, **kwargs):
         """
         Calls specified method on a thread and resets module status to "Idle" when complete. 

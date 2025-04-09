@@ -1,0 +1,24 @@
+# Define the number of dimensions we are working on
+dim = 2
+
+# Define the image coordinates
+4_dime_6.jpg; ; (0.0, 0.0)
+9_dime_6.jpg; ; (3244.0, 0.0)
+14_dime_6.jpg; ; (6488.0, 0.0)
+19_dime_6.jpg; ; (9732.0, 0.0)
+3_dime_6.jpg; ; (0.0, 2432.0)
+8_dime_6.jpg; ; (3244.0, 2432.0)
+13_dime_6.jpg; ; (6488.0, 2432.0)
+18_dime_6.jpg; ; (9732.0, 2432.0)
+2_dime_6.jpg; ; (0.0, 4864.0)
+7_dime_6.jpg; ; (3244.0, 4864.0)
+12_dime_6.jpg; ; (6488.0, 4864.0)
+17_dime_6.jpg; ; (9732.0, 4864.0)
+1_dime_6.jpg; ; (0.0, 7296.0)
+6_dime_6.jpg; ; (3244.0, 7296.0)
+11_dime_6.jpg; ; (6488.0, 7296.0)
+16_dime_6.jpg; ; (9732.0, 7296.0)
+0_dime_6.jpg; ; (0.0, 9728.0)
+5_dime_6.jpg; ; (3244.0, 9728.0)
+10_dime_6.jpg; ; (6488.0, 9728.0)
+15_dime_6.jpg; ; (9732.0, 9728.0)

@@ -1,0 +1,14 @@
+{
+    "image_name": "11_0_dime_6",
+    "sample_id": "dime_6",
+    "timestamp": "20250328_040711",
+    "sample_layer": 0,
+    "image_number": 11,
+    "image_x_pos": 112.006384875,
+    "image_y_pos": 88.998091875,
+    "image_z_pos": 76.8,
+    "exposure_time": 100000,
+    "analog_gain": 2,
+    "contrast": 1.0,
+    "colour_temp": 6000
+}
