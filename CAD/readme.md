@@ -1,3 +1,5 @@
+To access the project assembly to go the "CAD" folder and download "Optical Module CAD assembly_PACK AND GO.zip". Open the "430 Main project assy" file for the final assembly
+
 The structure of the assmebly for this project took a lot of inspiration from rolohuan's SimpleCore 3D printer.
 
 
