@@ -105,7 +105,7 @@ def main():
     
     #Incomplete. Can start program, but closing sockets on Raspberry Pi Incomplete
     # Optional: Run Raspberry Pi Python script via SSH in the background
-    # threading.Thread(target=run_rpi_python_file, daemon=True).start()
+    threading.Thread(target=run_rpi_python_file, daemon=True).start()
 
     def on_closing():  
         """
