@@ -670,7 +670,13 @@ class OpticalModule:
         zdistlist = [Z1,Z2,Z3,Z4]
         return zdistlist
     
-       def matrix_transform(self):
+    def matrix_transform(self):
+        """
+        This is an automatic method of establishing scaling and rotation aspects of affine transformation, 
+        the method returns the transformation matrix. However, because the code is looking for random features on the images, 
+        it is hard to consistently get the same absolute zero every time, even with a crosshair marker. 
+        Output images with markers indicating the same feature will be saved in the microscope folder.
+        """
         if not self.isHomed.is_set():
             self.home_all()
 
