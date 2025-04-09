@@ -333,9 +333,9 @@ class MainApp(ctk.CTk):
         # Window setup
         image_sampling_window = ctk.CTkToplevel(self)
         image_sampling_window.title("Enter Sampling Parameters")
-        image_sampling_window.geometry("350x135")  # Set initial size
-        image_sampling_window.minsize(350, 135)   # Limit the minimum size
-        image_sampling_window.maxsize(350, 135)   # Limit the maximum size
+        image_sampling_window.geometry("370x135")  # Set initial size
+        image_sampling_window.minsize(370, 135)   # Limit the minimum size
+        image_sampling_window.maxsize(370, 135)   # Limit the maximum size
 
         image_sampling_window.grab_set()
 
@@ -345,7 +345,7 @@ class MainApp(ctk.CTk):
 
         # Total images input field
         ctk.CTkLabel(image_sampling_window, text="Total Number of Images:").grid(row=1, column=0, columnspan = 2, padx=5, pady=5, sticky="e")
-        total_images = ctk.CTkEntry(image_sampling_window, placeholder_text="6")
+        total_images = ctk.CTkEntry(image_sampling_window, placeholder_text="e.g. 6")
         total_images.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
         # OK button (closes the window and processes input)
