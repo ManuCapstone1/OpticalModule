@@ -2,9 +2,13 @@
 
 This Github repository is for storing all pertinent information regarding the functionality and design of the optical module.
 
-![CAD Assembly](Images/assembly_front.PNG)
+<p align="center">
+  <img src="Images/Assembly_CAD/Render1_rotated.PNG" alt="Rendered CAD" width="450"/>
+</p>
 
-![GUI_Example](Images/gui_coin.jpg)
+<p align="center">
+  <img src="Images/gui_coin.jpg" alt="Rendered CAD" width="700"/>
+</p>
 
 ---
 
