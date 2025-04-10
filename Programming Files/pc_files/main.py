@@ -103,8 +103,10 @@ def main():
     except Exception as e:
         messagebox.showerror("Error", f"Could not transfer files: {e}")
     
-    #Incomplete. Can start program, but closing sockets on Raspberry Pi Incomplete
-    # Optional: Run Raspberry Pi Python script via SSH in the background
+    #Incomplete.
+    # Run Raspberry Pi Python script via SSH in the background
+    # Power cycle raspbery pi in order to reset sockets, or implement code to close sockets when gui closes
+
     threading.Thread(target=run_rpi_python_file, daemon=True).start()
 
     def on_closing():  
