@@ -17,10 +17,10 @@ See [Download BOM.xlsx](./OpticalModule/Documentation/Github_BOM.xlsx) for a mor
 | Ball Screw Bracket       |                                      | 1        |      |
 | Belt Tensioner           |                                      | 1        |      |
 | Z Motor bracket          |                                      | 1        |      |
-| Left Y Carriage Top      |                                      | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD) | 
-| Left Y Carriage Bottom   |                                      | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD) |
-| Right Y Carriage Top     |                                      | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD) |
-| Right Y Carriage Bottom  |                                      | 1        | [rolohuan](https://github.com/rolohaun/SimpleCore/tree/main/CAD) |
+| Left Y Carriage Top      |                                      | 1        | [rolohaun](https://github.com/rolohaun/SimpleCore/tree/main/CAD) | 
+| Left Y Carriage Bottom   |                                      | 1        | [rolohaun](https://github.com/rolohaun/SimpleCore/tree/main/CAD) |
+| Right Y Carriage Top     |                                      | 1        | [rolohaun](https://github.com/rolohaun/SimpleCore/tree/main/CAD) |
+| Right Y Carriage Bottom  |                                      | 1        | [rolohaun](https://github.com/rolohaun/SimpleCore/tree/main/CAD) |
 | X Limit Switch Mount     |                                      | 1        |       |
 | Housing Top              |                                      | 1        |       |
 | Housing Base             |                                      | 1        |       |
