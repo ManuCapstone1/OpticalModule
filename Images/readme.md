@@ -1,11 +1,14 @@
-### archived
-Folder with old programming files. Many including test files and demos used during the software development process.
+### Assembly_CAD
+Rendered images of microscope in CAD from different angles and viewpoints.
 
-### module_program
-All the programming files needed and run on the Raspberry Pi. To start the process, run rpmain.py.
+### Charuco
+Images of charuco board taken with the microscope during testing.
 
-### pc_files
-All the programming files needed to run a GUI on a windows PC. To start the process, run main.py.
+### Diagrams
+Flowcharts and diagrams to explain programming structure. Referenced in readme.md file in programming folders.
 
-### fiji
-Files and information pertaining to Fiji (ImageJ), which handles the image stitching.
+### Picture
+Pictures taken of the microscope from various different angles and viewpoints to assist with assembly.
+
+### coin_stitched_example
+An example of the files that would be outputted during a scanning routine of the optical module.
