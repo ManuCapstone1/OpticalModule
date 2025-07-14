@@ -1,14 +1,24 @@
 import threading
 import paramiko
-import zmq
 from gui import MainApp
 from communication import CommunicationHandler
 from tkinter import messagebox
 from stitcher import ImageStitcher
 from transfer_files import RaspberryPiTransfer
 
+#Currently not being used, starting remotely works!
+#BUT need to figure out how to close sockets on Raspberry Pi upon closing GUI on PC
 def run_rpi_python_file():
-    """Function to SSH into Raspberry Pi and run a Python script"""
+    """
+    SSH into the Raspberry Pi and execute a Python script remotely.
+
+    This function connects to the Raspberry Pi using Paramiko, activates a
+    virtual environment, and runs the main Python script (`rpmain.py`) that
+    controls the mechanical system.
+
+    If there's an error, it is displayed in a message box.
+    """
+
     try:
         # Setup SSH connection to the Raspberry Pi
         rpi_ip = "192.168.1.111" 
@@ -23,6 +33,7 @@ def run_rpi_python_file():
         client.connect(rpi_ip, username=rpi_username, password=rpi_password)
 
         # Command to run the Python file on the Raspberry Pi
+        #Fist activate virtual environment, then start rpmain.py
         command = 'source /home/microscope/DIY_Eng_CV/bin/activate && python3 /home/microscope/rpmain.py'
 
         # Run the command
@@ -45,11 +56,21 @@ def run_rpi_python_file():
         messagebox.showerror("Error", f"Could not run the Raspberry Pi Python file: {e}")
 
 def main():
+    """
+    Initializes and starts the main GUI application.
+
+    - Sets up communication with the Raspberry Pi over ZeroMQ.
+    - Starts a background thread to receive status updates.
+    - Initializes the image stitcher.
+    - Sets up file transfer functionality.
+    - Optionally starts the Raspberry Pi script over SSH. (Work in Progress)
+    - Defines shutdown behavior when the GUI window closes.
+    """
 
     gui = MainApp() #Instantiate gui
     stop_event = threading.Event()  #Stop event for killing theads when gui closes
 
-    '''Setup communication and thread for raspberry pi'''
+    #Setup communication and thread for raspberry pi
     try:
         comms = CommunicationHandler() #instantiate communication handler
 
@@ -66,7 +87,7 @@ def main():
     except Exception as e:
         messagebox.showerror("Error", f"Could not establish communcation: {e}")
 
-    '''Image stitcher setup'''
+    #Image stitcher setup
     try:
         stitcher = ImageStitcher() #instantiate image stitcher
         gui.set_stitcher(stitcher) #Setup stitcher in gui
@@ -74,27 +95,35 @@ def main():
     except Exception as e:
         messagebox.showerror("Error", f"Could not setup image stitcher: {e}")
 
-    '''Raspberry Pi file transfer setup'''
+    #Raspberry Pi file transfer setup
     try:
-        # Raspberry Pi file transfer setup
         transfer = RaspberryPiTransfer()
         gui.set_rpi_transfer(transfer)
 
     except Exception as e:
         messagebox.showerror("Error", f"Could not transfer files: {e}")
     
-    '''Call function to start Raspberry Pi Python script in a separate thread'''
-    #threading.Thread(target=run_rpi_python_file, daemon=True).start()  # Run in background thread
+    #Incomplete.
+    # Run Raspberry Pi Python script via SSH in the background
+    # Power cycle raspbery pi in order to reset sockets, or implement code to close sockets when gui closes
+    threading.Thread(target=run_rpi_python_file, daemon=True).start()
 
-    '''Closes sockets and gui'''
-    def on_closing():
-        stop_event.set()  # Signal the thread to stop
-        gui.destroy()  # Close the GUI
-        comms.close() # Close ZMQ sockets
+    def on_closing():  
+        """
+        Callback function for closing the GUI window.
+
+        - Stops all background threads.
+        - Closes the GUI.
+        - Cleans up communication sockets.
+        """
+
+        stop_event.set() 
+        gui.destroy() 
+        comms.close()
 
     gui.protocol("WM_DELETE_WINDOW", on_closing)
 
-    gui.mainloop() #Start gui
+    gui.mainloop() #Start gui event loop
 
 #START
 if __name__ == "__main__":

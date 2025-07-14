@@ -1,0 +1,5 @@
+pyfirmata
+opencv-python
+numpy
+picamera2
+pyzmq
