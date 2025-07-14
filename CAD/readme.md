@@ -1,4 +1,4 @@
--To access the project assembly to go the "Optical Module Final Assembly" folder and download "Optical Module CAD assembly_PACK AND GO.zip". 
+-To access the project assembly to go the "Optical Module Final Assembly" folder and download "Optical Module CAD.zip". 
 
 -Open the "430 Main project assy" file for the final assembly.
 
