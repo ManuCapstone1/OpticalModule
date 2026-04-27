@@ -1,4 +1,5 @@
 import subprocess
+import os
 
 class ImageStitcher:
     """
@@ -12,10 +13,13 @@ class ImageStitcher:
         Args:
             fiji_path (str, optional): Path to the Fiji executable. Defaults to 'C:\\Fiji.app\\ImageJ-win64.exe'.
             macro_path (str, optional): Path to the ImageJ macro file. Defaults to 'C:\\Fiji.app\\macros\\StitchingMacro.ijm'.
+            Defaults above are for Windows install. For Linux the defaults are 
+            fiji_path (str, optional): /home/graeme/Fiji/ImageJ
+            macro_path (str, optional): /home/graeme/Fiji/macros/StichingMacro.ijm
         """
          
-        self.fiji_path = fiji_path or r"C:\\Fiji.app\\ImageJ-win64.exe"
-        self.macro_path = macro_path or r"C:\\Fiji.app\\macros\\StitchingMacro.ijm"
+        self.fiji_path = fiji_path or os.path.join(os.path.expanduser('~'), "Fiji", "ImageJ")
+        self.macro_path = macro_path or os.path.join(os.path.expanduser('~'), "Fiji", "macros", "StitchingMacro.ijm")
     
 
     def run_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id):

@@ -1,3 +1,5 @@
+from email.mime import message
+
 import zmq
 import time
 import json
@@ -57,6 +59,10 @@ def send_status_updates():
 
 def update_status_data():
     """Updates status_data with the current data"""
+    if hasattr(shabam, "latest_measurements"):
+        status_data["latest_measurements"] = shabam.latest_measurements
+    else:
+        status_data["latest_measurements"] = []
 
     # Update positional data
     with shabam.positionLock:
@@ -182,6 +188,23 @@ def handle_request():
                                                                          "y": message["req_y_pos"],
                                                                          "z": message["req_z_pos"]})
                 thread.start()
+
+
+
+
+            # Go to a preset X, Y, Z position and take 1-2 measurements
+            if message["command"] == "exe_goto_preset_measure" and not thread.is_alive():
+                status_data["module_status"] = "Preset Move + Measure"
+                thread = threading.Thread(
+                    target=shabam.execute,
+                    kwargs={
+                        "targetMethod": "move_to_preset_and_measure",
+                        "num_measurements": 2
+                    }
+                )
+                thread.start()
+
+
 
             # Capture and save a single image to the buffer directory
             if message["command"] == "exe_update_image" and not thread.is_alive():

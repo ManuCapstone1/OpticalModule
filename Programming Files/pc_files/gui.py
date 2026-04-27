@@ -47,7 +47,7 @@ class MainApp(ctk.CTk):
         # Disable decompression bomb protection for stitched image
         Image.MAX_IMAGE_PIXELS = None 
 
-        #------ JSON Objects sent to Rapsberry Pi ------#
+        #------ JSON Objects sent to Raspberry Pi ------#
         #Sample data
         self.sample_data = {
             "command" :"Unknown",
@@ -105,17 +105,16 @@ class MainApp(ctk.CTk):
 
         #-------------------- Directories ---------------------#
         #Images for GUI aesthetics
-        self.img_gui = "C:/Users/GraemeJF/Documents/Capstone/Images/GUI"    
-
+        self.img_gui = os.path.join(os.path.expanduser('~'), 'optical_module', 'Images', 'GUI')    
         #Buffer folders
         #Raw string in order to pass to Fiji succesfully for image stitching
-        self.buffer_stitching_folder = r"C:\\Users\\GraemeJF\\Documents\\Capstone\\Images\\buffer\\stitching"
-        self.buffer_sampling_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/buffer/sampling"
-        self.buffer_testing_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/buffer/camera_tests"
+        self.buffer_stitching_folder = os.path.join(os.path.expanduser('~'), 'optical_module', 'Images', 'buffer', 'stitching')
+        self.buffer_sampling_folder =  os.path.join(os.path.expanduser('~'), 'optical_module', 'Images', 'buffer', 'sampling') 
+        self.buffer_testing_folder =  os.path.join(os.path.expanduser('~'), 'optical_module', 'Images', 'buffer', 'camera_tests') 
 
         #Completed folders
-        self.complete_stitching_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/complete/stitching"
-        self.complete_sampling_folder = "C:/Users/GraemeJF/Documents/Capstone/Images/complete/sampling"
+        self.complete_stitching_folder = os.path.join(os.path.expanduser('~'), 'optical_module', 'Images', 'complete', 'stitching')  
+        self.complete_sampling_folder = os.path.join(os.path.expanduser('~'), 'optical_module', 'Images', 'complete', 'sampling')
 
         #Raspberry Pi files
         self.rpi_transfer = None
@@ -278,6 +277,7 @@ class MainApp(ctk.CTk):
         sample_window.minsize(330, 450)
         sample_window.maxsize(330, 450)
 
+        sample_window.wait_visibility()
         sample_window.grab_set()
 
         #Mount type (ie puck, stub), drop down menu
@@ -337,6 +337,7 @@ class MainApp(ctk.CTk):
         image_sampling_window.minsize(370, 135)   # Limit the minimum size
         image_sampling_window.maxsize(370, 135)   # Limit the maximum size
 
+        image_sampling_window.wait_visibility()
         image_sampling_window.grab_set()
 
         #Label for instructions
@@ -398,6 +399,7 @@ class MainApp(ctk.CTk):
         image_scanning_window.minsize(335, 210)   # Limit the minimum size
         image_scanning_window.maxsize(335, 200)   # Limit the maximum size
 
+        image_scanning_window.wait_visibility()
         image_scanning_window.grab_set()
 
         # Label with instructions
@@ -462,6 +464,7 @@ class MainApp(ctk.CTk):
         homing_window.minsize(300, 250)   # Limit the minimum size
         homing_window.maxsize(300, 250)   # Limit the maximum size
 
+        homing_window.wait_visibility()
         homing_window.grab_set()  # Makes the window modal
 
         # Prompt label
@@ -531,6 +534,22 @@ class MainApp(ctk.CTk):
         send_coord_btn = ctk.CTkButton(coord_frame, text="Send Coordinates", font=("Arial", 14), 
                                        command=lambda: self.send_goto_command(float(self.x_entry.get()),float(self.y_entry.get()),float(self.z_entry.get())))
         send_coord_btn.grid(row=4, column=0, columnspan = 3, padx=5, pady=5, sticky="ew")
+
+
+
+        # New preset-position button: Moves to a fixed position and takes measurements
+        preset_measure_btn = ctk.CTkButton(
+            coord_frame,
+            text="Go To Preset + Measure",
+            font=("Arial", 14),
+            fg_color="green",
+            command=self.send_preset_measure_command
+        )
+        preset_measure_btn.grid(row=6, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+
+
+
+
 
         # Refresh coordinates button: Updates the entry boxes with the current motor positions
         refresh_coord_btn = ctk.CTkButton(coord_frame, text="Refresh Coordinates", font=("Arial", 14), command=self.refresh_motor_coord)
@@ -1109,7 +1128,7 @@ class MainApp(ctk.CTk):
         button_frame.pack(side=ctk.TOP, fill='x', pady=10)
 
         #Display sititched image
-        stitched_img_path = f"{self.buffer_stitching_folder}\\stitched_{self.curr_sample_id}.jpg"
+        stitched_img_path = f"{self.buffer_stitching_folder}/stitched_{self.curr_sample_id}.jpg"
         self.complete_image_btn = ctk.CTkButton(button_frame, text="Image Stitching...", fg_color="green", width=150, height=30, 
                                                 state="disabled", 
                                                 command=lambda:[self.expand_image(stitched_img_path)])
@@ -1394,6 +1413,7 @@ class MainApp(ctk.CTk):
         expanded_window.minsize(400, 400)
         expanded_window.maxsize(1000, 1000)
 
+        expanded_window.wait_visibility()
         expanded_window.grab_set()
 
         # Load the original image
@@ -1859,7 +1879,7 @@ class MainApp(ctk.CTk):
 
             self.sampling_state = 2
 
-        #Wait for the trasnfer folder thread to finish, then empty folder on Raspberry Pi
+        #Wait for the transfer folder thread to finish, then empty folder on Raspberry Pi
         if self.sampling_state == 2 and not self.transfer_rpi_thread.is_alive():
             self.empty_folder_rpi() 
 
@@ -2022,6 +2042,22 @@ class MainApp(ctk.CTk):
         else:
             messagebox.showerror("Status not in idle, wait before modifying camera settings.")
     
+
+    def send_preset_measure_command(self):
+    # Send a request to the Raspberry Pi to move to a preset position and take 1–2 measurements.
+        if self.module_status == "Idle":
+            preset_data = {
+                "command": "exe_goto_preset_measure",
+                "mode": self.mode,
+                "module_status": self.module_status
+            }
+
+            success_message = "Preset move + measurement request sent."
+            self.send_json_error_check(preset_data, success_message)
+        else:
+            messagebox.showerror("Status not in idle, wait before sending request.")
+
+
 
     def send_goto_command(self, req_x, req_y, req_z) :
         """
