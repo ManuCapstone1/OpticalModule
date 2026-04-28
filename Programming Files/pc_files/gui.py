@@ -991,7 +991,7 @@ class MainApp(ctk.CTk):
 
         # Send command
         print(f"Moving stage to X: {target_x:.4f}, Y: {target_y:.4f}")
-        self.send_goto_command(target_x, target_y, current_z)
+        self.send_goto_command(target_x, target_y, current_z, show_success=False)
 
     # -------------------------- Details Tab ------------------------ #
 
@@ -1763,7 +1763,7 @@ class MainApp(ctk.CTk):
         self.comms = comms
         self.stop_event = stop_event 
 
-    def send_json_error_check(self, data, success_message):
+    def send_json_error_check(self, data, success_message, show_success=True):
         """
         Sends JSON data to the Raspberry Pi and handles different error responses.
 
@@ -2112,7 +2112,7 @@ class MainApp(ctk.CTk):
 
 
 
-    def send_goto_command(self, req_x, req_y, req_z) :
+    def send_goto_command(self, req_x, req_y, req_z, show_success=True) :
         """
         Send goto data and command to Raspberry Pi, with x, y, z positions.
 
