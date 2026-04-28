@@ -1790,7 +1790,8 @@ class MainApp(ctk.CTk):
                 else:
                     # Show success message in GUI
                     print(f"Response from Raspberry Pi: {response}")
-                    messagebox.showinfo("Success", success_message)
+                    if show_success:
+                        messagebox.showinfo("Success", success_message)
 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to send data: {e}")
@@ -2144,7 +2145,7 @@ class MainApp(ctk.CTk):
 
             #Send goto data
             success_message = "Go to position sent."
-            self.send_json_error_check(goto_data, success_message)
+            self.send_json_error_check(goto_data, success_message, show_success=show_success)
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
 
