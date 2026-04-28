@@ -927,8 +927,11 @@ class MainApp(ctk.CTk):
             image_label.configure(image=img_tk)
             image_label.image = img_tk  # Store a reference to the image to avoid garbage collection
 
-            # Make the image label clickable to expand the image
-            image_label.bind("<Button-1>", lambda e: self.expand_image(image_path))  # Bind click event to expand image
+            # Make image label clickable to expand the image (double click)
+            image_label.bind("<Double-Button-1>", lambda e: self.expand_image(image_path))
+            # Make the image label clickable to move the stage (single click)
+            image_label.bind("<Button-1>", lambda e: self.click_to_move(e, new_width, new_height, img_pil.width, img_pil.height))
+
 
             # Hide the "Image will appear here" text
             image_label.configure(text="")  # Clear the text
@@ -939,6 +942,56 @@ class MainApp(ctk.CTk):
             print(f"Error displaying image: {e}")
             image_label.configure(text="Failed to display image", fg_color="red")
 
+    def click_to_move(self, event, img_disp_width, img_disp_height, orig_img_width, orig_img_height):
+        """
+        Translates image clicks into stage movement
+        """
+        # Get current label dimensions (in case window is resized)
+        label_width = event.widget.winfo_width()
+        label_height = event.widget.winfo_height()
+        
+        # Calculate image padding
+        x_offset = (label_width - img_disp_width) / 2.0
+        y_offset = (label_height - img_disp_height) / 2.0
+
+        # Adjust coordinates to be relative to the image
+        img_click_x = event.x - x_offset
+        img_click_y = event.y - y_offset
+
+        # Ignore clicks on gray padding around image
+        if img_click_x < 0 or img_click_x > img_disp_width or img_click_y < 0 or img_click_y > img_disp_height:
+            return
+
+        # Scales click to the sensor resolution 
+        i_click = img_click_x * (orig_img_width / img_disp_width)
+        j_click = img_click_y * (orig_img_height / img_disp_height)
+
+        # Calculate distance from the mathematical center of the sensor
+        i_center = orig_img_width / 2.0
+        j_center = orig_img_height / 2.0
+
+        delta_i = i_center - i_click
+        delta_j = j_center - j_click
+
+        # Apply transformation matrix
+        A11, A12 = -0.001479, 0.000044
+        A21, A22 =  0.000018, 0.001459
+
+        delta_x = (A11 * delta_i) + (A12 * delta_j)
+        delta_y = (A21 * delta_i) + (A22 * delta_j)
+
+        # Calculate new target position (using current positions tracked from the Raspberry Pi)
+        target_x = float(self.x_pos) + delta_x
+        target_y = float(self.y_pos) + delta_y
+        current_z = float(self.z_pos)
+
+        # Prevent sending negative coordinates that could crash the stage into limits
+        target_x = max(0.0, target_x)
+        target_y = max(0.0, target_y)
+
+        # Send command
+        print(f"Moving stage to X: {target_x:.4f}, Y: {target_y:.4f}")
+        self.send_goto_command(target_x, target_y, current_z)
 
     # -------------------------- Details Tab ------------------------ #
 
