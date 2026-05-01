@@ -3,6 +3,7 @@ from tkinter import messagebox
 from PIL import Image, ImageTk
 from datetime import datetime
 import json
+import time
 import re
 import os
 import shutil
@@ -25,6 +26,7 @@ class MainApp(ctk.CTk):
         #---------- Raspberry Pi JSON Keys instatiate ----------#
         #Module states and data
         self.module_status = "Raspberry Pi Not Connected"
+        self.status_lockout_time = 0.0
         self.alarm_status = "Unknown"
         self.mode = "Manual"
 
@@ -946,6 +948,9 @@ class MainApp(ctk.CTk):
         """
         Translates image clicks into stage movement
         """
+        if self.module_status != "Idle":
+            return
+        
         # Get current label dimensions (in case window is resized)
         label_width = event.widget.winfo_width()
         label_height = event.widget.winfo_height()
@@ -989,9 +994,16 @@ class MainApp(ctk.CTk):
         target_x = max(0.0, target_x)
         target_y = max(0.0, target_y)
 
+        
+
         # Send command
         print(f"Moving stage to X: {target_x:.4f}, Y: {target_y:.4f}")
         self.send_goto_command(target_x, target_y, current_z, show_success=False)
+
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+        
+        self.sequence_wait_for_move(event.widget)
 
     # -------------------------- Details Tab ------------------------ #
 
@@ -1849,6 +1861,8 @@ class MainApp(ctk.CTk):
         Returns:
             None
         """
+        if time.time() < self.status_lockout_time:
+            return
 
         # Extract values from the received data dictionary
         self.unpack_pi_JSON(data)
@@ -1977,7 +1991,7 @@ class MainApp(ctk.CTk):
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
 
-    def send_simple_command(self, command, checkIdle):
+    def send_simple_command(self, command, checkIdle, show_success=True):
         """
         Send JSON data to Raspberry Pi to request to run a method.
         Used for simple requests e.g., exe_homing_xy.
@@ -2001,7 +2015,7 @@ class MainApp(ctk.CTk):
             messagebox.showerror("Status not in idle, wait before sending request.")
         else:
             success_message = "Request sent."
-            self.send_json_error_check(json_data, success_message)
+            self.send_json_error_check(json_data, success_message, show_success=show_success)
 
 
     def send_sampling_data(self, num_images):
@@ -2148,6 +2162,35 @@ class MainApp(ctk.CTk):
             self.send_json_error_check(goto_data, success_message, show_success=show_success)
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
+
+    def sequence_wait_for_move(self, image_label):
+        if self.module_status != "Idle":
+            self.after(500, lambda: self.sequence_wait_for_move(image_label))
+            return
+            
+        self.empty_folder_rpi() 
+        self.send_simple_command("exe_update_image", checkIdle=False, show_success=False)
+        self.empty_folder_pc(self.buffer_testing_folder)
+        
+        self.module_status = "Capturing Image"
+        self.status_lockout_time = time.time() + 2.0 
+        
+        self.sequence_wait_for_capture(image_label)
+
+    def sequence_wait_for_capture(self, image_label):
+        if self.module_status != "Idle":
+            self.after(500, lambda: self.sequence_wait_for_capture(image_label))
+            return
+
+        self.after(1000, lambda: self.sequence_transfer_and_display(image_label))
+
+    def sequence_transfer_and_display(self, image_label):
+        self.transfer_folder_rpi(self.buffer_testing_folder, False)
+        self.show_image(self.buffer_testing_folder, image_label)
+
+
+
+
 
     # =============================== Image Stitching ==========================================#
     
