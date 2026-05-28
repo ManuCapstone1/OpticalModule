@@ -208,7 +208,8 @@ def handle_request():
 
             # Capture and save a single image to the buffer directory
             if message["command"] == "exe_update_image" and not thread.is_alive():
-                thread = threading.Thread(target=shabam.update_image)
+                status_data["module_status"] = "Capturing Image"
+                thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "update_image"})
                 thread.start()
             
             # Reset module alarm status
@@ -245,4 +246,3 @@ try:
         time.sleep(1)  # Keep the main thread alive
 except KeyboardInterrupt:
     print("Server interrupted and shutting down.")
-
