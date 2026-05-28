@@ -539,10 +539,10 @@ class MainApp(ctk.CTk):
 
 
 
-        # New preset-position button: Moves to a fixed position and takes measurements
+        # Preset-position button: Moves to a fixed position 
         preset_measure_btn = ctk.CTkButton(
             coord_frame,
-            text="Go To Preset + Measure",
+            text="Send Preset Coordinates",
             font=("Arial", 14),
             fg_color="green",
             command=self.send_preset_measure_command
@@ -2112,7 +2112,7 @@ class MainApp(ctk.CTk):
     
 
     def send_preset_measure_command(self):
-    # Send a request to the Raspberry Pi to move to a preset position and take 1–2 measurements.
+    # Send a request to the Raspberry Pi to move to a preset position.
         if self.module_status == "Idle":
             preset_data = {
                 "command": "exe_goto_preset_measure",
@@ -2120,7 +2120,7 @@ class MainApp(ctk.CTk):
                 "module_status": self.module_status
             }
 
-            success_message = "Preset move + measurement request sent."
+            success_message = "Preset move request sent."
             self.send_json_error_check(preset_data, success_message)
         else:
             messagebox.showerror("Status not in idle, wait before sending request.")
