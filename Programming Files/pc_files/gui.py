@@ -549,7 +549,15 @@ class MainApp(ctk.CTk):
         )
         preset_measure_btn.grid(row=6, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
-
+        # SmarAct Stage button: Moves to a hardcoded SmarAct stage position
+        smartact_stage_btn = ctk.CTkButton(
+            coord_frame,
+            text="SmarAct Stage",
+            font=("Arial", 14),
+            fg_color="green",
+            command=self.send_smartact_stage_command
+        )
+        smartact_stage_btn.grid(row=7, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
 
 
@@ -2126,6 +2134,14 @@ class MainApp(ctk.CTk):
             messagebox.showerror("Status not in idle, wait before sending request.")
 
 
+
+    def send_smartact_stage_command(self):
+        # Send hardcoded SmarAct stage coordinates to the stage.
+        self.send_goto_command(
+            req_x=0.437369625,
+            req_y=203.456397375,
+            req_z=70.0
+        )
 
     def send_goto_command(self, req_x, req_y, req_z, show_success=True) :
         """
