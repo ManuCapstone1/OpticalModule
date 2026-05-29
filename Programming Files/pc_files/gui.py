@@ -550,14 +550,14 @@ class MainApp(ctk.CTk):
         preset_measure_btn.grid(row=6, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
         # SmarAct Stage button: Moves to a hardcoded SmarAct stage position
-        smartact_stage_btn = ctk.CTkButton(
+        smaract_stage_btn = ctk.CTkButton(
             coord_frame,
             text="SmarAct Stage",
             font=("Arial", 14),
             fg_color="green",
-            command=self.send_smartact_stage_command
+            command=self.send_smaract_stage_command
         )
-        smartact_stage_btn.grid(row=7, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+        smaract_stage_btn.grid(row=7, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
 
 
@@ -2135,7 +2135,7 @@ class MainApp(ctk.CTk):
 
 
 
-    def send_smartact_stage_command(self):
+    def send_smaract_stage_command(self):
         # Send hardcoded SmarAct stage coordinates to the stage.
         self.send_goto_command(
             req_x=0.437369625,
