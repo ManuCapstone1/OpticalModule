@@ -35,6 +35,7 @@ class MainApp(ctk.CTk):
         self.x_pos = 0
         self.y_pos = 0
         self.z_pos = 0
+        self.is_at_interferometer = False
 
         #Camera and image data
         self.exposure_time = 0
@@ -539,17 +540,26 @@ class MainApp(ctk.CTk):
 
 
 
-        # New preset-position button: Moves to a fixed position and takes measurements
+        # Preset-position button: Moves to a fixed position 
         preset_measure_btn = ctk.CTkButton(
             coord_frame,
-            text="Go To Preset + Measure",
+            text="Send Preset Coordinates",
             font=("Arial", 14),
             fg_color="green",
             command=self.send_preset_measure_command
         )
         preset_measure_btn.grid(row=6, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
-
+        # SmarAct Stage button: Moves to a hardcoded SmarAct stage position
+        smaract_stage_btn = ctk.CTkButton(
+            coord_frame,
+            text="SmarAct Stage",
+            font=("Arial", 14),
+            fg_color="blue",
+            text_color="white",
+            command=self.send_smaract_stage_command
+        )
+        smaract_stage_btn.grid(row=7, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
 
 
@@ -558,9 +568,19 @@ class MainApp(ctk.CTk):
         refresh_coord_btn.grid(row=5,column=0,columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Additional Controls (Buttons)
+        # Toggle button: Switch stage between interferometer and camera positions
+        self.interferometer_toggle_btn = ctk.CTkButton(
+            button_frame,
+            text="Confocal",
+            font=("Arial", 14),
+            fg_color="green",
+            command=self.toggle_interferometer_camera
+        )
+        self.interferometer_toggle_btn.pack(pady=5, fill='x')
+
         # Homing Button: Starts homing procedure for the motors
         home_btn = ctk.CTkButton(button_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white",
-                                 command = lambda: self.open_homing_dialog())        
+                                 command = lambda: self.open_homing_dialog())
         home_btn.pack(pady=5, fill='x')
 
         # Disable stepper motors button: Sends command to disable the motors
@@ -2112,7 +2132,7 @@ class MainApp(ctk.CTk):
     
 
     def send_preset_measure_command(self):
-    # Send a request to the Raspberry Pi to move to a preset position and take 1–2 measurements.
+    # Send a request to the Raspberry Pi to move to a preset position.
         if self.module_status == "Idle":
             preset_data = {
                 "command": "exe_goto_preset_measure",
@@ -2120,12 +2140,49 @@ class MainApp(ctk.CTk):
                 "module_status": self.module_status
             }
 
-            success_message = "Preset move + measurement request sent."
+            success_message = "Preset move request sent."
             self.send_json_error_check(preset_data, success_message)
         else:
             messagebox.showerror("Status not in idle, wait before sending request.")
 
 
+
+    def send_smaract_stage_command(self):
+        # Send hardcoded SmarAct stage coordinates to the stage.
+        self.send_goto_command(
+            req_x=0.437369625,
+            req_y=203.456397375,
+            req_z=70.0
+        )
+
+    def toggle_interferometer_camera(self):
+        if not self.is_at_interferometer:
+            dx, dy = -1.418137875, -72.258765875
+            new_label = "Optical"
+        else:
+            dx, dy = 1.418137875, 72.258765875
+            new_label = "Confocal"
+
+        target_x = float(self.x_pos) + dx
+        target_y = float(self.y_pos) + dy
+        target_z = float(self.z_pos)
+
+        # Mirror send_goto_command's guards so state only flips when the move will succeed.
+        if self.module_status != "Idle":
+            messagebox.showerror("Error", "Status not in idle, wait before sending request.")
+            return
+        if target_x < 0 or target_y < 0 or target_z < 0:
+            print(f"Warning: toggle move rejected — target ({target_x:.6f}, {target_y:.6f}, {target_z:.6f}) contains a negative value.")
+            return
+
+        try:
+            self.send_goto_command(target_x, target_y, target_z, show_success=False)
+        except Exception as e:
+            print(f"Warning: toggle move failed — {e}")
+            return
+
+        self.is_at_interferometer = not self.is_at_interferometer
+        self.interferometer_toggle_btn.configure(text=new_label)
 
     def send_goto_command(self, req_x, req_y, req_z, show_success=True) :
         """
