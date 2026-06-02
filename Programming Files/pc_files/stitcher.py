@@ -45,7 +45,7 @@ class ImageStitcher:
             # Example with console output:
             # subprocess.run([self.fiji_path, "--headless", "--console", "-macro", self.macro_path, macro_args], check=True)
             
-            subprocess.run([self.fiji_path, "--headless", "-macro", self.macro_path, macro_args], check=True)
+            subprocess.run(["xvfb-run","-a",self.fiji_path,"-macro", self.macro_path, macro_args], check=True)
             print("Stitching process finished.")
         except subprocess.CalledProcessError as e:
             print(f"Error running stitching macro: {e}")
