@@ -264,6 +264,56 @@ class OpticalModule:
         if not z == self.currZ:
             self.move_z(z-self.currZ)
 
+
+
+
+    def move_to_preset_and_measure(self, num_measurements=2):
+    # Move to a fixed preset position and take 1-2 measurements.
+    # Change these to  desired target position (mm)
+        preset_x = 105
+        preset_y = 65
+        preset_z = 76
+
+        # Clamp to 1 or 2 measurements
+        try:
+            num_measurements = int(num_measurements)
+        except Exception:
+            num_measurements = 2
+        num_measurements = max(1, min(num_measurements, 2))
+
+        # Home if needed
+        if (not self.isHomed.is_set()) or self.stop.is_set():
+            self.home_all()
+
+        # Move to preset position
+        self.go_to(x=preset_x, y=preset_y, z=preset_z)
+
+        # Optional autofocus before measuring
+        self.auto_focus()
+
+        results = []
+
+        for i in range(num_measurements):
+            if self.stop.is_set():
+                self.resetIdle.set()
+                break
+
+            img = self.cam.get_image_array(updateImage=False)
+            focus_score = self.cam.calculate_focus_score(imageArray=img)
+
+            results.append({
+                "index": i,
+                "focus_score": float(focus_score),
+                "x_mm": float(self.get_curr_pos_mm("x")),
+                "y_mm": float(self.get_curr_pos_mm("y")),
+                "z_mm": float(self.get_curr_pos_mm("z")),
+            })
+
+        self.latest_measurements = results
+        return results
+
+
+
     def get_curr_pos_mm(self, axis):
         """
         Gets the current mm position of a specified axis.
@@ -340,7 +390,6 @@ class OpticalModule:
         """
         self.stop.clear() # clears stop condition
         self.enable_motors() # enable stepper motors
-        self.home_xy() # home x and y axes
 
         # Reset z limit switch (see HomeXY for details)
         for i in range(10):
@@ -362,6 +411,8 @@ class OpticalModule:
             time.sleep(PULSEWIDTH)
             self.motorZ.step_pin.write(0)
             time.sleep(BTWNSTEPS)
+        
+        self.home_xy() # home x and y axes
         # Set Z position to 0
         with self.positionLock:
             self.currZ = 0
@@ -590,8 +641,8 @@ class OpticalModule:
         min_x, max_x = min(x_coords), max(x_coords)
         min_y, max_y = min(y_coords), max(y_coords)
 
-        x_positions = list(range(int(min_x), int(max_x) + step_size_x, step_size_x))
-        y_positions = list(range(int(min_y), int(max_y) + step_size_y, step_size_y))
+        x_positions = list(range(int(min_x), int(max_x) + int(step_size_x), int(step_size_x)))
+        y_positions = list(range(int(min_y), int(max_y) + int(step_size_y), int(step_size_y)))
 
         # Set image counters to correct values
         with self.imageCountLock:

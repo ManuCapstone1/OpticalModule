@@ -33,7 +33,7 @@ def run_rpi_python_file():
         client.connect(rpi_ip, username=rpi_username, password=rpi_password)
 
         # Command to run the Python file on the Raspberry Pi
-        #Fist activate virtual environment, then start rpmain.py
+        #First activate virtual environment, then start rpmain.py
         command = 'source /home/microscope/DIY_Eng_CV/bin/activate && python3 /home/microscope/rpmain.py'
 
         # Run the command
@@ -68,7 +68,7 @@ def main():
     """
 
     gui = MainApp() #Instantiate gui
-    stop_event = threading.Event()  #Stop event for killing theads when gui closes
+    stop_event = threading.Event()  #Stop event for killing threads when gui closes
 
     #Setup communication and thread for raspberry pi
     try:
@@ -77,7 +77,7 @@ def main():
         #Connect communication between GUI and Raspberry Pi
         gui.set_communication(comms, stop_event)
 
-        #Start thread for receiveing constant data status from raspberry pi
+        #Start thread for receiving constant data status from raspberry pi
         status_thread = threading.Thread(target=comms.receive_status_updates, args=(gui, stop_event), daemon=True)
         status_thread.start()
      
@@ -103,9 +103,8 @@ def main():
     except Exception as e:
         messagebox.showerror("Error", f"Could not transfer files: {e}")
     
-    #Incomplete.
-    # Run Raspberry Pi Python script via SSH in the background
-    # Power cycle raspbery pi in order to reset sockets, or implement code to close sockets when gui closes
+    #Incomplete. Can start program, but closing sockets on Raspberry Pi Incomplete
+    # Optional: Run Raspberry Pi Python script via SSH in the background
     threading.Thread(target=run_rpi_python_file, daemon=True).start()
 
     def on_closing():  
