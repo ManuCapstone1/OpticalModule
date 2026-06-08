@@ -20,25 +20,71 @@
 # **********************************************************************/
 
 # Import ctypes from standard python to import c.dll(s)
+import os
 import ctypes as ct
 
-#define standard SA_types // not really necessary in Python
-SA_STATUS = ct.c_ulong()
-SA_INDEX  = ct.c_ulong()
-SA_PACKET_TYPE  = ct.c_ulong()
+# ---------------------------------------------------------------------------
+# Bug fix — Linux 64-bit pointer-size correction
+#
+# On Windows (LLP64):  unsigned long == 4 bytes  →  ct.c_ulong was correct.
+# On Linux 64-bit (LP64): unsigned long == 8 bytes, but every SA_STATUS,
+# SA_INDEX and packet field in the SmarAct C API is  unsigned int == 4 bytes.
+# Using ct.c_ulong on Linux doubles every integer type and corrupts the
+# SA_packet struct layout entirely.
+#
+# Fix: use ct.c_uint (always 4 bytes on every platform) for all SA_* types.
+# The wrapper function bodies further down the file still use ct.c_ulong for
+# local variables, which is benign on little-endian x86-64 for small values,
+# but the declarations below and the SA_packet struct must be 4-byte clean.
+# ---------------------------------------------------------------------------
 
-#import MCSControl.dll via ctypes
-MCS_lib = ct.cdll.LoadLibrary("MCSControl")
+#define standard SA_types — ct.c_uint matches the C header (unsigned int, 32-bit)
+SA_STATUS      = ct.c_uint()
+SA_INDEX       = ct.c_uint()
+SA_PACKET_TYPE = ct.c_uint()
+
+# Dynamically find the path to the current folder
+_dir_path = os.path.dirname(os.path.realpath(__file__))
+
+# 1. Pre-load the I/O dependency FIRST so the dynamic linker can find it
+_io_path = os.path.join(_dir_path, "libsmaractio.so.2")
+ct.cdll.LoadLibrary(_io_path)
+
+# 2. Load the main control library
+_so_path = os.path.join(_dir_path, "libmcscontrol.so")
+MCS_lib = ct.cdll.LoadLibrary(_so_path)
+
+# ---------------------------------------------------------------------------
+# Explicit argtypes / restype for SA_OpenSystem.
+#
+# Without these, ctypes guesses types at call time and can pass 64-bit values
+# into 32-bit register slots on Linux x86-64, silently corrupting the ABI.
+#
+# SA_OpenSystem(SA_INDEX *systemIndex, const char *locator, const char *options)
+#   systemIndex — output: SA_INDEX* (pointer to unsigned int, 32-bit)
+#   locator     — input:  const char* (null-terminated C string)
+#   options     — input:  const char* (null-terminated C string)
+#   return      — SA_STATUS (unsigned int, 32-bit)
+# ---------------------------------------------------------------------------
+MCS_lib.SA_OpenSystem.restype  = ct.c_uint
+MCS_lib.SA_OpenSystem.argtypes = [
+    ct.POINTER(ct.c_uint),  # SA_INDEX *systemIndex
+    ct.c_char_p,            # const char *locator
+    ct.c_char_p,            # const char *options
+]
 
 # // defines a data packet for the asynchronous mode
+# Bug fix — all fields are 'unsigned int' / 'signed int' (4 bytes) in the C
+# header.  ct.c_ulong is 8 bytes on Linux 64-bit and would produce a struct
+# twice as large as the real one, corrupting every field offset.
 class SA_packet(ct.Structure):
 	_fields_ = [
-    ("SA_PACKET_TYPE", ct.c_ulong),                      #// type of packet (see below)
-    ("SA_INDEX", ct.c_ulong),                          #// source channel
-    ("data1", ct.c_ulong),                             #// data field
-    ("data2", ct.c_long),                               #// data field
-    ("data3",ct.c_long),                               #// data field
-    ("data4", ct.c_ulong)]                             #// data field
+    ("SA_PACKET_TYPE", ct.c_uint),    #// type of packet (see below)
+    ("SA_INDEX",       ct.c_uint),    #// source channel
+    ("data1",          ct.c_uint),    #// data field
+    ("data2",          ct.c_int),     #// data field
+    ("data3",          ct.c_int),     #// data field
+    ("data4",          ct.c_uint)]    #// data field
 
 
 # function status return values
@@ -363,9 +409,16 @@ def SA_GetStatusInfo(status, info):
 
 #/* new style initialization functions */
 
-#MCSCONTROL_API 
+#MCSCONTROL_API
 # SA_STATUS MCSCONTROL_CC SA_OpenSystem(SA_INDEX *systemIndex,const char *locator,const char *options);
+# Bug fix — 'locator' and 'options' are const char* in C.  ctypes requires
+# bytes objects for char* parameters; plain Python 3 str would be silently
+# passed as a Unicode pointer, corrupting the call on Linux.
 def SA_OpenSystem(systemIndex,locator,options):
+	if isinstance(locator, str):
+		locator = locator.encode('utf-8')
+	if isinstance(options, str):
+		options = options.encode('utf-8')
 	SA_STATUS = MCS_lib.SA_OpenSystem(ct.byref(systemIndex), locator, options)
 	return SA_STATUS
 
@@ -377,11 +430,17 @@ def SA_CloseSystem(systemIndex):
 
 # #MCSCONTROL_API
 # SA_STATUS MCSCONTROL_CC SA_FindSystems(const char *options,char *outBuffer,unsigned int *ioBufferSize);
-#Works just with MCS USB versions: 
-# use outBuffer = ct.create_string_buffer(17), ioBufferSize = ct.c_ulong(18)
-# to convert the outBuffer to a Python 'str' use: outBuffer[:].decode("utf-8")
-def SA_FindSystems(options,outBuffer,ioBufferSize): 
-	SA_STATUS = MCS_lib.SA_FindSystems(bytes(options,'utf-8'), outBuffer,ct.byref(ioBufferSize))
+# Bug fix 1 — String encoding: bytes(options,'utf-8') raises TypeError when
+#   options is already bytes (e.g. b'').  Accept both str and bytes safely.
+# Bug fix 2 — Buffer size: the original 17-byte recommendation was sized for
+#   the Windows USB locator format ('usb:id:1778011641', 17 chars + null).
+#   On Linux the locator can be longer.  Use a 256-byte buffer to be safe:
+#     outBuffer = ct.create_string_buffer(256), ioBufferSize = ct.c_uint(256)
+#   to convert the outBuffer to a Python 'str' use: outBuffer.value.decode("utf-8")
+def SA_FindSystems(options, outBuffer, ioBufferSize):
+	if isinstance(options, str):
+		options = options.encode('utf-8')
+	SA_STATUS = MCS_lib.SA_FindSystems(options, outBuffer, ct.byref(ioBufferSize))
 	return SA_STATUS
 
 # #MCSCONTROL_API

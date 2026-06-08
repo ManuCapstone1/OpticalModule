@@ -1,4 +1,5 @@
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 from datetime import datetime
@@ -8,6 +9,7 @@ import re
 import os
 import shutil
 from threading import Thread
+from stage import home_smaract
 
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -83,12 +85,28 @@ class MainApp(ctk.CTk):
         #-------------- Flags/States -----------------#
         self.sample_loaded = False
         self.sampling_state = 0
-        self.scanning_state = 0 
+        self.scanning_state = 0
+        self.is_stitching = False
 
         #--------------- Threading -------------------#
         self.transfer_rpi_thread = Thread()
         self.transfer_pc_imgs = Thread()
         self.stitching_thread = Thread()
+
+        #--------------- Area Capture State -------------------#
+        self._roi_drag_start = None      # (canvas_x, canvas_y) when Ctrl+drag begins
+        self._roi_rect_id = None         # canvas rectangle item ID
+        self.roi_phys_x_start = None     # mm
+        self.roi_phys_x_end = None       # mm
+        self.roi_phys_y_start = None     # mm
+        self.roi_phys_y_end = None       # mm
+        self.map_grid_x = 5              # confirmed X measurement count
+        self.map_grid_y = 5              # confirmed Y measurement count
+        self._canvas_disp_w = 0          # displayed image width on canvas (px)
+        self._canvas_disp_h = 0          # displayed image height on canvas (px)
+        self._canvas_orig_w = 0          # original image width (sensor px)
+        self._canvas_orig_h = 0          # original image height (sensor px)
+        self._canvas_img_path = None     # path of image currently on canvas
 
         #----------------- Status Labels ---------------#
         #Update motor pane labels
@@ -520,6 +538,33 @@ class MainApp(ctk.CTk):
         coord_frame = ctk.CTkFrame(left_frame)
         coord_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=10)
 
+        # ----  SmarAct stage controls ----
+        smaract_frame = ctk.CTkFrame(left_frame)
+        smaract_frame.pack(side=ctk.TOP, fill="x", padx=10, pady=10)
+
+        ctk.CTkLabel(
+            smaract_frame, text="SmarAct:", font=("Arial", 14, "bold")
+        ).pack(pady=(8, 2), fill="x", padx=5)
+
+        smaract_stage_btn = ctk.CTkButton(
+            smaract_frame,
+            text="Move to SmarAct",
+            font=("Arial", 14),
+            fg_color="blue",
+            text_color="white",
+            command=self.send_smaract_stage_command,
+        )
+        smaract_stage_btn.pack(pady=5, fill="x", padx=5)
+
+        self.smaract_home_btn = ctk.CTkButton(
+            smaract_frame,
+            text="Homing",
+            font=("Arial", 14),
+            command=self._start_smaract_homing,
+        )
+        self.smaract_home_btn.pack(pady=5, fill="x", padx=5)
+        # ---- End Middle Group ----
+
         # Create a separate button frame inside left_frame (placed at the bottom)
         button_frame = ctk.CTkFrame(left_frame)
         button_frame.pack(side=ctk.BOTTOM, fill="x", padx=10, pady=10)
@@ -549,18 +594,6 @@ class MainApp(ctk.CTk):
             command=self.send_preset_measure_command
         )
         preset_measure_btn.grid(row=6, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
-
-        # SmarAct Stage button: Moves to a hardcoded SmarAct stage position
-        smaract_stage_btn = ctk.CTkButton(
-            coord_frame,
-            text="SmarAct Stage",
-            font=("Arial", 14),
-            fg_color="blue",
-            text_color="white",
-            command=self.send_smaract_stage_command
-        )
-        smaract_stage_btn.grid(row=7, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
-
 
 
         # Refresh coordinates button: Updates the entry boxes with the current motor positions
@@ -864,7 +897,7 @@ class MainApp(ctk.CTk):
         # Display button
         display_image_btn = ctk.CTkButton(button_frame, text="Display Image", font=("Arial", 16),
                                         command=lambda: [self.transfer_folder_rpi(self.buffer_testing_folder, False),
-                                                        self.show_image(self.buffer_testing_folder, image_label)])
+                                                        self.show_image(self.buffer_testing_folder, self._image_tab_canvas)])
         display_image_btn.pack(side="left", padx=10, fill='x', expand=True)
 
         # Empty Raspberry Pi Image Buffer folder
@@ -872,9 +905,31 @@ class MainApp(ctk.CTk):
                                             command=lambda: [self.empty_folder_rpi()])
         empty_buffer_rpi_btn.pack(side="left", padx=10, fill='x', expand=True)
 
-        # Image label
-        image_label = ctk.CTkLabel(right_frame, text="Image will appear here", fg_color="gray", width=400, height=400)
-        image_label.pack(expand=True, fill='both', pady=20)
+        # Image canvas (replaces CTkLabel to support Region of Interest rectangle overlay
+        self._image_tab_canvas = tk.Canvas(right_frame, bg="#2b2b2b", highlightthickness=0, cursor="crosshair")
+        self._image_tab_canvas.pack(expand=True, fill='both', pady=(20, 5))
+        self._image_tab_canvas.create_text(200, 200, text="Image will appear here",
+                                           fill="white", font=("Arial", 14))
+
+        # ROI measurement control strip
+        roi_strip = ctk.CTkFrame(right_frame)
+        roi_strip.pack(fill='x', padx=10, pady=(0, 10))
+
+        ctk.CTkLabel(roi_strip, text="Ctrl + drag on image to select ROI",
+                     font=("Arial", 11, "italic"), text_color="gray").pack(side="left", padx=(10, 20))
+
+        ctk.CTkLabel(roi_strip, text="Measurements X:").pack(side="left", padx=(0, 4))
+        self._roi_spin_x = ctk.CTkEntry(roi_strip, width=55)
+        self._roi_spin_x.insert(0, "5")
+        self._roi_spin_x.pack(side="left", padx=(0, 12))
+
+        ctk.CTkLabel(roi_strip, text="Measurements Y:").pack(side="left", padx=(0, 4))
+        self._roi_spin_y = ctk.CTkEntry(roi_strip, width=55)
+        self._roi_spin_y.insert(0, "5")
+        self._roi_spin_y.pack(side="left", padx=(0, 12))
+
+        ctk.CTkButton(roi_strip, text="Map Height Measurements", fg_color="#7B2FBE",
+                      command=self.confirm_map_measurements).pack(side="right", padx=10)
 
     def refresh_camera_entries(self):
         """
@@ -907,10 +962,14 @@ class MainApp(ctk.CTk):
         Returns:
             None
         """
-        
+
+        if isinstance(image_label, tk.Canvas):
+            self._show_image_on_canvas(image_folder, image_label)
+            return
+
         try:
             # Get the .jpg files in the folder
-            image_files = [f for f in os.listdir(image_folder) if f.lower().endswith('.jpg')]
+            image_files = [f for f in sorted(os.listdir(image_folder)) if f.lower().endswith('.jpg')]
             
             if not image_files:
                 # If no .jpg files are found, show an error message or disable the button
@@ -968,6 +1027,8 @@ class MainApp(ctk.CTk):
         """
         Translates image clicks into stage movement
         """
+        if event.state & 0x0004:  # Ctrl held (ROI selection mode and ignore click-to-move)
+            return
         if self.module_status != "Idle":
             return
         
@@ -1022,8 +1083,169 @@ class MainApp(ctk.CTk):
 
         self.module_status = "Changing Position"
         self.status_lockout_time = time.time() + 2.0
-        
+
         self.sequence_wait_for_move(event.widget)
+
+    # -------------------- Canvas Image Display (Image Tab) -------------------- #
+
+    def _show_image_on_canvas(self, image_folder, canvas):
+        """
+        Displays an image on a tk.Canvas, binding click-to-move, double-click expand,
+        and Ctrl+drag ROI selection on top of the image.
+        """
+        try:
+            image_files = [f for f in sorted(os.listdir(image_folder)) if f.lower().endswith('.jpg')]
+
+            if not image_files:
+                canvas.delete("all")
+                cw = max(canvas.winfo_width(), 200)
+                ch = max(canvas.winfo_height(), 200)
+                canvas.create_text(cw // 2, ch // 2, text="No .jpg files found",
+                                   fill="red", font=("Arial", 14))
+                print("Error: No .jpg files found in the specified folder.")
+                return
+
+            image_path = os.path.normpath(os.path.join(image_folder, image_files[0]))
+            self._canvas_img_path = image_path
+            img_pil = Image.open(image_path)
+
+            canvas.update_idletasks()
+            canvas_w = max(canvas.winfo_width(), 400)
+            canvas_h = max(canvas.winfo_height(), 400)
+
+            aspect_ratio = img_pil.width / img_pil.height
+            if aspect_ratio > 1:
+                new_width = canvas_w
+                new_height = int(canvas_w / aspect_ratio)
+            else:
+                new_height = canvas_h
+                new_width = int(canvas_h * aspect_ratio)
+
+            new_width  = max(new_width, 1)
+            new_height = max(new_height, 1)
+
+            self._canvas_disp_w = new_width
+            self._canvas_disp_h = new_height
+            self._canvas_orig_w = img_pil.width
+            self._canvas_orig_h = img_pil.height
+
+            resized_img = img_pil.resize((new_width, new_height), Image.LANCZOS)
+            self._canvas_img_tk = ImageTk.PhotoImage(resized_img)
+
+            canvas.delete("all")
+            canvas.create_image(canvas_w // 2, canvas_h // 2, anchor="center",
+                                image=self._canvas_img_tk)
+
+            canvas.bind("<Double-Button-1>", lambda e: self.expand_image(image_path))
+            canvas.bind("<Button-1>", lambda e: self.click_to_move(
+                e, new_width, new_height, img_pil.width, img_pil.height))
+            canvas.bind("<Control-ButtonPress-1>",   lambda e: self._roi_press(e, canvas))
+            canvas.bind("<Control-B1-Motion>",        lambda e: self._roi_drag(e, canvas))
+            canvas.bind("<Control-ButtonRelease-1>", lambda e: self._roi_release(e, canvas))
+
+            print("Image updated successfully :)")
+
+        except Exception as e:
+            print(f"Error displaying image on canvas: {e}")
+
+    def _canvas_pixel_to_phys(self, canvas_px, canvas_py, canvas_w, canvas_h):
+        """
+        Converts a canvas pixel position to physical stage mm coordinates using
+        the same matrix as click_to_move.
+        """
+        if self._canvas_disp_w == 0 or self._canvas_disp_h == 0:
+            return None, None
+
+        x_offset = (canvas_w - self._canvas_disp_w) / 2.0
+        y_offset = (canvas_h - self._canvas_disp_h) / 2.0
+
+        sensor_x = (canvas_px - x_offset) * (self._canvas_orig_w / self._canvas_disp_w)
+        sensor_y = (canvas_py - y_offset) * (self._canvas_orig_h / self._canvas_disp_h)
+
+        i_center = self._canvas_orig_w / 2.0
+        j_center = self._canvas_orig_h / 2.0
+
+        delta_i = i_center - sensor_x
+        delta_j = j_center - sensor_y
+
+        A11, A12 = -0.001479, 0.000044
+        A21, A22 =  0.000018, 0.001459
+
+        phys_x = float(self.x_pos) + A11 * delta_i + A12 * delta_j
+        phys_y = float(self.y_pos) + A21 * delta_i + A22 * delta_j
+
+        return max(0.0, phys_x), max(0.0, phys_y)
+
+    def _roi_press(self, event, canvas):
+        """Begin ROI rectangle on Ctrl+click."""
+        self._roi_drag_start = (event.x, event.y)
+        if self._roi_rect_id is not None:
+            canvas.delete(self._roi_rect_id)
+        self._roi_rect_id = canvas.create_rectangle(
+            event.x, event.y, event.x, event.y,
+            outline="#00FF88", width=2, dash=(6, 3)
+        )
+
+    def _roi_drag(self, event, canvas):
+        """Resize the ROI rectangle as the user drags."""
+        if self._roi_drag_start is None or self._roi_rect_id is None:
+            return
+        x0, y0 = self._roi_drag_start
+        canvas.coords(self._roi_rect_id, x0, y0, event.x, event.y)
+
+    def _roi_release(self, event, canvas):
+        """Finalise the ROI and compute physical stage bounds in mm."""
+        if self._roi_drag_start is None:
+            return
+
+        x0, y0 = self._roi_drag_start
+        x1, y1 = event.x, event.y
+        self._roi_drag_start = None
+
+        canvas_w = canvas.winfo_width()
+        canvas_h = canvas.winfo_height()
+
+        px1, py1 = self._canvas_pixel_to_phys(x0, y0, canvas_w, canvas_h)
+        px2, py2 = self._canvas_pixel_to_phys(x1, y1, canvas_w, canvas_h)
+
+        if px1 is None or px2 is None:
+            print("ROI: display an image first before selecting a region.")
+            return
+
+        self.roi_phys_x_start = min(px1, px2)
+        self.roi_phys_x_end   = max(px1, px2)
+        self.roi_phys_y_start = min(py1, py2)
+        self.roi_phys_y_end   = max(py1, py2)
+
+        print(f"ROI selected: X=[{self.roi_phys_x_start:.4f}, {self.roi_phys_x_end:.4f}] mm  "
+              f"Y=[{self.roi_phys_y_start:.4f}, {self.roi_phys_y_end:.4f}] mm")
+
+    def confirm_map_measurements(self):
+        """Lock in ROI bounds and grid counts, then print a verification placeholder."""
+        try:
+            grid_x = int(self._roi_spin_x.get())
+            grid_y = int(self._roi_spin_y.get())
+        except (ValueError, AttributeError):
+            messagebox.showerror("Invalid Input", "Measurement counts must be positive integers.")
+            return
+
+        if grid_x <= 0 or grid_y <= 0:
+            messagebox.showerror("Invalid Input", "Measurement counts must be positive integers.")
+            return
+
+        if self.roi_phys_x_start is None:
+            messagebox.showerror("No ROI", "Draw a region first: hold Ctrl and drag on the image.")
+            return
+
+        self.map_grid_x = grid_x
+        self.map_grid_y = grid_y
+
+        print(
+            f"Map Height Measurements: "
+            f"X=[{self.roi_phys_x_start:.4f}, {self.roi_phys_x_end:.4f}] mm, "
+            f"Y=[{self.roi_phys_y_start:.4f}, {self.roi_phys_y_end:.4f}] mm, "
+            f"Grid=[{self.map_grid_x} x {self.map_grid_y}]"
+        )
 
     # -------------------------- Details Tab ------------------------ #
 
@@ -1277,8 +1499,8 @@ class MainApp(ctk.CTk):
         supported_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')
         images = []
 
-        #Get all files in the folder
-        for filename in sorted(os.listdir(folder_path)):
+        #Get all files in the folder, sorted numerically by integer prefix (e.g. 1_V.jpg, 2_V.jpg, 10_V.jpg)
+        for filename in sorted(os.listdir(folder_path), key=lambda x: int(x.split('_')[0]) if x.split('_')[0].isdigit() else float('inf')):
             if filename.lower().endswith(supported_extensions) and not filename.startswith("._"):
                 full_path = os.path.join(folder_path, filename)
                 try:
@@ -1444,15 +1666,23 @@ class MainApp(ctk.CTk):
 
         images = self.load_images_from_folder(self.image_folder_path)
 
-        # Match filenames that start with an integer index (e.g., "0_img.jpg", "15_picture.png")
+        # Wait until every tile in the grid is present before rendering.
+        # Rendering a partial set produces a scrambled preview because the
+        # grid placeholders are filled positionally — a missing tile shifts
+        # every subsequent image into the wrong cell.
+        if len(images) < self.expected_image_count:
+            self.after(1000, self.poll_for_new_images)
+            return
+
+        # Full set confirmed — sort numerically by integer prefix so the grid
+        # is assembled in capture order regardless of OS filesystem ordering.
         def extract_index(filename):
             match = re.match(r'^(\d+)', os.path.basename(filename))
-            return int(match.group(1)) if match else float('inf')  # Put invalid files at the end
+            return int(match.group(1)) if match else float('inf')
 
-        # Sort based on extracted numeric index
         images = sorted(images, key=extract_index)
 
-        # Only process up to the expected number of images
+        # Render exactly expected_image_count tiles into the grid placeholders
         for index, img_path in enumerate(images[:self.expected_image_count]):
             try:
                 img = Image.open(img_path)
@@ -1469,11 +1699,8 @@ class MainApp(ctk.CTk):
             except Exception as e:
                 print(f"Failed to load image {img_path}: {e}")
 
-        # Enable button if all images are filled
-        if len(images) >= self.expected_image_count:
-            self.complete_image_btn.configure(state="normal")
-        else:
-            self.after(1000, self.poll_for_new_images)
+        # All tiles loaded — unlock the stitched-image button
+        self.complete_image_btn.configure(state="normal")
 
 
     # --------------------------- Appearance Functions --------------------------- #
@@ -1618,7 +1845,7 @@ class MainApp(ctk.CTk):
                 os.makedirs(dest_folder)  # Create the new folder
 
             # Step 2: Move all files from the source folder to the destination folder
-            for filename in os.listdir(src_folder):
+            for filename in sorted(os.listdir(src_folder)):
                 src_file = os.path.join(src_folder, filename)
                 dest_file = os.path.join(dest_folder, filename)
 
@@ -1649,7 +1876,7 @@ class MainApp(ctk.CTk):
         if os.path.exists(dir_path) and os.path.isdir(dir_path):
 
             # Loop over the items in the folder and remove them
-            for filename in os.listdir(dir_path):
+            for filename in sorted(os.listdir(dir_path)):
                 file_path = os.path.join(dir_path, filename)
                 try:
                     if os.path.isdir(file_path):
@@ -1679,7 +1906,7 @@ class MainApp(ctk.CTk):
         unique_y_positions = set()  # Set to store unique y positions
 
         # Iterate through all files in the specified directory
-        for filename in os.listdir(directory):
+        for filename in sorted(os.listdir(directory)):
             if filename.endswith(".txt"):  # Only process text files
                 file_path = os.path.join(directory, filename)
                 
@@ -1945,11 +2172,10 @@ class MainApp(ctk.CTk):
 
             self.scanning_state = 3 
         
-        #Update button to show stitched image in gui when image stitching is done
-        if self.scanning_state == 3 and not self.stitching_thread.is_alive() :
-            self.complete_image_btn.configure(text="Completed Image Here", state="normal")
-
-            self.scanning_state = 0 #Reset mini state machine
+        # Stitching thread has finished; file-ready polling is already running
+        # via .after() from start_stitching — only reset the state machine here.
+        if self.scanning_state == 3 and not self.stitching_thread.is_alive():
+            self.scanning_state = 0
             
         #Random Samping Image Processing
         #Start mini state machine for random sampling process
@@ -2184,6 +2410,33 @@ class MainApp(ctk.CTk):
         self.is_at_interferometer = not self.is_at_interferometer
         self.interferometer_toggle_btn.configure(text=new_label)
 
+    def _start_smaract_homing(self):
+        """
+        Launch home_smaract() on a daemon Thread so the GUI stays responsive
+        while the stage physically drives to its reference marks.
+
+        The button is disabled and relabelled for the duration of the sequence,
+        then restored on the main thread via after() once the thread finishes.
+        A try/except guards against the button having been destroyed if the
+        operator switches tabs before homing completes.
+        """
+        self.smaract_home_btn.configure(state="disabled", text="Homing...")
+
+        def _worker():
+            home_smaract()
+            # Restore the button on the Tk main thread
+            try:
+                self.after(
+                    0,
+                    lambda: self.smaract_home_btn.configure(
+                        state="normal", text="Homing"
+                    ),
+                )
+            except Exception:
+                pass  # Button was destroyed when the tab was switched
+
+        Thread(target=_worker, daemon=True).start()
+
     def send_goto_command(self, req_x, req_y, req_z, show_success=True) :
         """
         Send goto data and command to Raspberry Pi, with x, y, z positions.
@@ -2266,25 +2519,56 @@ class MainApp(ctk.CTk):
 
         self.stitcher = stitcher
 
-    def start_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id) :
+    def check_stitched_file_ready(self, filepath, retries=120):
         """
-        
-        Starts thread for stitching. 
-        Pass in arguments needed to be passed to macro thats sent to ImageJ.
+        Non-blocking poll for the stitched output JPEG. Always called from the
+        Tkinter main thread via .after() — never from the stitching thread.
+
+        The is_stitching lock prevents the button from being enabled more than
+        once per scan and blocks spurious triggers if the file already existed
+        from a previous run before the new one is written.
 
         Args:
-            grid_x (int): The number of columns in the stitching grid.
-            grid_y (int): The number of rows in the stitching grid.
-            input_dir (str): The directory containing the images to stitch.
-            output_dir (str): The directory to save the stitched image.
-            sample_id (str): The ID of the current sample.
-
-        Returns:
-            None
+            filepath (str): Absolute path to the expected stitched JPEG.
+            retries (int): Remaining 500 ms poll attempts (default 120 = 60 s).
         """
+        if os.path.exists(filepath):
+            # File confirmed on disk — disarm lock and update button unconditionally.
+            # check_stitched_file_ready is always invoked from the Tkinter main thread
+            # via .after(), so no after(0) indirection is required here.
+            self.is_stitching = False
+            self.complete_image_btn.configure(text="Completed Image Here", state="normal")
+        elif retries > 0:
+            self.after(500, lambda: self.check_stitched_file_ready(filepath, retries - 1))
+        else:
+            self.is_stitching = False
+            print(f"Stitched file transfer timed out: {filepath}")
 
-        # Using a lambda function to pass the arguments to run_stitching
-        self.stitching_thread = Thread(target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id), daemon=True)
+    def start_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id):
+        """
+        Arms the stitching lock, starts the .after() file-ready poll on the
+        main thread, then spawns the background Fiji subprocess thread.
+
+        The poll and the thread are started together here so there is exactly
+        one poller per scan and it always runs on the Tkinter main thread.
+
+        Args:
+            grid_x (int): Number of columns in the stitching grid.
+            grid_y (int): Number of rows in the stitching grid.
+            input_dir (str): Directory containing the tile images.
+            output_dir (str): Directory where Fiji writes the stitched JPEG.
+            sample_id (str): Sample identifier used in the output filename.
+        """
+        stitched_path = os.path.join(output_dir, f"stitched_{sample_id}.jpg")
+
+        # Arm lock and start poll on the main thread before the thread begins
+        self.is_stitching = True
+        self.after(500, lambda: self.check_stitched_file_ready(stitched_path))
+
+        self.stitching_thread = Thread(
+            target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id),
+            daemon=True
+        )
         self.stitching_thread.start()
 
 
