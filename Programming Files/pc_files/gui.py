@@ -85,7 +85,8 @@ class MainApp(ctk.CTk):
         #-------------- Flags/States -----------------#
         self.sample_loaded = False
         self.sampling_state = 0
-        self.scanning_state = 0 
+        self.scanning_state = 0
+        self.is_stitching = False
 
         #--------------- Threading -------------------#
         self.transfer_rpi_thread = Thread()
@@ -968,7 +969,7 @@ class MainApp(ctk.CTk):
 
         try:
             # Get the .jpg files in the folder
-            image_files = [f for f in os.listdir(image_folder) if f.lower().endswith('.jpg')]
+            image_files = [f for f in sorted(os.listdir(image_folder)) if f.lower().endswith('.jpg')]
             
             if not image_files:
                 # If no .jpg files are found, show an error message or disable the button
@@ -1093,7 +1094,7 @@ class MainApp(ctk.CTk):
         and Ctrl+drag ROI selection on top of the image.
         """
         try:
-            image_files = [f for f in os.listdir(image_folder) if f.lower().endswith('.jpg')]
+            image_files = [f for f in sorted(os.listdir(image_folder)) if f.lower().endswith('.jpg')]
 
             if not image_files:
                 canvas.delete("all")
@@ -1498,8 +1499,8 @@ class MainApp(ctk.CTk):
         supported_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')
         images = []
 
-        #Get all files in the folder
-        for filename in sorted(os.listdir(folder_path)):
+        #Get all files in the folder, sorted numerically by integer prefix (e.g. 1_V.jpg, 2_V.jpg, 10_V.jpg)
+        for filename in sorted(os.listdir(folder_path), key=lambda x: int(x.split('_')[0]) if x.split('_')[0].isdigit() else float('inf')):
             if filename.lower().endswith(supported_extensions) and not filename.startswith("._"):
                 full_path = os.path.join(folder_path, filename)
                 try:
@@ -1665,15 +1666,23 @@ class MainApp(ctk.CTk):
 
         images = self.load_images_from_folder(self.image_folder_path)
 
-        # Match filenames that start with an integer index (e.g., "0_img.jpg", "15_picture.png")
+        # Wait until every tile in the grid is present before rendering.
+        # Rendering a partial set produces a scrambled preview because the
+        # grid placeholders are filled positionally — a missing tile shifts
+        # every subsequent image into the wrong cell.
+        if len(images) < self.expected_image_count:
+            self.after(1000, self.poll_for_new_images)
+            return
+
+        # Full set confirmed — sort numerically by integer prefix so the grid
+        # is assembled in capture order regardless of OS filesystem ordering.
         def extract_index(filename):
             match = re.match(r'^(\d+)', os.path.basename(filename))
-            return int(match.group(1)) if match else float('inf')  # Put invalid files at the end
+            return int(match.group(1)) if match else float('inf')
 
-        # Sort based on extracted numeric index
         images = sorted(images, key=extract_index)
 
-        # Only process up to the expected number of images
+        # Render exactly expected_image_count tiles into the grid placeholders
         for index, img_path in enumerate(images[:self.expected_image_count]):
             try:
                 img = Image.open(img_path)
@@ -1690,11 +1699,8 @@ class MainApp(ctk.CTk):
             except Exception as e:
                 print(f"Failed to load image {img_path}: {e}")
 
-        # Enable button if all images are filled
-        if len(images) >= self.expected_image_count:
-            self.complete_image_btn.configure(state="normal")
-        else:
-            self.after(1000, self.poll_for_new_images)
+        # All tiles loaded — unlock the stitched-image button
+        self.complete_image_btn.configure(state="normal")
 
 
     # --------------------------- Appearance Functions --------------------------- #
@@ -1839,7 +1845,7 @@ class MainApp(ctk.CTk):
                 os.makedirs(dest_folder)  # Create the new folder
 
             # Step 2: Move all files from the source folder to the destination folder
-            for filename in os.listdir(src_folder):
+            for filename in sorted(os.listdir(src_folder)):
                 src_file = os.path.join(src_folder, filename)
                 dest_file = os.path.join(dest_folder, filename)
 
@@ -1870,7 +1876,7 @@ class MainApp(ctk.CTk):
         if os.path.exists(dir_path) and os.path.isdir(dir_path):
 
             # Loop over the items in the folder and remove them
-            for filename in os.listdir(dir_path):
+            for filename in sorted(os.listdir(dir_path)):
                 file_path = os.path.join(dir_path, filename)
                 try:
                     if os.path.isdir(file_path):
@@ -1900,7 +1906,7 @@ class MainApp(ctk.CTk):
         unique_y_positions = set()  # Set to store unique y positions
 
         # Iterate through all files in the specified directory
-        for filename in os.listdir(directory):
+        for filename in sorted(os.listdir(directory)):
             if filename.endswith(".txt"):  # Only process text files
                 file_path = os.path.join(directory, filename)
                 
@@ -2166,11 +2172,10 @@ class MainApp(ctk.CTk):
 
             self.scanning_state = 3 
         
-        #Update button to show stitched image in gui when image stitching is done
-        if self.scanning_state == 3 and not self.stitching_thread.is_alive() :
-            self.complete_image_btn.configure(text="Completed Image Here", state="normal")
-
-            self.scanning_state = 0 #Reset mini state machine
+        # Stitching thread has finished; file-ready polling is already running
+        # via .after() from start_stitching — only reset the state machine here.
+        if self.scanning_state == 3 and not self.stitching_thread.is_alive():
+            self.scanning_state = 0
             
         #Random Samping Image Processing
         #Start mini state machine for random sampling process
@@ -2514,25 +2519,56 @@ class MainApp(ctk.CTk):
 
         self.stitcher = stitcher
 
-    def start_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id) :
+    def check_stitched_file_ready(self, filepath, retries=120):
         """
-        
-        Starts thread for stitching. 
-        Pass in arguments needed to be passed to macro thats sent to ImageJ.
+        Non-blocking poll for the stitched output JPEG. Always called from the
+        Tkinter main thread via .after() — never from the stitching thread.
+
+        The is_stitching lock prevents the button from being enabled more than
+        once per scan and blocks spurious triggers if the file already existed
+        from a previous run before the new one is written.
 
         Args:
-            grid_x (int): The number of columns in the stitching grid.
-            grid_y (int): The number of rows in the stitching grid.
-            input_dir (str): The directory containing the images to stitch.
-            output_dir (str): The directory to save the stitched image.
-            sample_id (str): The ID of the current sample.
-
-        Returns:
-            None
+            filepath (str): Absolute path to the expected stitched JPEG.
+            retries (int): Remaining 500 ms poll attempts (default 120 = 60 s).
         """
+        if os.path.exists(filepath):
+            # File confirmed on disk — disarm lock and update button unconditionally.
+            # check_stitched_file_ready is always invoked from the Tkinter main thread
+            # via .after(), so no after(0) indirection is required here.
+            self.is_stitching = False
+            self.complete_image_btn.configure(text="Completed Image Here", state="normal")
+        elif retries > 0:
+            self.after(500, lambda: self.check_stitched_file_ready(filepath, retries - 1))
+        else:
+            self.is_stitching = False
+            print(f"Stitched file transfer timed out: {filepath}")
 
-        # Using a lambda function to pass the arguments to run_stitching
-        self.stitching_thread = Thread(target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id), daemon=True)
+    def start_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id):
+        """
+        Arms the stitching lock, starts the .after() file-ready poll on the
+        main thread, then spawns the background Fiji subprocess thread.
+
+        The poll and the thread are started together here so there is exactly
+        one poller per scan and it always runs on the Tkinter main thread.
+
+        Args:
+            grid_x (int): Number of columns in the stitching grid.
+            grid_y (int): Number of rows in the stitching grid.
+            input_dir (str): Directory containing the tile images.
+            output_dir (str): Directory where Fiji writes the stitched JPEG.
+            sample_id (str): Sample identifier used in the output filename.
+        """
+        stitched_path = os.path.join(output_dir, f"stitched_{sample_id}.jpg")
+
+        # Arm lock and start poll on the main thread before the thread begins
+        self.is_stitching = True
+        self.after(500, lambda: self.check_stitched_file_ready(stitched_path))
+
+        self.stitching_thread = Thread(
+            target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id),
+            daemon=True
+        )
         self.stitching_thread.start()
 
 

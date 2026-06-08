@@ -2,16 +2,18 @@
 args = getArgument();
 splitArgs = split(args, ",");
 
-
 grid_size_x = parseInt(splitArgs[0]);
 grid_size_y = parseInt(splitArgs[1]);
 directory = splitArgs[2];
 output_directory = splitArgs[3];
 sample_id = splitArgs[4];
 
-print("Starting stitching...");
+// Setup the Flight Recorder Log
+log_path = output_directory + File.separator + "fiji_log.txt";
+File.saveString("--- FIJI STITCHING LOG ---\n", log_path);
+File.append("1. Arguments received successfully.\n", log_path);
 
-run("Grid/Collection stitching", 
+run("Grid/Collection stitching",
   "type=[Grid: column-by-column] " +
   "order=[Up & Right] " +
   "grid_size_x=" + grid_size_x + " " +
@@ -28,14 +30,19 @@ run("Grid/Collection stitching",
   "computation_parameters=[Save computation time (but use more RAM)] " +
   "image_output=[Fuse and display]");
 
-print("Stitching complete.");
+File.append("2. Stitching plugin finished without crashing.\n", log_path);
 
-print("Loading fused image from disk...");
+// FIX: Convert the 32-bit blended result to RGB before saving as JPEG.
+// Linear Blending produces a 32-bit float image; JPEG requires 8-bit RGB.
+// Skipping this step causes saveAs to silently abort with no error.
+run("RGB Color");
+File.append("3. Image successfully converted to RGB.\n", log_path);
 
-// Flatten using max intensity projection across Z
-run("Z Project...", "projection=[Max Intensity]");
+save_path = output_directory + File.separator + "stitched_" + sample_id + ".jpg";
+File.append("4. Attempting to save to: " + save_path + "\n", log_path);
 
-// Save the flattened result
-saveAs("JPEG", output_directory + "/stitched_" + sample_id + ".jpg");
+saveAs("Jpeg", save_path);
+File.append("5. Save complete! Initiating graceful shutdown.\n", log_path);
 
-print("Saved stitched image.");
+close("*");
+eval("script", "System.exit(0);");
