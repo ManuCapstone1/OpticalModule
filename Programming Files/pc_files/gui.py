@@ -1176,6 +1176,81 @@ class MainApp(ctk.CTk):
 
         return max(0.0, phys_x), max(0.0, phys_y)
 
+    def calculate_stitched_phys_coords(
+        self,
+        px: float,
+        py: float,
+        stitched_w: int,
+        stitched_h: int,
+        grid_x: int,
+        grid_y: int,
+        scan_origin_x: float,
+        scan_origin_y: float,
+    ) -> tuple:
+        """
+        Convert a pixel position on the full-resolution stitched image to
+        absolute physical stage coordinates (mm).
+
+        The stitched image is produced by Fiji using:
+          - "Grid: column-by-column, Up & Right" scan order
+          - 20 % tile overlap
+
+        Parameters
+        ----------
+        px, py           : click in full-resolution stitched image pixels
+                           (0, 0 = top-left corner)
+        stitched_w/h     : pixel dimensions of the full-resolution stitched image
+        grid_x, grid_y   : number of tile columns and rows (e.g. step_x=5, step_y=4)
+        scan_origin_x/y  : absolute stage coordinates (mm) at the moment tile 0
+                           was captured — the stage position at scan start.
+                           NOTE: caller must capture self.x_pos / self.y_pos
+                           before sending the scan command and pass them here.
+
+        Returns
+        -------
+        (target_x, target_y) : absolute stage coordinates in mm, clamped to ≥ 0.
+        """
+        OVERLAP = 0.20
+
+        # Scale factors from the single-frame calibration matrix (diagonal terms).
+        # A11 = -0.001479 → 1 px rightward in sensor = +0.001479 mm in X.
+        # A22 =  0.001459 → 1 px upward   in sensor = +0.001459 mm in Y.
+        # Cross-terms (A12=0.000044, A21=0.000018) are ~3 % of the diagonals
+        # and are negligible at the stitched-image scale.
+        SCALE_X = 0.001479  # mm per pixel, right  → +X stage
+        SCALE_Y = 0.001459  # mm per pixel, upward → +Y stage
+
+        # ── Step 1: Recover individual tile pixel dimensions ─────────────────
+        # Fiji places N tiles with (1-overlap) steps:
+        #   stitched_size = tile_size * (1 + (N-1) * (1 - overlap))
+        tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
+        tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
+
+        # Pixel distance between adjacent tile left-/top-edges in the stitched image
+        step_px_x = tile_w * (1.0 - OVERLAP)
+        step_px_y = tile_h * (1.0 - OVERLAP)
+
+        # ── Step 2: Tile-0 centre in stitched image coordinates ──────────────
+        # "Up & Right" → tile 0 is the physical bottom-left of the scan area.
+        # In the stitched image (y=0 at top), the physically-lowest row (row 0)
+        # sits at the largest y values — its top edge is at (grid_y-1)*step_px_y.
+        tile0_cx = tile_w / 2.0
+        tile0_cy = (grid_y - 1) * step_px_y + tile_h / 2.0
+
+        # ── Step 3: Pixel displacement from tile-0 centre ────────────────────
+        d_px = px - tile0_cx   # positive = rightward in image = +X stage
+        d_py = py - tile0_cy   # positive = downward  in image = −Y stage
+
+        # ── Step 4: Convert pixel displacement → physical mm ─────────────────
+        delta_x =  d_px * SCALE_X   # right  → +X
+        delta_y = -d_py * SCALE_Y   # down   → −Y  (sign flip)
+
+        # ── Step 5: Absolute stage coordinates with hardware safety clamp ─────
+        target_x = max(0.0, scan_origin_x + delta_x)
+        target_y = max(0.0, scan_origin_y + delta_y)
+
+        return target_x, target_y
+
     def _roi_press(self, event, canvas):
         """Begin ROI rectangle on Ctrl+click."""
         self._roi_drag_start = (event.x, event.y)
@@ -1436,9 +1511,10 @@ class MainApp(ctk.CTk):
 
         #Display sititched image
         stitched_img_path = f"{self.buffer_stitching_folder}/stitched_{self.curr_sample_id}.jpg"
-        self.complete_image_btn = ctk.CTkButton(button_frame, text="Image Stitching...", fg_color="green", width=150, height=30, 
-                                                state="disabled", 
-                                                command=lambda:[self.expand_image(stitched_img_path)])
+        self.complete_image_btn = ctk.CTkButton(button_frame, text="Image Stitching...", fg_color="green", width=150, height=30,
+                                                state="disabled",
+                                                command=lambda: self._expand_stitched_with_fov(
+                                                    stitched_img_path, images_x, images_y))
         self.complete_image_btn.pack(side=ctk.LEFT, expand=True, padx=5, pady=1)
 
         #Finish button - creates new folder with time stamp, and transfers images from buffer to complete
@@ -1790,6 +1866,175 @@ class MainApp(ctk.CTk):
         expanded_window.grid_rowconfigure(0, weight=1)
         expanded_window.grid_rowconfigure(1, weight=0)  # Keep the back button at the bottom
         expanded_window.grid_columnconfigure(0, weight=1)
+
+    def _expand_stitched_with_fov(self, img_path, grid_x, grid_y):
+        """
+        Opens a popup showing the full stitched image with a draggable FOV
+        rectangle overlay.  Clicking anywhere on the canvas:
+          1. Converts the canvas pixel → full-resolution stitched image pixel.
+          2. Calls calculate_stitched_phys_coords for absolute stage coordinates.
+          3. Sends those coordinates to the stage via send_goto_command.
+          4. Snaps the FOV rectangle center to the exact clicked pixel — the
+             rectangle may hang partially outside the image boundary and that
+             is intentional (no clamping per edge-behaviour rule).
+
+        The rectangle is redrawn on every window resize without resetting its
+        position; the FOV centre is stored in stitched-pixel space so it
+        survives the scale change correctly.
+
+        Args:
+            img_path (str): Absolute path to the stitched JPEG.
+            grid_x   (int): Number of tile columns used during the scan.
+            grid_y   (int): Number of tile rows   used during the scan.
+        """
+        win = ctk.CTkToplevel(self)
+        win.title("Stitched Image")
+        win.geometry("800x700")
+        win.minsize(400, 400)
+        win.wait_visibility()
+        win.grab_set()
+
+        try:
+            stitched_pil = Image.open(img_path)
+        except Exception as e:
+            ctk.CTkLabel(win, text=f"Could not load image:\n{e}",
+                         text_color="red").pack(pady=20)
+            return
+
+        stitched_w, stitched_h = stitched_pil.size
+        OVERLAP = 0.20
+
+        # Tile pixel dimensions recovered from stitched image size + grid.
+        # Fiji: stitched_size = tile_size * (1 + (N-1) * (1 - overlap))
+        tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
+        tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
+        step_px_y = tile_h * (1.0 - OVERLAP)
+
+        # Scan origin — stage position captured the moment the scan command was
+        # sent (stored by send_scanning_data).  Fall back to 0.0 if missing.
+        scan_origin_x = getattr(self, 'scan_origin_x', 0.0)
+        scan_origin_y = getattr(self, 'scan_origin_y', 0.0)
+
+        # ── Shared render state ───────────────────────────────────────────────
+        # Both _render() and _on_click() read/write this dict so they always
+        # share the current canvas transform and FOV position.
+        _s = {
+            'ox': 0.0, 'oy': 0.0,   # image top-left on canvas (px)
+            'sx': 1.0, 'sy': 1.0,   # full-res → canvas scale
+            'half_cw': 0.0,          # FOV half-width  in canvas pixels
+            'half_ch': 0.0,          # FOV half-height in canvas pixels
+            # FOV centre in full-res stitched pixels.
+            # Initialised to tile-0 centre (physical bottom-left of scan area).
+            'fov_px': tile_w / 2.0,
+            'fov_py': (grid_y - 1) * step_px_y + tile_h / 2.0,
+            # Canvas item IDs — updated by _render(), moved by _on_click().
+            'rect_id':  None,
+            'label_id': None,
+        }
+
+        canvas = tk.Canvas(win, bg="#1a1a1a", highlightthickness=0, cursor="crosshair")
+        canvas.pack(expand=True, fill="both", padx=10, pady=(10, 0))
+        ctk.CTkButton(win, text="Back", command=win.destroy).pack(pady=8)
+
+        win._stitch_img_tk = None
+        win._render_pending = False
+
+        # ── FOV drawing helper ────────────────────────────────────────────────
+        def _draw_fov():
+            """Create rectangle + label at the current _s['fov_px/py'] and
+            return their canvas item IDs."""
+            cx = _s['ox'] + _s['fov_px'] * _s['sx']
+            cy = _s['oy'] + _s['fov_py'] * _s['sy']
+            r_id = canvas.create_rectangle(
+                cx - _s['half_cw'], cy - _s['half_ch'],
+                cx + _s['half_cw'], cy + _s['half_ch'],
+                outline="#00FF88", width=2, dash=(6, 3))
+            l_id = canvas.create_text(
+                cx - _s['half_cw'] + 4, cy - _s['half_ch'] + 4,
+                anchor="nw", text="FOV", fill="#00FF88",
+                font=("Arial", 10, "bold"))
+            return r_id, l_id
+
+        # ── Full redraw (image resize + FOV reposition) ───────────────────────
+        def _render():
+            win._render_pending = False
+            canvas.delete("all")
+            canvas.update_idletasks()
+            cw = max(canvas.winfo_width(),  400)
+            ch = max(canvas.winfo_height(), 400)
+
+            # Aspect-ratio-preserving fit
+            if stitched_w / stitched_h > cw / ch:
+                disp_w = cw
+                disp_h = max(1, int(cw * stitched_h / stitched_w))
+            else:
+                disp_h = ch
+                disp_w = max(1, int(ch * stitched_w / stitched_h))
+
+            _s['ox'] = (cw - disp_w) / 2.0
+            _s['oy'] = (ch - disp_h) / 2.0
+            _s['sx'] = disp_w / stitched_w
+            _s['sy'] = disp_h / stitched_h
+            _s['half_cw'] = (tile_w / 2.0) * _s['sx']
+            _s['half_ch'] = (tile_h / 2.0) * _s['sy']
+
+            resized = stitched_pil.resize((disp_w, disp_h), Image.LANCZOS)
+            win._stitch_img_tk = ImageTk.PhotoImage(resized)
+            canvas.create_image(cw // 2, ch // 2, anchor="center",
+                                image=win._stitch_img_tk)
+
+            # Draw FOV at its remembered position (survives resize correctly
+            # because _s['fov_px/py'] are in full-res stitched pixels).
+            _s['rect_id'], _s['label_id'] = _draw_fov()
+
+        # ── Click handler ─────────────────────────────────────────────────────
+        def _on_click(event):
+            if self.module_status != "Idle":
+                return
+
+            # Canvas pixel → full-resolution stitched image pixel
+            full_px = (event.x - _s['ox']) / _s['sx']
+            full_py = (event.y - _s['oy']) / _s['sy']
+
+            # Physical stage coordinates (clamped to ≥ 0 for hardware safety)
+            target_x, target_y = self.calculate_stitched_phys_coords(
+                full_px, full_py,
+                stitched_w, stitched_h,
+                grid_x, grid_y,
+                scan_origin_x, scan_origin_y,
+            )
+
+            # Send move command to stage
+            self.send_goto_command(target_x, target_y, float(self.z_pos),
+                                   show_success=False)
+
+            # Update FOV centre.  Store in stitched-pixel space (unclamped) so
+            # a subsequent window resize re-derives canvas coords correctly.
+            _s['fov_px'] = full_px
+            _s['fov_py'] = full_py
+
+            # Fast canvas update. Move existing items without touching the
+            # image (no PIL resize, immediate response).
+            # Edge rule: center tracks event.x/y exactly; no boundary clamp.
+            if _s['rect_id'] is not None and _s['label_id'] is not None:
+                cx, cy = event.x, event.y
+                canvas.coords(_s['rect_id'],
+                               cx - _s['half_cw'], cy - _s['half_ch'],
+                               cx + _s['half_cw'], cy + _s['half_ch'])
+                canvas.coords(_s['label_id'],
+                               cx - _s['half_cw'] + 4, cy - _s['half_ch'] + 4)
+            else:
+                _s['rect_id'], _s['label_id'] = _draw_fov()
+
+        # ── Event bindings ────────────────────────────────────────────────────
+        def _schedule_render(event=None):
+            if not win._render_pending:
+                win._render_pending = True
+                win.after(60, _render)
+
+        canvas.bind("<Configure>", _schedule_render)
+        canvas.bind("<Button-1>",  _on_click)
+        win.after(80, _render)   # initial draw once the window is fully laid out
 
     #Update time
     def update_time(self):
@@ -2317,9 +2562,32 @@ class MainApp(ctk.CTk):
             self.scanning_data['step_x'] = step_x
             self.scanning_data['step_y'] = step_y
 
-            #Send scanning data
-            success_message = "Scanning request sent."
-            self.send_json_error_check(self.scanning_data, success_message)
+            # Snapshot the stage position at scan-start so the stitched-image
+            # click-to-move can compute absolute physical coordinates later.
+            self.scan_origin_x = float(self.x_pos)
+            self.scan_origin_y = float(self.y_pos)
+
+            # Purge stale images from the Pi buffer BEFORE issuing the scan
+            # command so the Pi cannot re-transmit leftover images from a
+            # previous session.  The SSH rm runs in a background thread to
+            # avoid blocking the Tkinter main loop; the scan command is then
+            # dispatched back to the main thread via after(0) only after the
+            # remote folder is confirmed empty.
+            scanning_data_snapshot = dict(self.scanning_data)
+
+            def _clear_pi_then_scan():
+                remote_folder = "/home/microscope/image_buffer"
+                if self.rpi_transfer:
+                    try:
+                        self.rpi_transfer.connect_ssh()
+                        self.rpi_transfer.empty_folder(remote_folder)
+                        self.rpi_transfer.close_ssh_connection()
+                        print(f"Pi buffer cleared before scan: {remote_folder}")
+                    except Exception as e:
+                        print(f"Warning: could not clear Pi buffer before scan — {e}")
+                self.after(0, lambda: self.send_json_error_check(scanning_data_snapshot, "Scanning request sent."))
+
+            Thread(target=_clear_pi_then_scan, daemon=True).start()
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
     
