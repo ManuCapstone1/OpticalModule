@@ -19,7 +19,7 @@ STAGECENTRE = (8281, 7005) # Stage centre location in steps
 
 class OpticalModule:
     """
-        This class is a digital representation of the physical system. 
+        This class is a digital representation of the physical system.
         It includes fields for the system parameters and methods for operating the system.
         Attributes:
             board: Pyfirmata Arduino board object
@@ -54,16 +54,16 @@ class OpticalModule:
         self.board=pyfirmata.Arduino("/dev/ttyUSB0")
         it = pyfirmata.util.Iterator(self.board)
         it.start()
-        
+
         # Set up enable pin to allow us to enable and disable motors for manual movement
-        self.enPin = self.board.get_pin('d:8:o') 
+        self.enPin = self.board.get_pin('d:8:o')
         self.enPin.write(0)
 
         # Instantiate motor objects for the three motors. Motors A&B function according to CoreXY (see corexy.com for details)
         self.motorA = StepperMotor(2, 5, self.board)
         self.motorB = StepperMotor(3, 6, self.board)
         self.motorZ = StepperMotor(4, 7, self.board)
-        
+
         # Instantiate limit switch objects
         self.limitSwitchX = LimitSwitch(9, self.board)
         self.limitSwitchY = LimitSwitch(10, self.board)
@@ -73,7 +73,7 @@ class OpticalModule:
         self.cam = Camera()
 
         # Create variables to hold current position in terms of steps
-        self.currX = 0 
+        self.currX = 0
         self.currY = 0
         self.currZ = 0
         self.currSample = None
@@ -142,7 +142,7 @@ class OpticalModule:
 
         Parameters:
             deltaA: How far and which direction to move motor A in steps
-            deltaB: How far and which direction to move motor B in steps        
+            deltaB: How far and which direction to move motor B in steps
         """
         # Total number of steps to move the motors
         # Because we are only moving in cartesian directions the number of steps by each motor will always be the same
@@ -187,8 +187,8 @@ class OpticalModule:
 
         # Update current position
         with self.positionLock:
-            self.currX = self.currX + deltaX 
-        
+            self.currX = self.currX + deltaX
+
         # Move motors
         self._move_ab(deltaA, deltaB)
 
@@ -206,7 +206,7 @@ class OpticalModule:
         # Update current position
         with self.positionLock:
             self.currY = self.currY + deltaY
-        
+
         # Move motors
         self._move_ab(deltaA, deltaB)
 
@@ -222,7 +222,7 @@ class OpticalModule:
         # Update current z-position
         with self.positionLock:
             self.currZ = self.currZ + deltaZ
-        
+
         # Establish motion direction of motors
         if deltaZ >= 0:
             self.motorZ.dir_pin.write(1)
@@ -240,7 +240,7 @@ class OpticalModule:
             time.sleep(PULSEWIDTH)
             self.motorZ.step_pin.write(0)
             time.sleep(BTWNSTEPS)
-    
+
     def go_to(self, x=None, y=None, z=None):
         """
         Moves system to specified (x, y, z) position (in mm)
@@ -253,7 +253,7 @@ class OpticalModule:
         x = round(x/STEPDISTXY) if x is not None else self.currX
         y = round(y/STEPDISTXY) if y is not None else self.currY
         z = round(z/STEPDISTZ) if z is not None else self.currZ
-        
+
         # If new values are passed move to specified position
         if not x == self.currX:
             self.move_x(x-self.currX)
@@ -345,13 +345,13 @@ class OpticalModule:
                 print('limit reset failed')
                 with self.alarmLock:
                     self.alarmStatus = "Limit Switch Failed"
-        
+
         # Home Y axis
         print("Y")
         self.motorA.dir_pin.write(1)
         self.motorB.dir_pin.write(0)
         while not self.limitSwitchY.is_pressed():
-            # Allows system to stop if stop requested  
+            # Allows system to stop if stop requested
             if self.stop.is_set():
                 self.resetIdle.set()
                 self.isHomed.clear()
@@ -374,7 +374,7 @@ class OpticalModule:
             if self.stop.is_set():
                 self.resetIdle.set()
                 self.isHomed.clear()
-                return      
+                return
             self.motorA.step_pin.write(1)
             self.motorB.step_pin.write(1)
             time.sleep(PULSEWIDTH)
@@ -383,7 +383,7 @@ class OpticalModule:
             time.sleep(BTWNSTEPS)
         with self.positionLock:
             self.currX = 0
-    
+
     def home_all(self):
         """
         Moves system to home position in all axes. Also clears stop condition and resets homed status.
@@ -399,26 +399,26 @@ class OpticalModule:
                 print('limit reset failed')
                 with self.alarmLock:
                     self.alarmStatus = "Limit Switch Failed"
-        
+
         # Home Z axis
         print("Z")
         self.motorZ.dir_pin.write(0)
         while not self.limitSwitchZ.is_pressed():
             if self.stop.is_set():
                 self.resetIdle.set()
-                return      
+                return
             self.motorZ.step_pin.write(1)
             time.sleep(PULSEWIDTH)
             self.motorZ.step_pin.write(0)
             time.sleep(BTWNSTEPS)
-        
+
         self.home_xy() # home x and y axes
         # Set Z position to 0
         with self.positionLock:
             self.currZ = 0
             self.isHomed.set() # system is homed
 
-    
+
     def auto_focus(self, zMin=None, zMax=None, stepSize=None):
         """
         Finds the best focus position in a given range of heights by calculating the focus score (laplacian variance) every step of a given mm size.
@@ -433,8 +433,8 @@ class OpticalModule:
         """
         # Calculate the range based on current sample height if parameters are not passed
         if zMin is None or zMax is None or stepSize is None:
-            zMin = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() - 1 
-            zMax = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() + 1 
+            zMin = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() - 1
+            zMax = STAGEFOCUSHEIGHT - self.currSample.get_curr_height() + 1
             stepSize = 0.05
         bestFocusValue = -1
         bestZPosition = zMin
@@ -464,7 +464,7 @@ class OpticalModule:
         self.go_to(z=bestZPosition)
 
         return bestFocusValue
-    
+
     def update_image_metadata(self, save=False):
         """
         Update image metadata based on current status
@@ -505,15 +505,15 @@ class OpticalModule:
         self.update_image_metadata(True)
 
         return image
-    
+
 
     def random_sampling(self, numImages, saveImages: bool):
         """
         Takes images at a specified number of random positions within the sample bounding box.
         Parameters:
             numImages: how many random samples to take
-            saveImages: should the images be saved? This was added to make defect detection possible in the future without saving all images; 
-                however, in its current state the program will save images regardless. Setting this parameter to True will save the images 
+            saveImages: should the images be saved? This was added to make defect detection possible in the future without saving all images;
+                however, in its current state the program will save images regardless. Setting this parameter to True will save the images
                 without metadata, False will save the images with metadata. This should be changed in the future.
         Returns:
             List of captured images to be used for applications like defect detection
@@ -524,11 +524,11 @@ class OpticalModule:
             with self.alarmLock:
                     self.alarmStatus = "No Bounding Box Set"
             return
-        
+
         # Home system if stopped or not homed
         if not self.isHomed.is_set() or self.stop.is_set():
             self.home_all()
-        
+
         # Move carriage to stage center and complete autofocus operation on sample
         self.go_to(x=STAGECENTRE[0]*STEPDISTXY, y=STAGECENTRE[1]*STEPDISTXY)
         self.auto_focus()
@@ -540,9 +540,9 @@ class OpticalModule:
             with self.alarmLock:
                     self.alarmStatus = "Sample not detected or not in focus"
             return
-        
-        # Update total images 
-        with self.imageCountLock:   
+
+        # Update total images
+        with self.imageCountLock:
             self.totalImages = numImages
 
         # Create list of captured images
@@ -555,10 +555,10 @@ class OpticalModule:
         # Find the min and max values for x and y
         min_x, max_x = min(x_coords), max(x_coords)
         min_y, max_y = min(y_coords), max(y_coords)
-        
+
         # Generate n random points within the bounding box
         random_points = [(random.uniform(min_x, max_x), random.uniform(min_y, max_y)) for _ in range(numImages)]
-        
+
         with self.imageCountLock:
             self.cam.imageCount = 0
 
@@ -567,15 +567,15 @@ class OpticalModule:
             if self.stop.is_set():
                 self.resetIdle.set()
                 return
-            
+
             # Go to the random position
             self.go_to(x=point[0], y=point[1])
 
-            # Allow system to stabilize 
+            # Allow system to stabilize
             time.sleep(0.5)
 
             # Save images without or with metadata file (this should be changed in the future)
-            if saveImages: 
+            if saveImages:
                 imageArr = self.cam.save_image(self.bufferDir, self.currSample)
             else:
                 imageArr = self.update_image()
@@ -593,19 +593,19 @@ class OpticalModule:
         self.currSample.currLayer = self.currSample.currLayer + 1 # This may need to be changed in the future if a layer is not always removed
 
         # Return camera carriage to home position for robot sample pickup
-        self.home_xy()
+        # self.home_xy()  # Disabled: camera head stays in place after sampling for click-to-move use
         return capturedImages
-    
+
     def scanning_images(self, step_size_x, step_size_y, saveImages: bool):
         """
         Takes a series of overlapping images to cover the entire area of the bounding box for image stitching.
         Parameters:
-            step_size_x: How far (in mm) the camera carriage should move in the x-direction between images. 
+            step_size_x: How far (in mm) the camera carriage should move in the x-direction between images.
                 X distance between the centre points of neighboring images
-            step_size_y: How far (in mm) the camera carriage should move in the y-direction between images. 
+            step_size_y: How far (in mm) the camera carriage should move in the y-direction between images.
                 Y distance between the centre points of neighboring images
-            saveImages: should the images be saved? This was added to make defect detection possible in the future without saving all images; 
-                however, in its current state the program will save images regardless. Setting this parameter to True will save the images 
+            saveImages: should the images be saved? This was added to make defect detection possible in the future without saving all images;
+                however, in its current state the program will save images regardless. Setting this parameter to True will save the images
                 without metadata, False will save the images with metadata. This should be changed in the future.
         """
         # Cancel the operation if no sample bounding box set
@@ -624,13 +624,13 @@ class OpticalModule:
         self.auto_focus()
 
         # If the sample is not in position it will have a low focus score
-        # (this may need to be changed in the future as clean samples also have a low focus score)        
+        # (this may need to be changed in the future as clean samples also have a low focus score)
         if self.cam.calculate_focus_score() < 1:
             print("Sample not detected or not in focus")
             with self.alarmLock:
                     self.alarmStatus = "Sample not detected or not in focus"
             return
-        
+
         # Create list of captured images
         capturedImages = []
 
@@ -648,7 +648,7 @@ class OpticalModule:
         with self.imageCountLock:
             self.totalImages = len(x_positions) * len(y_positions)
             self.cam.imageCount = 0
-        
+
         # Loop through grid positions in up & right pattern
         for x in x_positions:
             for y in y_positions:
@@ -656,35 +656,35 @@ class OpticalModule:
                 if self.stop.is_set():
                     self.resetIdle.set()
                     return
-                
+
                 # Go to grid position
                 self.go_to(x=x, y=y)
 
                 # Allow system to stabilize
-                time.sleep(0.5)  
-                
+                time.sleep(0.5)
+
                 # Save images without or with metadata file (this should be changed in the future)
                 if saveImages:
                     imageArr = self.cam.save_image(self.saveDir, self.currSample)
-                else:    
+                else:
                     imageArr = self.update_image()
 
                 # Update image count and captured image list
                 with self.imageCountLock:
                     self.cam.imageCount = self.cam.imageCount + 1
-                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))  
-        
+                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
+
         # Reset image counters and increment current sample layer
         with self.imageCountLock:
             self.totalImages = 0
             self.imageCount = 0
-        
+
         self.currSample.currLayer = self.currSample.currLayer + 1 # This may need to be changed in the future if a layer is not always removed
-        
+
         # Return camera carriage to home position for robot sample pickup
-        self.home_xy()
+        # self.home_xy()  # Disabled: camera head stays in place after scanning for click-to-move use
         return capturedImages
-        
+
     def calibrate_platform(self):
         """
         Performs autofocus operation at four corners of the stage and returns focus height. This can be used in the future to assist with platform leveling
@@ -720,12 +720,12 @@ class OpticalModule:
         # Create and return list of heights
         zdistlist = [Z1,Z2,Z3,Z4]
         return zdistlist
-    
+
     def matrix_transform(self):
         """
-        This is an automatic method of establishing scaling and rotation aspects of affine transformation, 
-        the method returns the transformation matrix. However, because the code is looking for random features on the images, 
-        it is hard to consistently get the same absolute zero every time, even with a crosshair marker. 
+        This is an automatic method of establishing scaling and rotation aspects of affine transformation,
+        the method returns the transformation matrix. However, because the code is looking for random features on the images,
+        it is hard to consistently get the same absolute zero every time, even with a crosshair marker.
         Output images with markers indicating the same feature will be saved in the microscope folder.
         """
         if not self.isHomed.is_set():
@@ -817,11 +817,11 @@ class OpticalModule:
         T = cv2.getAffineTransform(stage_pts, camera_pts)
 
         return T
-        
+
 
     def execute(self, targetMethod, **kwargs):
         """
-        Calls specified method on a thread and resets module status to "Idle" when complete. 
+        Calls specified method on a thread and resets module status to "Idle" when complete.
         This method is meant to be used with methods that cause motion and its main purpose is to reset the module status.
         There is almost certainly a more lightweight way to do this with threading events and this method should be eliminated in the future.
         Parameters:
@@ -842,7 +842,7 @@ class OpticalModule:
 
         else:
             raise AttributeError(f"'{type(self).__name__}' has no callable method '{targetMethod}'")
-            
+
 
     def call_method_from_console(self):
         """
@@ -878,7 +878,7 @@ class OpticalModule:
                     method()
             else:
                 print(f"'{method_name}' is not callable. Please try again.")
-       
+
 
 class StepperMotor:
     """
@@ -912,7 +912,7 @@ class Camera:
     def __init__(self):
         # Create Camera
         self.picam = Picamera2(0)
-        
+
         # Create variables for camera settings
         self.currExposureTime = 100000      # Default exposure time in microseconds
         self.currAnalogGain = 2             # Default analogue gain (1.0 = no gain)
@@ -921,7 +921,7 @@ class Camera:
 
         # Create camera configuration
         # https://www.raspberrypi.com/documentation/accessories/camera.html
-        self.camera_config = self.picam.create_still_configuration({"size":(4056,3040)}) 
+        self.camera_config = self.picam.create_still_configuration({"size":(4056,3040)})
         self.picam.configure(self.camera_config)
         self._apply_settings()
 
@@ -937,9 +937,9 @@ class Camera:
 
     def update_settings(self, exposureTime=None, analogGain=None, contrast=None, colourTemperature=None):
         """
-        Update the camera settings. For any parameter that is None, the existing setting is maintained. 
+        Update the camera settings. For any parameter that is None, the existing setting is maintained.
         In testing, this method was not working and likely needs improvement.
-        
+
         Parameters:
             exposureTime: New exposure time in microseconds.
             analogGain: New analogue gain (float).
@@ -967,7 +967,7 @@ class Camera:
         """
         # Get red and blue gains calculated from the color temperature.
         redGain, blueGain = self._convert_temperature_to_gains(self.currColourTemp)
-        
+
         # Build the controls dictionary.
         controls = {
             "ExposureTime": self.currExposureTime,
@@ -977,7 +977,7 @@ class Camera:
         #            "ColourGains": (redGain, blueGain)
         # Apply the controls to the camera.
         self.picam.set_controls(controls)
-    
+
     def update_curr_image(self, sample):
         """
         Updates the currImageName and currImage fields of the Camera object
@@ -994,8 +994,8 @@ class Camera:
             blur: level of blur applied (to reduce impact of noise)
 
         Returns:
-            Focus score (Laplacian variance) 
-        
+            Focus score (Laplacian variance)
+
         """
 
         if imageArray is None:
@@ -1010,7 +1010,7 @@ class Camera:
         # Calculate the variance of the Laplacian (a measure of sharpness)
         #print(laplacian.var())
         return laplacian.var()
-    
+
     def get_image_array(self, updateImage=False) -> any:
         """
         Captures image from Raspberry Pi camera.
@@ -1032,11 +1032,11 @@ class Camera:
                     self.currImage = array
 
             return array
-        
+
         except Exception as e:
             print(f"Error capturing image: {e}")
             return ""
-    
+
     def save_image(self, dir: str, sample, image=None):
         """
         Captures an image using Picamera2 and saves it to the specified directory.
@@ -1049,8 +1049,8 @@ class Camera:
         Returns:
             image as an array
         """
-        
-        # Ensure the save directory exists 
+
+        # Ensure the save directory exists
         os.makedirs(dir, exist_ok=True)
 
         # Generate a unique filename using timestamp
@@ -1083,7 +1083,7 @@ class Camera:
         Parameters:
             sample: Sample object - currLayer and sampleID included in image name
             imageCount: image number in current sampling or scanning operation (taken from Camera imageCount field if not provided)
-        
+
         Returns:
             New image name as a string
 
@@ -1099,19 +1099,19 @@ class Camera:
         """
         Convert a given color temperature in Kelvin to a pair of red and blue gain multipliers
         using Tanner Helland's RGB conversion algorithm.
-        
+
         This function calculates the red, green, and blue components corresponding to the
         specified Kelvin temperature. It then normalizes the red and blue values relative to the
         green channel (which is assumed to be at unity gain) to compute the gains.
-        
+
         For more details on the algorithm, see:
         https://tannerhelland.com/2012/09/18/convert-temperature-rgb-algorithm-code.html
 
         This method currently does not work and requires future updates for manual colour temperature control
-        
+
         Parameters:
             kelvin: Color temperature in Kelvin.
-            
+
         Returns:
             A tuple (redGain, blueGain).
         """
@@ -1124,7 +1124,7 @@ class Camera:
         else:
             red = 329.698727446 * ((temperature - 60) ** -0.1332047592)
             red = max(0, min(red, 255))
-        
+
         # Calculate green component
         if temperature <= 66:
             green = 99.4708025861 * math.log(temperature) - 161.1195681661
@@ -1132,7 +1132,7 @@ class Camera:
         else:
             green = 288.1221695283 * ((temperature - 60) ** -0.0755148492)
             green = max(0, min(green, 255))
-        
+
         # Calculate blue component
         if temperature >= 66:
             blue = 255
@@ -1141,7 +1141,7 @@ class Camera:
         else:
             blue = 138.5177312231 * math.log(temperature - 10) - 305.0447927307
             blue = max(0, min(blue, 255))
-        
+
         # Normalize red and blue relative to green (green is used as reference gain of 1.0)
         # Prevent division by zero if green is 0.
         if green == 0:
@@ -1174,14 +1174,14 @@ class LimitSwitch:
             self.pin.mode = 1
             self.pin.write(1)
             self.pin.mode = 0
-        return state 
+        return state
 
 class Sample:
     """
     Class for samples used in the system.
     Attributes:
         mountType (str): How the sample is mounted (not currently used but may be useful for future applications)
-        sampleID (str): User defined name for the sample 
+        sampleID (str): User defined name for the sample
         mmPerLayer (float): Millimeters of material removed at each polishing step
         sampleHeight (float): The initial z height of the sample in mm - how far above the stage is the surface of the sample
         boundingBox: List of tuples representing the (x, y) coordinates of the bounding box corners.
@@ -1201,10 +1201,10 @@ class Sample:
     def set_bounding_box(self, width: float, height: float):
         """
         Given the width and height in millimeters, compute the four corners of the bounding box.
-        
+
         The center point of the bounding box is determined by the constant STAGECENTRE,
         which is provided in steps and converted to mm using STEPDISTXY.
-        
+
         Returns:
             List of tuples representing the (x, y) coordinates of the bounding box corners.
             Order: [bottom left, bottom right, top right, top left]
@@ -1212,7 +1212,7 @@ class Sample:
         # Convert center from steps to mm.
         center_x_mm = STAGECENTRE[0] * STEPDISTXY
         center_y_mm = STAGECENTRE[1] * STEPDISTXY
-        
+
         half_width = width / 2.0
         half_height = height / 2.0
 
@@ -1221,7 +1221,7 @@ class Sample:
         bottom_right = (center_x_mm + half_width, center_y_mm - half_height)
         top_right    = (center_x_mm + half_width, center_y_mm + half_height)
         top_left     = (center_x_mm - half_width, center_y_mm + half_height)
-        
+
         self.boundingBox = [bottom_left, bottom_right, top_right, top_left]
         self.boundingIsSet = True
         return self.boundingBox
