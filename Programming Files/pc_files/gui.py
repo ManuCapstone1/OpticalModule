@@ -116,6 +116,11 @@ class MainApp(ctk.CTk):
         self._canvas_orig_w = 0          # original image width (sensor px)
         self._canvas_orig_h = 0          # original image height (sensor px)
         self._canvas_img_path = None     # path of image currently on canvas
+        # Custom point-selection state (right-click markers)
+        self.custom_measure_points = []   # list of (phys_x_mm, phys_y_mm) tuples
+        self.measured_data = []           # list of (phys_x, phys_y, height) after a sequence
+        self.analysis_selected_indices = []  # indices into measured_data currently highlighted
+
         # ROI bounding box in canvas pixels (normalized: x0<x1, y0<y1)
         self._roi_canvas_x0 = 0.0
         self._roi_canvas_y0 = 0.0
@@ -457,6 +462,7 @@ class MainApp(ctk.CTk):
         self._stitch_roi_csv_name = ctk.CTkEntry(_ss_row1, width=130, placeholder_text="filename.csv")
         self._stitch_roi_csv_name.pack(side="left", padx=(0, 5))
 
+        # ── Row 2: info labels + Map Surface (right) ─────────────────────────────
         _ss_row2 = ctk.CTkFrame(_stitch_strip)
         _ss_row2.pack(fill='x', padx=5, pady=(2, 5))
 
@@ -464,8 +470,10 @@ class MainApp(ctk.CTk):
         self._stitch_roi_info_count = ctk.StringVar(value="Total Points: --")
         self._stitch_roi_info_time  = ctk.StringVar(value="Est. Duration: -- s")
 
+        # Map Surface on the far right; labels fill in to its left
         ctk.CTkButton(_ss_row2, text="Map Surface", fg_color="#7B2FBE",
                       command=self.start_surface_map_stitched).pack(side="right", padx=(10, 5))
+
         ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_time,
                      font=("Arial", 12, "bold"), text_color="orange").pack(side="right", padx=(12, 5))
         ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_count,
@@ -1309,16 +1317,27 @@ class MainApp(ctk.CTk):
         self._image_tab_canvas = tk.Canvas(right_frame, bg="#2b2b2b", highlightthickness=0, cursor="arrow")
         self._image_tab_canvas.pack(expand=True, fill='both', pady=(20, 5))
         self._image_tab_canvas.create_text(200, 200, text="Image will appear here",
-                                           fill="white", font=("Arial", 14))
+                                           fill="white", font=("Arial", 14),
+                                           tags="placeholder_text")
+        self._image_tab_canvas.bind(
+            "<Configure>",
+            lambda e: self._image_tab_canvas.coords(
+                "placeholder_text", e.width / 2, e.height / 2))
 
         # ROI measurement control strip (two rows)
         self._roi_active_canvas = None   # reset on each Image tab load
         roi_strip = ctk.CTkFrame(right_frame)
         roi_strip.pack(fill='x', padx=10, pady=(0, 10))
 
-        # ── Row 1: helper text + grouped inputs ──────────────────────────────────
+        # ── Row 1: inputs (left) + Measure Heights (right) ───────────────────────
         row1 = ctk.CTkFrame(roi_strip)
         row1.pack(fill='x', padx=5, pady=(5, 2))
+
+        # Measure Heights owns the far-right of row1; packed first to claim space
+        self._measure_heights_btn = ctk.CTkButton(
+            row1, text="Measure Heights", fg_color="#1E6FA8", state="disabled",
+            command=self.execute_custom_measurements)
+        self._measure_heights_btn.pack(side="right", padx=(10, 5))
 
         ctk.CTkLabel(row1, text="Ctrl+Drag: Draw  |  Drag Center: Move  |  Drag Corners: Resize",
                      font=("Arial", 11, "italic"), text_color="gray").pack(side="left", padx=(5, 20))
@@ -1348,7 +1367,7 @@ class MainApp(ctk.CTk):
         self._roi_csv_name = ctk.CTkEntry(row1, width=130, placeholder_text="filename.csv")
         self._roi_csv_name.pack(side="left", padx=(0, 5))
 
-        # ── Row 2: calculated outputs (right-aligned) + action button ────────────
+        # ── Row 2: info labels + Clear Points / Map Surface (right) ──────────────
         row2 = ctk.CTkFrame(roi_strip)
         row2.pack(fill='x', padx=5, pady=(2, 5))
 
@@ -1356,8 +1375,20 @@ class MainApp(ctk.CTk):
         self._roi_info_count = ctk.StringVar(value="Total Points: --")
         self._roi_info_time  = ctk.StringVar(value="Est. Duration: -- s")
 
-        ctk.CTkButton(row2, text="Map Surface", fg_color="#7B2FBE",
-                      command=self.start_surface_map).pack(side="right", padx=(10, 5))
+        # Action frame: Clear Points + Map Surface stacked on the far right.
+        # Packed first so it claims the rightmost column; labels fill to the left.
+        _action_frame = ctk.CTkFrame(row2, fg_color="transparent")
+        _action_frame.pack(side="right", padx=(10, 5))
+
+        self._clear_points_btn = ctk.CTkButton(
+            _action_frame, text="Clear Points", fg_color="#555555", state="disabled",
+            command=self._clear_custom_points)
+        self._clear_points_btn.pack(side="top", pady=(0, 2), fill="x")
+
+        self._map_surface_btn = ctk.CTkButton(
+            _action_frame, text="Map Surface", fg_color="#7B2FBE",
+            state="disabled", command=self.start_surface_map)
+        self._map_surface_btn.pack(side="top", pady=0, fill="x")
 
         ctk.CTkLabel(row2, textvariable=self._roi_info_time,
                      font=("Arial", 12, "bold"), text_color="orange").pack(side="right", padx=(12, 5))
@@ -1366,6 +1397,11 @@ class MainApp(ctk.CTk):
                      font=("Arial", 12, "bold"), text_color="#00FF88").pack(side="right", padx=(12, 5))
 
         ctk.CTkLabel(row2, textvariable=self._roi_info_area).pack(side="right", padx=(12, 5))
+
+        # Analysis result — fills the remaining left space in row 2
+        self.analysis_result_var = ctk.StringVar(value="Analysis: Select points...")
+        ctk.CTkLabel(row2, textvariable=self.analysis_result_var,
+                     font=("Arial", 12, "bold"), text_color="#00CFFF").pack(side="left", padx=(8, 5))
 
         # Bind live updates: any keystroke in the dimension entries redraws the grid
         for _e in (self._roi_spin_x, self._roi_spin_y, self._roi_cell_x, self._roi_cell_y):
@@ -1598,6 +1634,8 @@ class MainApp(ctk.CTk):
             canvas.bind("<KeyPress-Control_R>",   lambda e: canvas.configure(cursor="crosshair"))
             canvas.bind("<KeyRelease-Control_L>", lambda e: canvas.configure(cursor="arrow"))
             canvas.bind("<KeyRelease-Control_R>", lambda e: canvas.configure(cursor="arrow"))
+
+            canvas.bind("<Button-3>", lambda e: self._on_right_click_point(e, canvas))
 
             print("Image updated successfully :)")
 
@@ -1834,6 +1872,8 @@ class MainApp(ctk.CTk):
         canvas.delete("roi_grid")
         self._roi_active_canvas = canvas
         canvas.configure(cursor="crosshair")
+        if hasattr(self, '_map_surface_btn'):
+            self._map_surface_btn.configure(state="disabled")
 
     def _roi_drag(self, event, canvas):
         """Live-redraw the measurement grid as the user drags."""
@@ -1892,6 +1932,8 @@ class MainApp(ctk.CTk):
         self._roi_redraw_grid(canvas, self._roi_canvas_x0, self._roi_canvas_y0,
                               self._roi_canvas_x1, self._roi_canvas_y1)
         self._update_roi_info_labels()
+        if hasattr(self, '_map_surface_btn'):
+            self._map_surface_btn.configure(state="normal")
         print(f"ROI selected: X=[{self.roi_phys_x_start:.4f}, {self.roi_phys_x_end:.4f}] mm  "
               f"Y=[{self.roi_phys_y_start:.4f}, {self.roi_phys_y_end:.4f}] mm  "
               f"Grid={nx}×{ny}")
@@ -1899,6 +1941,290 @@ class MainApp(ctk.CTk):
         # The <KeyRelease-Control_L/R> binding will set cursor="arrow", and the
         # next <Motion> event will refine it to the correct zone cursor.
         canvas.configure(cursor="crosshair")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Custom point-selection (right-click markers)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _on_right_click_point(self, event, canvas):
+        """<Button-3>: drop a measurement marker at the clicked canvas position."""
+        canvas_w = canvas.winfo_width()
+        canvas_h = canvas.winfo_height()
+        phys_x, phys_y = self._canvas_pixel_to_phys(event.x, event.y, canvas_w, canvas_h)
+        if phys_x is None or phys_y is None:
+            return
+
+        self.custom_measure_points.append((phys_x, phys_y))
+        self._roi_active_canvas = canvas   # ensure Clear Points can find this canvas
+
+        # Draw a bright yellow crosshair at the clicked position
+        R = 8
+        canvas.create_line(event.x - R, event.y, event.x + R, event.y,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_line(event.x, event.y - R, event.x, event.y + R,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_oval(event.x - 3, event.y - 3, event.x + 3, event.y + 3,
+                           fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
+
+        if hasattr(self, '_measure_heights_btn'):
+            self._measure_heights_btn.configure(state="normal")
+        if hasattr(self, '_clear_points_btn'):
+            self._clear_points_btn.configure(state="normal")
+
+        print(f"[custom_pt] point {len(self.custom_measure_points)}: "
+              f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
+
+    def _clear_custom_points(self):
+        """Clear all custom measurement markers, analysis state, and canvas bindings."""
+        self.custom_measure_points.clear()
+        self.measured_data.clear()
+        self.analysis_selected_indices.clear()
+        if hasattr(self, 'analysis_result_var'):
+            self.analysis_result_var.set("Analysis: Select points...")
+        if self._roi_active_canvas is not None:
+            self._roi_active_canvas.tag_unbind("measurement_text", "<Button-1>")
+            self._roi_active_canvas.delete("custom_pt")
+        if hasattr(self, '_measure_heights_btn'):
+            self._measure_heights_btn.configure(state="disabled")
+        if hasattr(self, '_clear_points_btn'):
+            self._clear_points_btn.configure(state="disabled")
+        print("[custom_pt] all custom points cleared")
+
+    def _toggle_analysis_point(self, event):
+        """Toggle selection of a measured point label; update the analysis readout."""
+        canvas = self._roi_active_canvas
+        if canvas is None or not self.measured_data:
+            return
+
+        # Identify which canvas item was clicked and extract its meas_idx_N tag
+        item = canvas.find_withtag("current")
+        if not item:
+            return
+        item_id = item[0]
+        idx = None
+        for tag in canvas.gettags(item_id):
+            if tag.startswith("meas_idx_"):
+                idx = int(tag[len("meas_idx_"):])
+                break
+        if idx is None:
+            return
+
+        # Toggle selection state and recolour the text label
+        if idx in self.analysis_selected_indices:
+            self.analysis_selected_indices.remove(idx)
+            canvas.itemconfigure(item_id, fill="cyan")
+        else:
+            self.analysis_selected_indices.append(idx)
+            canvas.itemconfigure(item_id, fill="#00FF44")
+
+        # Update the analysis readout label
+        sel = self.analysis_selected_indices
+        n_sel = len(sel)
+        if n_sel == 0:
+            text = "Analysis: Select points..."
+        elif n_sel == 1:
+            h = self.measured_data[sel[0]][2]
+            text = f"Height: {h:.4f} mm"
+        elif n_sel == 2:
+            h1 = self.measured_data[sel[0]][2]
+            h2 = self.measured_data[sel[1]][2]
+            text = f"Delta Z: {abs(h1 - h2):.4f} mm"
+        else:
+            text = f"{n_sel} Points Selected (Plane Gen WIP)"
+
+        if hasattr(self, 'analysis_result_var'):
+            self.analysis_result_var.set(text)
+
+        return "break"   # stop event propagating to the canvas click-to-move binding
+
+    def execute_custom_measurements(self):
+        """Sort captured points via nearest-neighbour, apply confocal offset, then
+        kick off the non-blocking .after() measurement sequence."""
+        if not self.custom_measure_points:
+            messagebox.showwarning("No Points", "Right-click the image to add measurement points first.")
+            return
+
+        # ── Save camera assembly origin before any movement ───────────────────
+        # Must be captured here, before the confocal offset shifts the targets.
+        self._sequence_origin_x = float(self.x_pos)
+        self._sequence_origin_y = float(self.y_pos)
+
+        # ── Nearest-neighbour path optimisation ───────────────────────────────
+        current_x = float(self.x_pos)
+        current_y = float(self.y_pos)
+        unvisited = list(self.custom_measure_points)
+        optimized_route = []
+
+        while unvisited:
+            nearest = min(unvisited,
+                          key=lambda p: (p[0] - current_x) ** 2 + (p[1] - current_y) ** 2)
+            unvisited.remove(nearest)
+            optimized_route.append(nearest)
+            current_x, current_y = nearest
+
+        # ── Apply confocal-camera offset to every target point ────────────────
+        # The confocal sensor is offset from the camera by this fixed amount.
+        CONFOCAL_DX = -1.418137875
+        CONFOCAL_DY = -72.258765875
+        offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in optimized_route]
+
+        print(f"[execute_custom_measurements] {len(offset_route)} point(s) — nearest-neighbour order (confocal offset applied):")
+        for i, (x, y) in enumerate(offset_route, 1):
+            print(f"  {i:>3}. ({x:.4f} mm, {y:.4f} mm)")
+
+        # ── Pre-flight: confirm all confocal targets are within stage bounds ──
+        # Loop through every offset point; abort on the first violation so the
+        # error message references a single concrete bad coordinate.
+        for target_x, target_y in offset_route:
+            if target_x < 0 or target_y < 0:
+                messagebox.showerror(
+                    "Cannot Reach Sample",
+                    f"Cannot Reach Sample: Point requires stage to move to "
+                    f"Y = {target_y:.2f} mm, which is past the module's limit (0 mm).\n\n"
+                    f"Please manually unmount and shift your sample at least "
+                    f"{abs(target_y) + 1.0:.2f} mm further away from the limit."
+                )
+                return
+
+        # Disable all three action buttons for the duration of the sequence
+        for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn'):
+            if hasattr(self, _btn):
+                getattr(self, _btn).configure(state="disabled")
+
+        # Preserve optimised order so _process_measurement_results can pair
+        # each height with the correct physical coordinate.
+        self._optimized_route = optimized_route
+
+        self._sequence_measure_point(offset_route, 0, [])
+
+    def _sequence_measure_point(self, route, index, results):
+        """Non-blocking dispatcher: move to route[index] when the stage is Idle,
+        then hand off to the arrival-wait sub-sequence."""
+        if index >= len(route):
+            self._process_measurement_results(results)
+            return
+
+        if self.module_status != "Idle":
+            self.after(500, lambda: self._sequence_measure_point(route, index, results))
+            return
+
+        target_x, target_y = route[index]
+
+        if target_x < 0 or target_y < 0 or float(self.z_pos) < 0:
+            print(f"[sequence] ERROR: point {index + 1} ({target_x:.4f}, {target_y:.4f}) "
+                  f"out of range — aborting sequence")
+            messagebox.showerror(
+                "Sequence Aborted",
+                f"Point {index + 1}/{len(route)} ({target_x:.4f}, {target_y:.4f} mm) "
+                f"is out of stage range.\nSequence aborted."
+            )
+            self._sequence_unlock_buttons()
+            return
+
+        print(f"[sequence] moving to point {index + 1}/{len(route)}: ({target_x:.4f}, {target_y:.4f}) mm")
+        self.send_goto_command(target_x, target_y, float(self.z_pos), show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+
+        self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
+
+    def _sequence_wait_then_measure(self, route, index, results):
+        """Poll until the stage reaches Idle (move complete), then simulate a
+        measurement dwell before recording the (dummy) height."""
+        if self.module_status != "Idle":
+            self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
+            return
+
+        print(f"[sequence] stage idle — simulating measurement dwell at point {index + 1}/{len(route)}")
+        # No hardware measurement command is sent while in simulation mode.
+        # A 500 ms delay simulates sensor dwell time before reading back the value.
+        self.after(500, lambda: self._sequence_record_height(route, index, results))
+
+    def _sequence_record_height(self, route, index, results):
+        """Record the (dummy) height reading and advance to the next point."""
+        dummy_height = 0.0  # TODO: replace with actual confocal sensor readback
+        results.append(dummy_height)
+        print(f"[sequence] point {index + 1}/{len(route)}: height = {dummy_height:.4f} mm (placeholder)")
+        self._sequence_measure_point(route, index + 1, results)
+
+    def _phys_to_canvas_pixel(self, phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h):
+        """Inverse of _canvas_pixel_to_phys: map physical mm coords back to canvas pixels.
+        ref_x/ref_y must be the camera assembly position when the image was displayed."""
+        if self._canvas_disp_w == 0 or self._canvas_orig_w == 0:
+            return None, None
+        A11, A12 = -0.001479,  0.000044
+        A21, A22 =  0.000018,  0.001459
+        det = A11 * A22 - A12 * A21
+        dp_x = phys_x - ref_x
+        dp_y = phys_y - ref_y
+        delta_i = ( A22 * dp_x - A12 * dp_y) / det
+        delta_j = (-A21 * dp_x + A11 * dp_y) / det
+        sensor_x = self._canvas_orig_w / 2.0 - delta_i
+        sensor_y = self._canvas_orig_h / 2.0 - delta_j
+        x_offset = (canvas_w - self._canvas_disp_w) / 2.0
+        y_offset = (canvas_h - self._canvas_disp_h) / 2.0
+        canvas_px = sensor_x * (self._canvas_disp_w / self._canvas_orig_w) + x_offset
+        canvas_py = sensor_y * (self._canvas_disp_h / self._canvas_orig_h) + y_offset
+        return canvas_px, canvas_py
+
+    def _process_measurement_results(self, results):
+        """Draw height labels on the canvas, enter analysis mode, then return to origin."""
+        print(f"[sequence] all {len(results)} measurement(s) complete: {results}")
+
+        # Use the optimised order (same order results were collected in) so
+        # each height is paired with the correct physical coordinate.
+        ordered_points = getattr(self, '_optimized_route', self.custom_measure_points)
+
+        # ── Persist measurement data for analysis mode ────────────────────────
+        self.measured_data = [(px, py, h) for (px, py), h in zip(ordered_points, results)]
+        self.analysis_selected_indices = []
+        if hasattr(self, 'analysis_result_var'):
+            self.analysis_result_var.set("Analysis: Select points...")
+
+        # ── Draw height values directly above each marker on the canvas ───────
+        canvas = self._roi_active_canvas
+        if canvas is not None and self._canvas_disp_w > 0:
+            ref_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
+            ref_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+            for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
+                cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
+                if cx is not None:
+                    canvas.create_text(
+                        cx, cy - 15,
+                        text=f"{height:.3f} mm",
+                        fill="cyan", font=("Arial", 12, "bold"),
+                        tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
+
+            # Bind left-click on text labels to toggle analysis selection
+            canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
+
+        # ── Return camera assembly to its pre-sequence position ───────────────
+        origin_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
+        origin_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
+        print(f"[sequence] returning to origin ({origin_x:.4f}, {origin_y:.4f}) mm")
+        self.send_goto_command(origin_x, origin_y, float(self.z_pos), show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+
+        self.after(500, self._sequence_unlock_buttons)
+
+    def _sequence_unlock_buttons(self):
+        """Poll until the return-to-origin move finishes, then re-enable all
+        three action buttons."""
+        if self.module_status != "Idle":
+            self.after(500, self._sequence_unlock_buttons)
+            return
+
+        print("[sequence] origin reached — unlocking action buttons")
+        if hasattr(self, '_measure_heights_btn'):
+            self._measure_heights_btn.configure(state="normal")
+        if hasattr(self, '_clear_points_btn'):
+            self._clear_points_btn.configure(state="normal")
+        # Map Surface re-enables only if the grid is still valid
+        if hasattr(self, '_map_surface_btn') and self.roi_phys_x_start is not None:
+            self._map_surface_btn.configure(state="normal")
 
     def confirm_map_measurements(self):
         """Legacy shim — delegates to start_surface_map."""
@@ -2002,10 +2328,19 @@ class MainApp(ctk.CTk):
         """<Button-1> three-way dispatcher.
 
         Priority (checked in order):
+          0. Click on an analysis marker / label → ignore (let tag_bind handle it).
           1. Click within CORNER_R of a corner handle → resize mode.
           2. Click inside the grid box → move mode.
           3. Click outside → fall through to click_to_move (hardware command).
         """
+        # Guard: if the click landed on a measured-point marker or label, do nothing.
+        # _toggle_analysis_point (tag_bind) owns that event and returns "break".
+        current_items = canvas.find_withtag("current")
+        if current_items:
+            item_tags = canvas.gettags(current_items[0])
+            if "custom_pt" in item_tags or "measurement_text" in item_tags:
+                return
+
         has_roi = (
             self._roi_active_canvas is canvas
             and self._roi_canvas_x0 < self._roi_canvas_x1
