@@ -209,7 +209,10 @@ def handle_request():
             # Capture and save a single image to the buffer directory
             if message["command"] == "exe_update_image" and not thread.is_alive():
                 status_data["module_status"] = "Capturing Image"
-                thread = threading.Thread(target=shabam.execute, kwargs={"targetMethod": "update_image"})
+                def _capture_then_idle():
+                    shabam.execute(targetMethod="update_image")
+                    status_data["module_status"] = "Idle"
+                thread = threading.Thread(target=_capture_then_idle)
                 thread.start()
             
             # Reset module alarm status

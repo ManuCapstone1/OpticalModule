@@ -104,18 +104,36 @@ class MainApp(ctk.CTk):
 
         #--------------- Area Capture State -------------------#
         self._roi_drag_start = None      # (canvas_x, canvas_y) when Ctrl+drag begins
-        self._roi_rect_id = None         # canvas rectangle item ID
+        self._roi_rect_id = None         # kept for legacy; grid uses "roi_grid" tag
         self.roi_phys_x_start = None     # mm
         self.roi_phys_x_end = None       # mm
         self.roi_phys_y_start = None     # mm
         self.roi_phys_y_end = None       # mm
-        self.map_grid_x = 5              # confirmed X measurement count
-        self.map_grid_y = 5              # confirmed Y measurement count
+        self.map_grid_x = 4              # measurement point count in X (lines incl. border)
+        self.map_grid_y = 4              # measurement point count in Y (lines incl. border)
         self._canvas_disp_w = 0          # displayed image width on canvas (px)
         self._canvas_disp_h = 0          # displayed image height on canvas (px)
         self._canvas_orig_w = 0          # original image width (sensor px)
         self._canvas_orig_h = 0          # original image height (sensor px)
         self._canvas_img_path = None     # path of image currently on canvas
+        # Custom point-selection state (right-click markers)
+        self.custom_measure_points = []   # list of (phys_x_mm, phys_y_mm) tuples
+        self.measured_data = []           # list of (phys_x, phys_y, height) after a sequence
+        self.analysis_selected_indices = []  # indices into measured_data currently highlighted
+
+        # ROI bounding box in canvas pixels (normalized: x0<x1, y0<y1)
+        self._roi_canvas_x0 = 0.0
+        self._roi_canvas_y0 = 0.0
+        self._roi_canvas_x1 = 0.0
+        self._roi_canvas_y1 = 0.0
+        # Interaction state machine
+        self._roi_pan_active    = False   # True when any drag gesture is live (move OR resize)
+        self._roi_pan_start     = None    # (cx, cy) start for move drags
+        self._roi_active_canvas = None    # canvas widget that currently holds the grid
+        # Resize-specific state
+        self._roi_mode           = "none"   # "none" | "move" | "resize"
+        self._roi_drag_corner    = None     # "nw" | "ne" | "sw" | "se"
+        self._roi_resize_anchor  = None     # (cx, cy) of the fixed opposite corner
 
         #----------------- Status Labels ---------------#
         #Update motor pane labels
@@ -321,6 +339,7 @@ class MainApp(ctk.CTk):
 
         # ── Rebuild right frame content ───────────────────────────────────────
         self.clear_frame(self.main_right_frame)
+        self._roi_active_canvas = None   # detach any ROI from a previous view
 
         # Button bar
         btn_bar = ctk.CTkFrame(self.main_right_frame)
@@ -353,6 +372,9 @@ class MainApp(ctk.CTk):
             return
 
         stitched_w, stitched_h = stitched_pil.size
+        # Persisted so _process_measurement_results can reconstruct canvas coords
+        self._stitch_img_w = stitched_w
+        self._stitch_img_h = stitched_h
         OVERLAP = 0.20
 
         tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
@@ -408,8 +430,81 @@ class MainApp(ctk.CTk):
         }
 
         canvas = tk.Canvas(self.main_right_frame, bg="#1a1a1a",
-                           highlightthickness=0, cursor="crosshair")
-        canvas.pack(expand=True, fill="both", padx=5, pady=5)
+                           highlightthickness=0, cursor="arrow")
+
+        # ── ROI measurement control strip (BOTTOM, packed before canvas) ──────
+        _stitch_strip = ctk.CTkFrame(self.main_right_frame)
+        _stitch_strip.pack(side=ctk.BOTTOM, fill='x', padx=10, pady=(0, 5))
+
+        _ss_row1 = ctk.CTkFrame(_stitch_strip)
+        _ss_row1.pack(fill='x', padx=5, pady=(5, 2))
+
+        ctk.CTkLabel(_ss_row1,
+                     text="Ctrl+Drag: Draw  |  Drag Center: Move  |  Drag Corners: Resize",
+                     font=("Arial", 11, "italic"), text_color="gray").pack(side="left", padx=(5, 20))
+
+        ctk.CTkLabel(_ss_row1, text="Points (X × Y):").pack(side="left", padx=(0, 4))
+        self._stitch_roi_spin_x = ctk.CTkEntry(_ss_row1, width=46)
+        self._stitch_roi_spin_x.insert(0, "4")
+        self._stitch_roi_spin_x.pack(side="left", padx=(0, 2))
+        ctk.CTkLabel(_ss_row1, text="×", font=("Arial", 12)).pack(side="left", padx=(0, 2))
+        self._stitch_roi_spin_y = ctk.CTkEntry(_ss_row1, width=46)
+        self._stitch_roi_spin_y.insert(0, "4")
+        self._stitch_roi_spin_y.pack(side="left", padx=(0, 16))
+
+        ctk.CTkLabel(_ss_row1, text="Step Size (mm):").pack(side="left", padx=(0, 4))
+        self._stitch_roi_cell_x = ctk.CTkEntry(_ss_row1, width=64)
+        self._stitch_roi_cell_x.insert(0, "0.1000")
+        self._stitch_roi_cell_x.pack(side="left", padx=(0, 2))
+        ctk.CTkLabel(_ss_row1, text="×", font=("Arial", 12)).pack(side="left", padx=(0, 2))
+        self._stitch_roi_cell_y = ctk.CTkEntry(_ss_row1, width=64)
+        self._stitch_roi_cell_y.insert(0, "0.1000")
+        self._stitch_roi_cell_y.pack(side="left", padx=(0, 16))
+
+        ctk.CTkLabel(_ss_row1, text="Save As:").pack(side="left", padx=(0, 4))
+        self._stitch_roi_csv_name = ctk.CTkEntry(_ss_row1, width=130, placeholder_text="filename.csv")
+        self._stitch_roi_csv_name.pack(side="left", padx=(0, 5))
+
+        # "Measure Heights" claims the far-right of row 1 (mirroring the Image tab)
+        self._stitch_measure_heights_btn = ctk.CTkButton(
+            _ss_row1, text="Measure Heights", fg_color="#1f6aa5",
+            state="disabled", command=self.execute_custom_measurements)
+        self._stitch_measure_heights_btn.pack(side="right", padx=(10, 5))
+
+        # ── Row 2: info labels + analysis label + Clear Points / Map Surface ──────
+        _ss_row2 = ctk.CTkFrame(_stitch_strip)
+        _ss_row2.pack(fill='x', padx=5, pady=(2, 5))
+
+        self._stitch_roi_info_area  = ctk.StringVar(value="Total Area: -- × -- mm")
+        self._stitch_roi_info_count = ctk.StringVar(value="Total Points: --")
+        self._stitch_roi_info_time  = ctk.StringVar(value="Est. Duration: -- s")
+
+        # Action frame: Clear Points + Map Surface stacked on the far right
+        _stitch_action_frame = ctk.CTkFrame(_ss_row2, fg_color="transparent")
+        _stitch_action_frame.pack(side="right", padx=(10, 5))
+
+        self._stitch_clear_points_btn = ctk.CTkButton(
+            _stitch_action_frame, text="Clear Points", fg_color="#555555",
+            state="disabled", command=self._clear_custom_points)
+        self._stitch_clear_points_btn.pack(side="top", pady=(0, 2), fill="x")
+
+        self._stitch_map_surface_btn = ctk.CTkButton(
+            _stitch_action_frame, text="Map Surface", fg_color="#7B2FBE",
+            state="disabled", command=self.start_surface_map_stitched)
+        self._stitch_map_surface_btn.pack(side="top", pady=0, fill="x")
+
+        ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_time,
+                     font=("Arial", 12, "bold"), text_color="orange").pack(side="right", padx=(12, 5))
+        ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_count,
+                     font=("Arial", 12, "bold"), text_color="#00FF88").pack(side="right", padx=(12, 5))
+        ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_area).pack(side="right", padx=(12, 5))
+
+        # Analysis readout — fixed width prevents frame resize on text change
+        ctk.CTkLabel(_ss_row2, textvariable=self.analysis_result_var,
+                     font=("Arial", 12, "bold"), text_color="#00CFFF",
+                     width=260).pack(side="left", padx=(8, 5))
+
+        canvas.pack(expand=True, fill="both", padx=5, pady=(5, 0))
 
         self.main_right_frame._stitch_img_tk = None
         self.main_right_frame._render_pending = False
@@ -461,6 +556,39 @@ class MainApp(ctk.CTk):
 
             _s['rect_id'], _s['label_id'] = _draw_fov()
 
+            # Reproject ROI grid using the fresh _s transform (zoom / pan safe)
+            if (self._roi_active_canvas is canvas
+                    and self.roi_phys_x_start is not None):
+                _OVL = 0.20
+                _tw  = stitched_w / (1.0 + (grid_x - 1) * (1.0 - _OVL))
+                _th  = stitched_h / (1.0 + (grid_y - 1) * (1.0 - _OVL))
+                _t0x = _tw / 2.0
+                _t0y = (grid_y - 1) * _th * (1.0 - _OVL) + _th / 2.0
+                _A11, _A12 = -0.001479, 0.000044
+                _A21, _A22 =  0.000018, 0.001459
+                _det = _A11 * _A22 - _A12 * _A21
+
+                def _p2c(pm_x, pm_y):
+                    dx = pm_x - scan_origin_x;  dy = pm_y - scan_origin_y
+                    fpx = _t0x + ((-_A22) * dx + _A12 * dy) / _det
+                    fpy = _t0y + ( _A21   * dx - _A11 * dy) / _det
+                    return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
+
+                cx0, cy0 = _p2c(self.roi_phys_x_start, self.roi_phys_y_start)
+                cx1, cy1 = _p2c(self.roi_phys_x_end,   self.roi_phys_y_end)
+                self._roi_canvas_x0 = min(cx0, cx1)
+                self._roi_canvas_y0 = min(cy0, cy1)
+                self._roi_canvas_x1 = max(cx0, cx1)
+                self._roi_canvas_y1 = max(cy0, cy1)
+                self._roi_redraw_grid(canvas,
+                                      self._roi_canvas_x0, self._roi_canvas_y0,
+                                      self._roi_canvas_x1, self._roi_canvas_y1)
+
+            # Redraw any custom measurement points — zoom/pan safe via _s
+            self._redraw_custom_points_stitched(
+                canvas, _s, stitched_w, stitched_h,
+                grid_x, grid_y, scan_origin_x, scan_origin_y)
+
         def _on_click(event):
             if self.module_status != "Idle":
                 return
@@ -497,8 +625,10 @@ class MainApp(ctk.CTk):
                 self.main_right_frame.after(60, _render)
 
         def _start_pan(event):
-            canvas._pan_start_x = event.x
-            canvas._pan_start_y = event.y
+            canvas._pan_start_x  = event.x
+            canvas._pan_start_y  = event.y
+            canvas._pan_origin_x = event.x   # total-distance anchor
+            canvas._pan_origin_y = event.y
 
         def _do_pan(event):
             dx = event.x - canvas._pan_start_x
@@ -507,7 +637,12 @@ class MainApp(ctk.CTk):
             _s['pan_y'] += dy
             canvas._pan_start_x = event.x
             canvas._pan_start_y = event.y
-            _schedule_render()
+            # Suppress renders for sub-5-px jitter so a right-click-to-drop-point
+            # doesn't accidentally flash the canvas.
+            total_drag = ((event.x - canvas._pan_origin_x) ** 2 +
+                          (event.y - canvas._pan_origin_y) ** 2) ** 0.5
+            if total_drag > 5:
+                _schedule_render()
 
         def _zoom(event):
             cw = max(canvas.winfo_width(), 400)
@@ -545,14 +680,59 @@ class MainApp(ctk.CTk):
 
             _schedule_render()
 
-        canvas.bind("<Configure>", _schedule_render)
-        canvas.bind("<Button-1>", _on_click)
-        canvas.bind("<ButtonPress-3>", _start_pan)
-        canvas.bind("<B3-Motion>",     _do_pan)
+        # Bind entry KeyRelease now that canvas and _s exist
+        for _se in (self._stitch_roi_spin_x, self._stitch_roi_spin_y,
+                    self._stitch_roi_cell_x, self._stitch_roi_cell_y):
+            _se.bind("<KeyRelease>",
+                     lambda e, _c=canvas, _ss=_s: self._update_roi_from_entries_stitched(
+                         e, _c, _ss, stitched_w, stitched_h,
+                         grid_x, grid_y, scan_origin_x, scan_origin_y))
+
+        canvas.bind("<Configure>",               _schedule_render)
+        # <Button-1>: ROI corner / move / click-to-move dispatcher
+        canvas.bind("<Button-1>",
+                    lambda e: self._roi_or_move_press_stitched(e, canvas, _on_click))
+        canvas.bind("<B1-Motion>",
+                    lambda e: self._roi_pan_motion_stitched(e, canvas, _s))
+        canvas.bind("<ButtonRelease-1>",
+                    lambda e: self._roi_pan_release_stitched(
+                        e, canvas, _s, stitched_w, stitched_h,
+                        grid_x, grid_y, scan_origin_x, scan_origin_y))
+        # Ctrl+drag draws a new grid
+        canvas.bind("<Control-ButtonPress-1>",
+                    lambda e: self._roi_press(e, canvas))
+        canvas.bind("<Control-B1-Motion>",
+                    lambda e: self._roi_drag(e, canvas))
+        canvas.bind("<Control-ButtonRelease-1>",
+                    lambda e: self._roi_release_stitched(
+                        e, canvas, _s, stitched_w, stitched_h,
+                        grid_x, grid_y, scan_origin_x, scan_origin_y))
+        # Contextual hover cursors
+        canvas.bind("<Motion>",               lambda e: self._on_canvas_motion(e, canvas))
+        canvas.bind("<Enter>",                lambda e: canvas.focus_set())
+        canvas.bind("<KeyPress-Control_L>",   lambda e: canvas.configure(cursor="crosshair"))
+        canvas.bind("<KeyPress-Control_R>",   lambda e: canvas.configure(cursor="crosshair"))
+        canvas.bind("<KeyRelease-Control_L>", lambda e: canvas.configure(cursor="arrow"))
+        canvas.bind("<KeyRelease-Control_R>", lambda e: canvas.configure(cursor="arrow"))
+        # Right-click: pan on drag, point-drop on clean release (no drag)
+        canvas.bind("<ButtonPress-3>",  _start_pan)
+        canvas.bind("<B3-Motion>",      _do_pan)
+        canvas.bind("<ButtonRelease-3>",
+                    lambda e, _c=canvas, _ss=_s: self._on_stitched_right_click_point(
+                        e, _c, _ss, stitched_w, stitched_h,
+                        grid_x, grid_y, scan_origin_x, scan_origin_y))
         canvas.bind("<Button-4>",      _zoom)
         canvas.bind("<Button-5>",      _zoom)
-        canvas.update_idletasks()
-        _render()
+        # Poll until the canvas has real dimensions, then render once.
+        # Avoids the race where winfo_width() still returns 1 even after <Map>.
+        def _wait_for_geometry():
+            if not canvas.winfo_exists():
+                return
+            if canvas.winfo_width() <= 10 or canvas.winfo_height() <= 10:
+                self.after(50, _wait_for_geometry)
+            else:
+                _render()
+        _wait_for_geometry()
 
     #------------------------------- Pop-up Windows ------------------------------------------#
 
@@ -1182,30 +1362,99 @@ class MainApp(ctk.CTk):
         empty_buffer_rpi_btn.pack(side="left", padx=10, fill='x', expand=True)
 
         # Image canvas (replaces CTkLabel to support Region of Interest rectangle overlay
-        self._image_tab_canvas = tk.Canvas(right_frame, bg="#2b2b2b", highlightthickness=0, cursor="crosshair")
+        self._image_tab_canvas = tk.Canvas(right_frame, bg="#2b2b2b", highlightthickness=0, cursor="arrow")
         self._image_tab_canvas.pack(expand=True, fill='both', pady=(20, 5))
         self._image_tab_canvas.create_text(200, 200, text="Image will appear here",
-                                           fill="white", font=("Arial", 14))
+                                           fill="white", font=("Arial", 14),
+                                           tags="placeholder_text")
+        self._image_tab_canvas.bind(
+            "<Configure>",
+            lambda e: self._image_tab_canvas.coords(
+                "placeholder_text", e.width / 2, e.height / 2))
 
-        # ROI measurement control strip
+        # ROI measurement control strip (two rows)
+        self._roi_active_canvas = None   # reset on each Image tab load
         roi_strip = ctk.CTkFrame(right_frame)
         roi_strip.pack(fill='x', padx=10, pady=(0, 10))
 
-        ctk.CTkLabel(roi_strip, text="Ctrl + drag on image to select ROI",
-                     font=("Arial", 11, "italic"), text_color="gray").pack(side="left", padx=(10, 20))
+        # ── Row 1: inputs (left) + Measure Heights (right) ───────────────────────
+        row1 = ctk.CTkFrame(roi_strip)
+        row1.pack(fill='x', padx=5, pady=(5, 2))
 
-        ctk.CTkLabel(roi_strip, text="Measurements X:").pack(side="left", padx=(0, 4))
-        self._roi_spin_x = ctk.CTkEntry(roi_strip, width=55)
-        self._roi_spin_x.insert(0, "5")
-        self._roi_spin_x.pack(side="left", padx=(0, 12))
+        # Measure Heights owns the far-right of row1; packed first to claim space
+        self._measure_heights_btn = ctk.CTkButton(
+            row1, text="Measure Heights", fg_color="#1E6FA8", state="disabled",
+            command=self.execute_custom_measurements)
+        self._measure_heights_btn.pack(side="right", padx=(10, 5))
 
-        ctk.CTkLabel(roi_strip, text="Measurements Y:").pack(side="left", padx=(0, 4))
-        self._roi_spin_y = ctk.CTkEntry(roi_strip, width=55)
-        self._roi_spin_y.insert(0, "5")
-        self._roi_spin_y.pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(row1, text="Ctrl+Drag: Draw  |  Drag Center: Move  |  Drag Corners: Resize",
+                     font=("Arial", 11, "italic"), text_color="gray").pack(side="left", padx=(5, 20))
 
-        ctk.CTkButton(roi_strip, text="Map Height Measurements", fg_color="#7B2FBE",
-                      command=self.confirm_map_measurements).pack(side="right", padx=10)
+        # Points (X × Y)
+        ctk.CTkLabel(row1, text="Points (X × Y):").pack(side="left", padx=(0, 4))
+        self._roi_spin_x = ctk.CTkEntry(row1, width=46)
+        self._roi_spin_x.insert(0, "4")
+        self._roi_spin_x.pack(side="left", padx=(0, 2))
+        ctk.CTkLabel(row1, text="×", font=("Arial", 12)).pack(side="left", padx=(0, 2))
+        self._roi_spin_y = ctk.CTkEntry(row1, width=46)
+        self._roi_spin_y.insert(0, "4")
+        self._roi_spin_y.pack(side="left", padx=(0, 16))
+
+        # Step Size (mm)
+        ctk.CTkLabel(row1, text="Step Size (mm):").pack(side="left", padx=(0, 4))
+        self._roi_cell_x = ctk.CTkEntry(row1, width=64)
+        self._roi_cell_x.insert(0, "0.1000")
+        self._roi_cell_x.pack(side="left", padx=(0, 2))
+        ctk.CTkLabel(row1, text="×", font=("Arial", 12)).pack(side="left", padx=(0, 2))
+        self._roi_cell_y = ctk.CTkEntry(row1, width=64)
+        self._roi_cell_y.insert(0, "0.1000")
+        self._roi_cell_y.pack(side="left", padx=(0, 16))
+
+        # Save As
+        ctk.CTkLabel(row1, text="Save As:").pack(side="left", padx=(0, 4))
+        self._roi_csv_name = ctk.CTkEntry(row1, width=130, placeholder_text="filename.csv")
+        self._roi_csv_name.pack(side="left", padx=(0, 5))
+
+        # ── Row 2: info labels + Clear Points / Map Surface (right) ──────────────
+        row2 = ctk.CTkFrame(roi_strip)
+        row2.pack(fill='x', padx=5, pady=(2, 5))
+
+        self._roi_info_area  = ctk.StringVar(value="Total Area: -- × -- mm")
+        self._roi_info_count = ctk.StringVar(value="Total Points: --")
+        self._roi_info_time  = ctk.StringVar(value="Est. Duration: -- s")
+
+        # Action frame: Clear Points + Map Surface stacked on the far right.
+        # Packed first so it claims the rightmost column; labels fill to the left.
+        _action_frame = ctk.CTkFrame(row2, fg_color="transparent")
+        _action_frame.pack(side="right", padx=(10, 5))
+
+        self._clear_points_btn = ctk.CTkButton(
+            _action_frame, text="Clear Points", fg_color="#555555", state="disabled",
+            command=self._clear_custom_points)
+        self._clear_points_btn.pack(side="top", pady=(0, 2), fill="x")
+
+        self._map_surface_btn = ctk.CTkButton(
+            _action_frame, text="Map Surface", fg_color="#7B2FBE",
+            state="disabled", command=self.start_surface_map)
+        self._map_surface_btn.pack(side="top", pady=0, fill="x")
+
+        ctk.CTkLabel(row2, textvariable=self._roi_info_time,
+                     font=("Arial", 12, "bold"), text_color="orange").pack(side="right", padx=(12, 5))
+
+        ctk.CTkLabel(row2, textvariable=self._roi_info_count,
+                     font=("Arial", 12, "bold"), text_color="#00FF88").pack(side="right", padx=(12, 5))
+
+        ctk.CTkLabel(row2, textvariable=self._roi_info_area).pack(side="right", padx=(12, 5))
+
+        # Analysis result — fixed width prevents frame resize on text change
+        self.analysis_result_var = ctk.StringVar(value="Analysis: Select points...")
+        ctk.CTkLabel(row2, textvariable=self.analysis_result_var,
+                     font=("Arial", 12, "bold"), text_color="#00CFFF",
+                     width=260).pack(side="left", padx=(8, 5))
+
+        # Bind live updates: any keystroke in the dimension entries redraws the grid
+        for _e in (self._roi_spin_x, self._roi_spin_y, self._roi_cell_x, self._roi_cell_y):
+            _e.bind("<KeyRelease>", self._update_roi_from_entries)
 
     def refresh_camera_entries(self):
         """
@@ -1303,7 +1552,9 @@ class MainApp(ctk.CTk):
         """
         Translates image clicks into stage movement
         """
-        if event.state & 0x0004:  # Ctrl held (ROI selection mode and ignore click-to-move)
+        if event.state & 0x0004:  # Ctrl held — ROI draw mode, not a move command
+            return
+        if getattr(self, '_roi_pan_active', False):  # ROI box drag in progress
             return
         if self.module_status != "Idle":
             return
@@ -1358,7 +1609,7 @@ class MainApp(ctk.CTk):
         self.send_goto_command(target_x, target_y, current_z, show_success=False)
 
         self.module_status = "Changing Position"
-        self.status_lockout_time = time.time() + 2.0
+        self.status_lockout_time = time.time() + 0.5
 
         self.sequence_wait_for_move(event.widget)
 
@@ -1385,41 +1636,69 @@ class MainApp(ctk.CTk):
             self._canvas_img_path = image_path
             img_pil = Image.open(image_path)
 
-            canvas.update_idletasks()
-            canvas_w = max(canvas.winfo_width(), 400)
-            canvas_h = max(canvas.winfo_height(), 400)
+            # PIL is open; defer canvas drawing until geometry is ready.
+            def _wait_for_geometry():
+                if not canvas.winfo_exists():
+                    return
+                if canvas.winfo_width() <= 10 or canvas.winfo_height() <= 10:
+                    self.after(50, _wait_for_geometry)
+                    return
 
-            aspect_ratio = img_pil.width / img_pil.height
-            if aspect_ratio > 1:
-                new_width = canvas_w
-                new_height = int(canvas_w / aspect_ratio)
-            else:
-                new_height = canvas_h
-                new_width = int(canvas_h * aspect_ratio)
+                canvas_w = canvas.winfo_width()
+                canvas_h = canvas.winfo_height()
 
-            new_width  = max(new_width, 1)
-            new_height = max(new_height, 1)
+                aspect_ratio = img_pil.width / img_pil.height
+                if aspect_ratio > 1:
+                    new_width  = canvas_w
+                    new_height = int(canvas_w / aspect_ratio)
+                else:
+                    new_height = canvas_h
+                    new_width  = int(canvas_h * aspect_ratio)
 
-            self._canvas_disp_w = new_width
-            self._canvas_disp_h = new_height
-            self._canvas_orig_w = img_pil.width
-            self._canvas_orig_h = img_pil.height
+                new_width  = max(new_width, 1)
+                new_height = max(new_height, 1)
 
-            resized_img = img_pil.resize((new_width, new_height), Image.LANCZOS)
-            self._canvas_img_tk = ImageTk.PhotoImage(resized_img)
+                self._canvas_disp_w = new_width
+                self._canvas_disp_h = new_height
+                self._canvas_orig_w = img_pil.width
+                self._canvas_orig_h = img_pil.height
+                # Capture hardware position so _phys_to_canvas_pixel has a stable
+                # reference even if the stage moves before the next redraw.
+                self._image_tab_ref_x = float(self.x_pos)
+                self._image_tab_ref_y = float(self.y_pos)
 
-            canvas.delete("all")
-            canvas.create_image(canvas_w // 2, canvas_h // 2, anchor="center",
-                                image=self._canvas_img_tk)
+                resized_img = img_pil.resize((new_width, new_height), Image.LANCZOS)
+                self._canvas_img_tk = ImageTk.PhotoImage(resized_img)
 
-            canvas.bind("<Double-Button-1>", lambda e: self.expand_image(image_path))
-            canvas.bind("<Button-1>", lambda e: self.click_to_move(
-                e, new_width, new_height, img_pil.width, img_pil.height))
-            canvas.bind("<Control-ButtonPress-1>",   lambda e: self._roi_press(e, canvas))
-            canvas.bind("<Control-B1-Motion>",        lambda e: self._roi_drag(e, canvas))
-            canvas.bind("<Control-ButtonRelease-1>", lambda e: self._roi_release(e, canvas))
+                canvas.delete("all")
+                canvas.create_image(canvas_w // 2, canvas_h // 2, anchor="center",
+                                    image=self._canvas_img_tk)
 
-            print("Image updated successfully :)")
+                # Redraw any custom measurement points that survived the canvas wipe
+                self._redraw_custom_points_image_tab(canvas, canvas_w, canvas_h)
+
+                canvas.bind("<Double-Button-1>", lambda e: self.expand_image(image_path))
+                # <Button-1> dispatches to pan-drag (if inside ROI box) or click-to-move
+                canvas.bind("<Button-1>",        lambda e: self._roi_or_move_press(
+                    e, canvas, new_width, new_height, img_pil.width, img_pil.height))
+                canvas.bind("<B1-Motion>",        lambda e: self._roi_pan_motion(e, canvas))
+                canvas.bind("<ButtonRelease-1>",  lambda e: self._roi_pan_release(e, canvas))
+                canvas.bind("<Control-ButtonPress-1>",   lambda e: self._roi_press(e, canvas))
+                canvas.bind("<Control-B1-Motion>",        lambda e: self._roi_drag(e, canvas))
+                canvas.bind("<Control-ButtonRelease-1>", lambda e: self._roi_release(e, canvas))
+
+                canvas.bind("<Motion>",               lambda e: self._on_canvas_motion(e, canvas))
+                canvas.bind("<Enter>",                lambda e: canvas.focus_set())
+                canvas.bind("<KeyPress-Control_L>",   lambda e: canvas.configure(cursor="crosshair"))
+                canvas.bind("<KeyPress-Control_R>",   lambda e: canvas.configure(cursor="crosshair"))
+                canvas.bind("<KeyRelease-Control_L>", lambda e: canvas.configure(cursor="arrow"))
+                canvas.bind("<KeyRelease-Control_R>", lambda e: canvas.configure(cursor="arrow"))
+
+                canvas.bind("<Button-3>", lambda e: self._on_right_click_point(e, canvas))
+
+                print("Image updated successfully :)")
+
+            _wait_for_geometry()
 
         except Exception as e:
             print(f"Error displaying image on canvas: {e}")
@@ -1648,25 +1927,36 @@ class MainApp(ctk.CTk):
 
         return canvas_px, canvas_py
 
+    def _safe_btn(self, attr_name, **kw):
+        """Configure a CTk button widget only if it still exists in the widget tree.
+        Prevents TclError when stitched-view buttons are configured after the frame
+        they live in has been destroyed by clear_frame / view switching."""
+        try:
+            w = getattr(self, attr_name, None)
+            if w is not None and w.winfo_exists():
+                w.configure(**kw)
+        except Exception:
+            pass
+
     def _roi_press(self, event, canvas):
-        """Begin ROI rectangle on Ctrl+click."""
+        """Begin a new Ctrl+drag ROI — clears the previous grid."""
         self._roi_drag_start = (event.x, event.y)
-        if self._roi_rect_id is not None:
-            canvas.delete(self._roi_rect_id)
-        self._roi_rect_id = canvas.create_rectangle(
-            event.x, event.y, event.x, event.y,
-            outline="#00FF88", width=2, dash=(6, 3)
-        )
+        canvas.delete("roi_grid")
+        self._roi_active_canvas = canvas
+        canvas.configure(cursor="crosshair")
+        for _ms in ('_map_surface_btn', '_stitch_map_surface_btn'):
+            self._safe_btn(_ms, state="disabled")
 
     def _roi_drag(self, event, canvas):
-        """Resize the ROI rectangle as the user drags."""
-        if self._roi_drag_start is None or self._roi_rect_id is None:
+        """Live-redraw the measurement grid as the user drags."""
+        if self._roi_drag_start is None:
             return
         x0, y0 = self._roi_drag_start
-        canvas.coords(self._roi_rect_id, x0, y0, event.x, event.y)
+        self._roi_redraw_grid(canvas, x0, y0, event.x, event.y)
 
     def _roi_release(self, event, canvas):
-        """Finalise the ROI and compute physical stage bounds in mm."""
+        """Finalise ROI: store normalised canvas coords, compute physical mm bounds,
+        sync the cell-size entries (Canvas → UI), and update info labels."""
         if self._roi_drag_start is None:
             return
 
@@ -1674,49 +1964,1344 @@ class MainApp(ctk.CTk):
         x1, y1 = event.x, event.y
         self._roi_drag_start = None
 
+        # Normalise so x0 < x1, y0 < y1
+        self._roi_canvas_x0 = min(x0, x1)
+        self._roi_canvas_y0 = min(y0, y1)
+        self._roi_canvas_x1 = max(x0, x1)
+        self._roi_canvas_y1 = max(y0, y1)
+
         canvas_w = canvas.winfo_width()
         canvas_h = canvas.winfo_height()
+        px0, py0 = self._canvas_pixel_to_phys(self._roi_canvas_x0, self._roi_canvas_y0, canvas_w, canvas_h)
+        px1, py1 = self._canvas_pixel_to_phys(self._roi_canvas_x1, self._roi_canvas_y1, canvas_w, canvas_h)
 
-        px1, py1 = self._canvas_pixel_to_phys(x0, y0, canvas_w, canvas_h)
-        px2, py2 = self._canvas_pixel_to_phys(x1, y1, canvas_w, canvas_h)
-
-        if px1 is None or px2 is None:
+        if px0 is None or px1 is None:
             print("ROI: display an image first before selecting a region.")
             return
 
-        self.roi_phys_x_start = min(px1, px2)
-        self.roi_phys_x_end   = max(px1, px2)
-        self.roi_phys_y_start = min(py1, py2)
-        self.roi_phys_y_end   = max(py1, py2)
+        self.roi_phys_x_start = min(px0, px1)
+        self.roi_phys_x_end   = max(px0, px1)
+        self.roi_phys_y_start = min(py0, py1)
+        self.roi_phys_y_end   = max(py0, py1)
 
+        # Canvas → UI: update cell-size entries from the dragged physical extent
+        phys_w = self.roi_phys_x_end - self.roi_phys_x_start
+        phys_h = self.roi_phys_y_end - self.roi_phys_y_start
+        try:
+            nx = max(2, int(self._roi_spin_x.get()))
+            ny = max(2, int(self._roi_spin_y.get()))
+        except (ValueError, AttributeError):
+            nx, ny = 4, 4
+        self.map_grid_x = nx
+        self.map_grid_y = ny
+        if hasattr(self, '_roi_cell_x') and nx > 1:
+            self._roi_cell_x.delete(0, "end")
+            self._roi_cell_x.insert(0, f"{phys_w / (nx - 1):.4f}")
+        if hasattr(self, '_roi_cell_y') and ny > 1:
+            self._roi_cell_y.delete(0, "end")
+            self._roi_cell_y.insert(0, f"{phys_h / (ny - 1):.4f}")
+
+        self._roi_redraw_grid(canvas, self._roi_canvas_x0, self._roi_canvas_y0,
+                              self._roi_canvas_x1, self._roi_canvas_y1)
+        self._update_roi_info_labels()
+        self._safe_btn('_map_surface_btn', state="normal")
+        self._safe_btn('_clear_points_btn', state="normal")
         print(f"ROI selected: X=[{self.roi_phys_x_start:.4f}, {self.roi_phys_x_end:.4f}] mm  "
-              f"Y=[{self.roi_phys_y_start:.4f}, {self.roi_phys_y_end:.4f}] mm")
+              f"Y=[{self.roi_phys_y_start:.4f}, {self.roi_phys_y_end:.4f}] mm  "
+              f"Grid={nx}×{ny}")
+        # Ctrl is still held at this point; restore once the key is released.
+        # The <KeyRelease-Control_L/R> binding will set cursor="arrow", and the
+        # next <Motion> event will refine it to the correct zone cursor.
+        canvas.configure(cursor="crosshair")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Custom point-selection (right-click markers)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _draw_custom_pt_marker(self, canvas, cx, cy):
+        """Draw the standard yellow crosshair + red dot at canvas position (cx, cy)."""
+        R = 8
+        canvas.create_line(cx - R, cy, cx + R, cy,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_line(cx, cy - R, cx, cy + R,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
+                           fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
+
+    def _redraw_custom_points_image_tab(self, canvas, canvas_w, canvas_h):
+        """Re-stamp all custom_measure_points and measured_data text on the Image
+        tab canvas after a canvas.delete('all').  Uses _image_tab_ref_x/y as the
+        stable camera-position anchor so the inverse transform is consistent."""
+        if not self.custom_measure_points:
+            return
+        ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
+        ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
+        measured_indices = {i for i, _ in enumerate(self.measured_data)}
+        for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
+            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
+                                                canvas_w, canvas_h)
+            if cx is None:
+                continue
+            self._draw_custom_pt_marker(canvas, cx, cy)
+        # Re-draw height text for any completed measurements
+        for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
+            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
+                                                canvas_w, canvas_h)
+            if cx is None:
+                continue
+            fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
+            canvas.create_text(cx, cy - 15, text=f"{height:.3f} mm",
+                               fill=fill, font=("Arial", 12, "bold"),
+                               tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
+        if self.measured_data:
+            canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
+
+    def _redraw_custom_points_stitched(self, canvas, _s,
+                                       stitched_w, stitched_h,
+                                       grid_x, grid_y,
+                                       scan_origin_x, scan_origin_y):
+        """Re-stamp all custom_measure_points and measured_data text on the
+        stitched canvas after canvas.delete('all').  Uses _s directly so markers
+        remain correct at any zoom/pan level."""
+        if not self.custom_measure_points and not self.measured_data:
+            return
+
+        # Tile-0 centre in full-res stitched pixels (same constants as _render)
+        OVERLAP = 0.20
+        _tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
+        _tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
+        _t0x = _tile_w / 2.0
+        _t0y = (grid_y - 1) * _tile_h * (1.0 - OVERLAP) + _tile_h / 2.0
+        _A11, _A12 = -0.001479,  0.000044
+        _A21, _A22 =  0.000018,  0.001459
+        _det_B = _A11 * _A22 - _A12 * _A21
+
+        def _phys_to_canvas(phys_x, phys_y):
+            dx = phys_x - scan_origin_x
+            dy = phys_y - scan_origin_y
+            d_px = ((-_A22) * dx + _A12 * dy) / _det_B
+            d_py = ( _A21   * dx - _A11 * dy) / _det_B
+            fpx = _t0x + d_px
+            fpy = _t0y + d_py
+            return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
+
+        # Crosshair markers (only for points not yet in measured_data)
+        measured_set = set(range(len(self.measured_data)))
+        for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
+            cx, cy = _phys_to_canvas(phys_x, phys_y)
+            self._draw_custom_pt_marker(canvas, cx, cy)
+
+        # Height text (measured_data is in optimised order; use its own phys coords)
+        for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
+            cx, cy = _phys_to_canvas(phys_x, phys_y)
+            fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
+            canvas.create_text(cx, cy - 15, text=f"{height:.3f} mm",
+                               fill=fill, font=("Arial", 12, "bold"),
+                               tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
+
+        if self.measured_data:
+            canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
+
+    def _on_right_click_point(self, event, canvas):
+        """<Button-3>: drop a measurement marker at the clicked canvas position."""
+        canvas_w = canvas.winfo_width()
+        canvas_h = canvas.winfo_height()
+        phys_x, phys_y = self._canvas_pixel_to_phys(event.x, event.y, canvas_w, canvas_h)
+        if phys_x is None or phys_y is None:
+            return
+
+        self.custom_measure_points.append((phys_x, phys_y))
+        self._roi_active_canvas = canvas   # ensure Clear Points can find this canvas
+
+        # Draw a bright yellow crosshair at the clicked position
+        R = 8
+        canvas.create_line(event.x - R, event.y, event.x + R, event.y,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_line(event.x, event.y - R, event.x, event.y + R,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_oval(event.x - 3, event.y - 3, event.x + 3, event.y + 3,
+                           fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
+
+        self._safe_btn('_measure_heights_btn', state="normal")
+        self._safe_btn('_clear_points_btn', state="normal")
+
+        print(f"[custom_pt] point {len(self.custom_measure_points)}: "
+              f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
+
+    def _on_stitched_right_click_point(self, event, canvas, _s,
+                                       stitched_w, stitched_h,
+                                       grid_x, grid_y,
+                                       scan_origin_x, scan_origin_y):
+        """<ButtonRelease-3> handler for the stitched canvas.
+
+        Drops a custom measurement marker only when the release follows a clean
+        right-click (no significant pan drag).  Converts canvas pixels → full
+        stitched-image pixels → physical mm using the standard helper.
+        """
+        # Ignore if the user was panning (drag threshold = 5 px)
+        start_x = getattr(canvas, '_pan_start_x', event.x)
+        start_y = getattr(canvas, '_pan_start_y', event.y)
+        if abs(event.x - start_x) > 5 or abs(event.y - start_y) > 5:
+            return
+
+        # Canvas px → full-res stitched px → physical mm
+        full_px = (event.x - _s['ox']) / _s['sx']
+        full_py = (event.y - _s['oy']) / _s['sy']
+        phys_x, phys_y = self.calculate_stitched_phys_coords(
+            full_px, full_py,
+            stitched_w, stitched_h,
+            grid_x, grid_y,
+            scan_origin_x, scan_origin_y,
+        )
+
+        self.custom_measure_points.append((phys_x, phys_y))
+        self._roi_active_canvas = canvas
+
+        # Draw yellow crosshair marker at the canvas click position
+        R = 8
+        canvas.create_line(event.x - R, event.y, event.x + R, event.y,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_line(event.x, event.y - R, event.x, event.y + R,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_oval(event.x - 3, event.y - 3, event.x + 3, event.y + 3,
+                           fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
+
+        # Enable action buttons
+        for btn_name in ('_stitch_measure_heights_btn', '_stitch_clear_points_btn',
+                         '_measure_heights_btn', '_clear_points_btn'):
+            self._safe_btn(btn_name, state="normal")
+
+        print(f"[custom_pt/stitched] point {len(self.custom_measure_points)}: "
+              f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
+
+    def _clear_custom_points(self):
+        """Universal canvas clear: wipes right-click measurement points AND the
+        Ctrl+Drag ROI grid, resetting all related state and UI to neutral."""
+        # ── Measurement point state ───────────────────────────────────────────
+        self.custom_measure_points.clear()
+        self.measured_data.clear()
+        self.analysis_selected_indices.clear()
+        if hasattr(self, 'analysis_result_var'):
+            self.analysis_result_var.set("Analysis: Select points...")
+
+        # ── ROI grid state ────────────────────────────────────────────────────
+        self.roi_phys_x_start = None
+        self.roi_phys_x_end   = None
+        self.roi_phys_y_start = None
+        self.roi_phys_y_end   = None
+        self._roi_canvas_x0 = 0.0
+        self._roi_canvas_y0 = 0.0
+        self._roi_canvas_x1 = 0.0
+        self._roi_canvas_y1 = 0.0
+
+        # ── Canvas visuals ────────────────────────────────────────────────────
+        if self._roi_active_canvas is not None:
+            self._roi_active_canvas.tag_unbind("measurement_text", "<Button-1>")
+            self._roi_active_canvas.delete("custom_pt")
+            self._roi_active_canvas.delete("roi_grid")
+
+        # ── Info label readouts → neutral dashes ─────────────────────────────
+        for _var, _val in (
+            ('_roi_info_area',        "Total Area: -- × -- mm"),
+            ('_roi_info_count',       "Total Points: --"),
+            ('_roi_info_time',        "Est. Duration: -- s"),
+            ('_stitch_roi_info_area', "Total Area: -- × -- mm"),
+            ('_stitch_roi_info_count',"Total Points: --"),
+            ('_stitch_roi_info_time', "Est. Duration: -- s"),
+        ):
+            if hasattr(self, _var):
+                getattr(self, _var).set(_val)
+
+        # ── Button state: lock everything back to neutral ─────────────────────
+        for btn_name in ('_measure_heights_btn', '_clear_points_btn',
+                         '_map_surface_btn',
+                         '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
+                         '_stitch_map_surface_btn'):
+            self._safe_btn(btn_name, state="disabled")
+
+        print("[clear] measurement points and ROI grid cleared")
+
+    def _toggle_analysis_point(self, event):
+        """Toggle selection of a measured point label; update the analysis readout."""
+        canvas = self._roi_active_canvas
+        if canvas is None or not self.measured_data:
+            return
+
+        # Identify which canvas item was clicked and extract its meas_idx_N tag
+        item = canvas.find_withtag("current")
+        if not item:
+            return
+        item_id = item[0]
+        idx = None
+        for tag in canvas.gettags(item_id):
+            if tag.startswith("meas_idx_"):
+                idx = int(tag[len("meas_idx_"):])
+                break
+        if idx is None:
+            return
+
+        # Toggle selection state and recolour the text label
+        if idx in self.analysis_selected_indices:
+            self.analysis_selected_indices.remove(idx)
+            canvas.itemconfigure(item_id, fill="cyan")
+        else:
+            self.analysis_selected_indices.append(idx)
+            canvas.itemconfigure(item_id, fill="#00FF44")
+
+        # Update the analysis readout label
+        sel = self.analysis_selected_indices
+        n_sel = len(sel)
+        if n_sel == 0:
+            text = "Analysis: Select points..."
+        elif n_sel == 1:
+            h = self.measured_data[sel[0]][2]
+            text = f"Height: {h:.4f} mm"
+        elif n_sel == 2:
+            h1 = self.measured_data[sel[0]][2]
+            h2 = self.measured_data[sel[1]][2]
+            text = f"Delta Z: {abs(h1 - h2):.4f} mm"
+        else:
+            text = f"{n_sel} Points Selected (Plane Gen WIP)"
+
+        if hasattr(self, 'analysis_result_var'):
+            self.analysis_result_var.set(text)
+
+        return "break"   # stop event propagating to the canvas click-to-move binding
+
+    def execute_custom_measurements(self):
+        """Sort captured points via nearest-neighbour, apply confocal offset, then
+        kick off the non-blocking .after() measurement sequence."""
+        if not self.custom_measure_points:
+            messagebox.showwarning("No Points", "Right-click the image to add measurement points first.")
+            return
+
+        # ── Save camera assembly origin before any movement ───────────────────
+        # Must be captured here, before the confocal offset shifts the targets.
+        self._sequence_origin_x = float(self.x_pos)
+        self._sequence_origin_y = float(self.y_pos)
+
+        # ── Nearest-neighbour path optimisation ───────────────────────────────
+        current_x = float(self.x_pos)
+        current_y = float(self.y_pos)
+        unvisited = list(self.custom_measure_points)
+        optimized_route = []
+
+        while unvisited:
+            nearest = min(unvisited,
+                          key=lambda p: (p[0] - current_x) ** 2 + (p[1] - current_y) ** 2)
+            unvisited.remove(nearest)
+            optimized_route.append(nearest)
+            current_x, current_y = nearest
+
+        # ── Apply confocal-camera offset to every target point ────────────────
+        # The confocal sensor is offset from the camera by this fixed amount.
+        CONFOCAL_DX = -1.418137875
+        CONFOCAL_DY = -72.258765875
+        offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in optimized_route]
+
+        print(f"[execute_custom_measurements] {len(offset_route)} point(s) — nearest-neighbour order (confocal offset applied):")
+        for i, (x, y) in enumerate(offset_route, 1):
+            print(f"  {i:>3}. ({x:.4f} mm, {y:.4f} mm)")
+
+        # ── Pre-flight: confirm all confocal targets are within stage bounds ──
+        # Loop through every offset point; abort on the first violation so the
+        # error message references a single concrete bad coordinate.
+        for target_x, target_y in offset_route:
+            if target_x < 0 or target_y < 0:
+                messagebox.showerror(
+                    "Cannot Reach Sample",
+                    f"Cannot Reach Sample: Point requires stage to move to "
+                    f"Y = {target_y:.2f} mm, which is past the module's limit (0 mm).\n\n"
+                    f"Please manually unmount and shift your sample at least "
+                    f"{abs(target_y) + 1.0:.2f} mm further away from the limit."
+                )
+                return
+
+        # Disable action buttons on both tabs for the duration of the sequence
+        for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
+                     '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
+                     '_stitch_map_surface_btn'):
+            self._safe_btn(_btn, state="disabled")
+
+        # Preserve optimised order so _process_measurement_results can pair
+        # each height with the correct physical coordinate.
+        self._optimized_route = optimized_route
+
+        self._sequence_measure_point(offset_route, 0, [])
+
+    def _sequence_measure_point(self, route, index, results):
+        """Non-blocking dispatcher: move to route[index] when the stage is Idle,
+        then hand off to the arrival-wait sub-sequence."""
+        if index >= len(route):
+            self._process_measurement_results(results)
+            return
+
+        if self.module_status != "Idle":
+            self.after(500, lambda: self._sequence_measure_point(route, index, results))
+            return
+
+        target_x, target_y = route[index]
+
+        if target_x < 0 or target_y < 0 or float(self.z_pos) < 0:
+            print(f"[sequence] ERROR: point {index + 1} ({target_x:.4f}, {target_y:.4f}) "
+                  f"out of range — aborting sequence")
+            messagebox.showerror(
+                "Sequence Aborted",
+                f"Point {index + 1}/{len(route)} ({target_x:.4f}, {target_y:.4f} mm) "
+                f"is out of stage range.\nSequence aborted."
+            )
+            self._sequence_unlock_buttons()
+            return
+
+        print(f"[sequence] moving to point {index + 1}/{len(route)}: ({target_x:.4f}, {target_y:.4f}) mm")
+        self.send_goto_command(target_x, target_y, float(self.z_pos), show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+
+        self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
+
+    def _sequence_wait_then_measure(self, route, index, results):
+        """Poll until the stage reaches Idle (move complete), then simulate a
+        measurement dwell before recording the (dummy) height."""
+        if self.module_status != "Idle":
+            self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
+            return
+
+        print(f"[sequence] stage idle — simulating measurement dwell at point {index + 1}/{len(route)}")
+        # No hardware measurement command is sent while in simulation mode.
+        # A 500 ms delay simulates sensor dwell time before reading back the value.
+        self.after(500, lambda: self._sequence_record_height(route, index, results))
+
+    def _sequence_record_height(self, route, index, results):
+        """Record the (dummy) height reading and advance to the next point."""
+        dummy_height = 0.0  # TODO: replace with actual confocal sensor readback
+        results.append(dummy_height)
+        print(f"[sequence] point {index + 1}/{len(route)}: height = {dummy_height:.4f} mm (placeholder)")
+        self._sequence_measure_point(route, index + 1, results)
+
+    def _phys_to_canvas_pixel(self, phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h):
+        """Inverse of _canvas_pixel_to_phys: map physical mm coords back to canvas pixels.
+        ref_x/ref_y must be the camera assembly position when the image was displayed."""
+        if self._canvas_disp_w == 0 or self._canvas_orig_w == 0:
+            return None, None
+        A11, A12 = -0.001479,  0.000044
+        A21, A22 =  0.000018,  0.001459
+        det = A11 * A22 - A12 * A21
+        dp_x = phys_x - ref_x
+        dp_y = phys_y - ref_y
+        delta_i = ( A22 * dp_x - A12 * dp_y) / det
+        delta_j = (-A21 * dp_x + A11 * dp_y) / det
+        sensor_x = self._canvas_orig_w / 2.0 - delta_i
+        sensor_y = self._canvas_orig_h / 2.0 - delta_j
+        x_offset = (canvas_w - self._canvas_disp_w) / 2.0
+        y_offset = (canvas_h - self._canvas_disp_h) / 2.0
+        canvas_px = sensor_x * (self._canvas_disp_w / self._canvas_orig_w) + x_offset
+        canvas_py = sensor_y * (self._canvas_disp_h / self._canvas_orig_h) + y_offset
+        return canvas_px, canvas_py
+
+    def _process_measurement_results(self, results):
+        """Draw height labels on the canvas, enter analysis mode, then return to origin."""
+        print(f"[sequence] all {len(results)} measurement(s) complete: {results}")
+
+        # Use the optimised order (same order results were collected in) so
+        # each height is paired with the correct physical coordinate.
+        ordered_points = getattr(self, '_optimized_route', self.custom_measure_points)
+
+        # ── Persist measurement data for analysis mode ────────────────────────
+        self.measured_data = [(px, py, h) for (px, py), h in zip(ordered_points, results)]
+        self.analysis_selected_indices = []
+        if hasattr(self, 'analysis_result_var'):
+            self.analysis_result_var.set("Analysis: Select points...")
+
+        # ── Draw height values directly above each marker on the canvas ───────
+        canvas = self._roi_active_canvas
+        if canvas is not None:
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+
+            # Determine whether the active canvas is the stitched view or the
+            # standard Image tab, and pick the matching inverse-transform path.
+            is_stitched = (self.active_main_view == "stitched")
+
+            for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
+                if is_stitched:
+                    # Use stitched-image coordinate helper (zoom/pan-aware via _s
+                    # was already applied at click time; use stored scan geometry).
+                    grid_x  = getattr(self, 'scanning_grid_x', 1)
+                    grid_y  = getattr(self, 'scanning_grid_y', 1)
+                    step_x  = self.scanning_data.get('step_x', 1.0)
+                    step_y  = self.scanning_data.get('step_y', 1.0)
+                    scan_end_x   = getattr(self, 'scan_end_x', 0.0)
+                    scan_end_y   = getattr(self, 'scan_end_y', 0.0)
+                    scan_origin_x = scan_end_x - (grid_x - 1) * step_x
+                    scan_origin_y = scan_end_y - (grid_y - 1) * step_y
+                    stitched_w = getattr(self, '_stitch_img_w', cw)
+                    stitched_h = getattr(self, '_stitch_img_h', ch)
+                    cx, cy = self.calculate_phys_to_stitched_pixel_coords(
+                        phys_x, phys_y,
+                        stitched_w, stitched_h,
+                        grid_x, grid_y,
+                        scan_origin_x, scan_origin_y,
+                        cw, ch,
+                    )
+                else:
+                    if self._canvas_disp_w == 0:
+                        continue
+                    ref_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
+                    ref_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
+                    cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
+
+                if cx is not None:
+                    canvas.create_text(
+                        cx, cy - 15,
+                        text=f"{height:.3f} mm",
+                        fill="cyan", font=("Arial", 12, "bold"),
+                        tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
+
+            # Bind left-click on text labels to toggle analysis selection
+            canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
+
+        # ── Return camera assembly to its pre-sequence position ───────────────
+        origin_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
+        origin_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
+        print(f"[sequence] returning to origin ({origin_x:.4f}, {origin_y:.4f}) mm")
+        self.send_goto_command(origin_x, origin_y, float(self.z_pos), show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+
+        self.after(500, self._sequence_unlock_buttons)
+
+    def _sequence_unlock_buttons(self):
+        """Poll until the return-to-origin move finishes, then re-enable all
+        three action buttons."""
+        if self.module_status != "Idle":
+            self.after(500, self._sequence_unlock_buttons)
+            return
+
+        print("[sequence] origin reached — unlocking action buttons")
+        # Re-enable whichever tab's buttons are currently in the widget tree
+        for btn_name in ('_measure_heights_btn', '_stitch_measure_heights_btn',
+                         '_clear_points_btn', '_stitch_clear_points_btn'):
+            self._safe_btn(btn_name, state="normal")
+        # Map Surface re-enables only if the grid is still valid
+        if self.roi_phys_x_start is not None:
+            for ms_btn in ('_map_surface_btn', '_stitch_map_surface_btn'):
+                self._safe_btn(ms_btn, state="normal")
 
     def confirm_map_measurements(self):
-        """Lock in ROI bounds and grid counts, then print a verification placeholder."""
+        """Legacy shim — delegates to start_surface_map."""
+        self.start_surface_map()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # ROI Grid helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _roi_redraw_grid(self, canvas, x0, y0, x1, y1):
+        """Erase and redraw the measurement grid on *canvas* between (x0,y0)–(x1,y1).
+
+        map_grid_x × map_grid_y = total measurement points (lines incl. border).
+        4 × 4 → 3 × 3 cell grid → 16 measurement dots.
+
+        Visual elements (all tagged "roi_grid"):
+          • Dashed grid lines (outer border + internal)
+          • Cyan filled dot at every measurement intersection
+          • Gold corner handles marking the 4 resize grab points
+        """
+        canvas.delete("roi_grid")
+        nx = max(2, self.map_grid_x)
+        ny = max(2, self.map_grid_y)
+
+        DOT_R    = 3   # radius of measurement intersection dots (px)
+        HANDLE_R = 7   # radius of corner drag handles (px)
+
+        # ── Grid lines ────────────────────────────────────────────────────────
+        # Outer border
+        canvas.create_rectangle(x0, y0, x1, y1,
+                                 outline="#00FF88", width=2, dash=(6, 3),
+                                 tags="roi_grid")
+        # Internal vertical lines
+        for i in range(1, nx - 1):
+            xv = x0 + i * (x1 - x0) / (nx - 1)
+            canvas.create_line(xv, y0, xv, y1,
+                                fill="#00FF88", width=1, dash=(4, 3),
+                                tags="roi_grid")
+        # Internal horizontal lines
+        for j in range(1, ny - 1):
+            yh = y0 + j * (y1 - y0) / (ny - 1)
+            canvas.create_line(x0, yh, x1, yh,
+                                fill="#00FF88", width=1, dash=(4, 3),
+                                tags="roi_grid")
+
+        # ── Measurement dots at every intersection ────────────────────────────
+        for i in range(nx):
+            xi = x0 + i * (x1 - x0) / (nx - 1)
+            for j in range(ny):
+                yj = y0 + j * (y1 - y0) / (ny - 1)
+                canvas.create_oval(xi - DOT_R, yj - DOT_R,
+                                    xi + DOT_R, yj + DOT_R,
+                                    fill="#00FF88", outline="",
+                                    tags="roi_grid")
+
+        # ── Corner handles (drawn last so they sit on top) ────────────────────
+        for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
+            canvas.create_oval(cx - HANDLE_R, cy - HANDLE_R,
+                                cx + HANDLE_R, cy + HANDLE_R,
+                                fill="#FFD700", outline="#FFFFFF", width=1,
+                                tags="roi_grid")
+
+    def _phys_dist_to_canvas_px(self, phys_dx_mm, phys_dy_mm):
+        """Convert a physical distance (mm) to canvas-pixel distances.
+
+        Inverts the scale relationship used in _canvas_pixel_to_phys:
+            canvas_px_delta = phys_mm_delta * (disp_px / orig_px) / SCALE_mm_per_sensor_px
+        """
+        if self._canvas_disp_w == 0 or self._canvas_orig_w == 0:
+            return 0.0, 0.0
+        SCALE_X = 0.001479   # mm per sensor pixel (|A11|)
+        SCALE_Y = 0.001459   # mm per sensor pixel (|A22|)
+        dcx = abs(phys_dx_mm) / SCALE_X * (self._canvas_disp_w / self._canvas_orig_w)
+        dcy = abs(phys_dy_mm) / SCALE_Y * (self._canvas_disp_h / self._canvas_orig_h)
+        return dcx, dcy
+
+    def _update_roi_info_labels(self):
+        """Recompute and refresh the calculated output labels in the ROI strip."""
+        if not hasattr(self, '_roi_info_count'):
+            return
         try:
-            grid_x = int(self._roi_spin_x.get())
-            grid_y = int(self._roi_spin_y.get())
+            nx     = max(2, int(self._roi_spin_x.get()))
+            ny     = max(2, int(self._roi_spin_y.get()))
+            cell_x = float(self._roi_cell_x.get())
+            cell_y = float(self._roi_cell_y.get())
         except (ValueError, AttributeError):
-            messagebox.showerror("Invalid Input", "Measurement counts must be positive integers.")
+            return
+        total  = nx * ny
+        area_x = cell_x * (nx - 1)
+        area_y = cell_y * (ny - 1)
+        est_s  = total * 4
+        self._roi_info_area.set(f"Total Area: {area_x:.3f} × {area_y:.3f} mm")
+        self._roi_info_count.set(f"Total Points: {total}")
+        self._roi_info_time.set(f"Est. Duration: ~{est_s} s")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # ROI pan-drag (reposition box without Ctrl)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _roi_or_move_press(self, event, canvas, img_disp_w, img_disp_h, orig_img_w, orig_img_h):
+        """<Button-1> three-way dispatcher.
+
+        Priority (checked in order):
+          0. Click on an analysis marker / label → ignore (let tag_bind handle it).
+          1. Click within CORNER_R of a corner handle → resize mode.
+          2. Click inside the grid box → move mode.
+          3. Click outside → fall through to click_to_move (hardware command).
+        """
+        # Guard: if the click landed on a measured-point marker or label, do nothing.
+        # _toggle_analysis_point (tag_bind) owns that event and returns "break".
+        current_items = canvas.find_withtag("current")
+        if current_items:
+            item_tags = canvas.gettags(current_items[0])
+            if "custom_pt" in item_tags or "measurement_text" in item_tags:
+                return
+
+        has_roi = (
+            self._roi_active_canvas is canvas
+            and self._roi_canvas_x0 < self._roi_canvas_x1
+        )
+
+        if has_roi:
+            CORNER_R = 10   # hit-test radius for corner handles (canvas px)
+
+            x0, y0 = self._roi_canvas_x0, self._roi_canvas_y0
+            x1, y1 = self._roi_canvas_x1, self._roi_canvas_y1
+
+            corners = {
+                "nw": (x0, y0),
+                "ne": (x1, y0),
+                "sw": (x0, y1),
+                "se": (x1, y1),
+            }
+            opposite = {"nw": "se", "ne": "sw", "sw": "ne", "se": "nw"}
+
+            # ── 1. Corner hit-test → resize mode ─────────────────────────────
+            for name, (cx, cy) in corners.items():
+                if abs(event.x - cx) <= CORNER_R and abs(event.y - cy) <= CORNER_R:
+                    self._roi_mode          = "resize"
+                    self._roi_drag_corner   = name
+                    self._roi_resize_anchor = corners[opposite[name]]
+                    self._roi_pan_active    = True
+                    canvas.configure(cursor="hand2")   # clenched — actively grabbing
+                    return
+
+            # ── 2. Inside box → move mode ─────────────────────────────────────
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                self._roi_mode       = "move"
+                self._roi_pan_active = True
+                self._roi_pan_start  = (event.x, event.y)
+                canvas.configure(cursor="fleur")       # 4-way — actively moving
+                return
+
+        # ── 3. Outside / no ROI → hardware click-to-move ─────────────────────
+        self._roi_mode       = "none"
+        self._roi_pan_active = False
+        self.click_to_move(event, img_disp_w, img_disp_h, orig_img_w, orig_img_h)
+
+    def _roi_pan_motion(self, event, canvas):
+        """<B1-Motion>: translate (move mode) or snap-resize (resize mode) the grid.
+
+        Move mode:  Box translates rigidly — cell sizes and measurement counts
+                    stay unchanged.
+
+        Resize mode: The fixed anchor corner is held in place.  The dragged
+                     corner snaps to the nearest whole-cell boundary so that the
+                     physical cell size never changes.  Measurement counts update
+                     live in the bottom-menu entries.
+        """
+        if not self._roi_pan_active:
             return
 
-        if grid_x <= 0 or grid_y <= 0:
-            messagebox.showerror("Invalid Input", "Measurement counts must be positive integers.")
+        # ── MOVE ─────────────────────────────────────────────────────────────
+        if self._roi_mode == "move":
+            if self._roi_pan_start is None:
+                return
+            canvas.configure(cursor="fleur")
+            dx = event.x - self._roi_pan_start[0]
+            dy = event.y - self._roi_pan_start[1]
+            self._roi_pan_start = (event.x, event.y)
+            self._roi_canvas_x0 += dx
+            self._roi_canvas_y0 += dy
+            self._roi_canvas_x1 += dx
+            self._roi_canvas_y1 += dy
+            self._roi_redraw_grid(canvas,
+                                  self._roi_canvas_x0, self._roi_canvas_y0,
+                                  self._roi_canvas_x1, self._roi_canvas_y1)
             return
 
+        # ── RESIZE ───────────────────────────────────────────────────────────
+        if self._roi_mode != "resize":
+            return
+        if self._roi_resize_anchor is None:
+            return
+        if self._canvas_disp_w == 0 or self._canvas_orig_w == 0:
+            return
+
+        try:
+            cell_x = float(self._roi_cell_x.get())
+            cell_y = float(self._roi_cell_y.get())
+        except (ValueError, AttributeError):
+            return
+        if cell_x <= 0 or cell_y <= 0:
+            return
+
+        canvas.configure(cursor="hand2")   # keep clenched hand throughout resize drag
+        # ── Step 1: fixed canvas-pixel pitch per cell ─────────────────────────
+        # Derived directly from the locked cell sizes via the A11/A22 scale
+        # factors (mm per sensor pixel).  Computing this once in pixel space
+        # avoids any canvas-px → mm → canvas-px double-conversion drift.
+        SCALE_X = 0.001479   # |A11|: mm per sensor pixel
+        SCALE_Y = 0.001459   # |A22|: mm per sensor pixel
+        px_per_cell_x = cell_x / SCALE_X * (self._canvas_disp_w / self._canvas_orig_w)
+        px_per_cell_y = cell_y / SCALE_Y * (self._canvas_disp_h / self._canvas_orig_h)
+
+        # ── Step 2: raw pixel delta from fixed anchor corner to cursor ─────────
+        anchor_x, anchor_y = self._roi_resize_anchor
+        raw_px = abs(event.x - anchor_x)
+        raw_py = abs(event.y - anchor_y)
+
+        # ── Step 3: discretise — snap to nearest whole-cell count ─────────────
+        cols = max(1, round(raw_px / px_per_cell_x))
+        rows = max(1, round(raw_py / px_per_cell_y))
+        nx   = cols + 1
+        ny   = rows + 1
+
+        # ── Step 4: force the bounding box to exact integer-cell multiples ─────
+        # The dragged corner lands at anchor ± cols*px_per_cell, NOT at the raw
+        # cursor position.  This guarantees every cell is exactly px_per_cell
+        # wide/tall with no fractional remainder.
+        sign_x    = +1 if event.x >= anchor_x else -1
+        sign_y    = +1 if event.y >= anchor_y else -1
+        snapped_x = anchor_x + sign_x * cols * px_per_cell_x
+        snapped_y = anchor_y + sign_y * rows * px_per_cell_y
+
+        self._roi_canvas_x0 = min(anchor_x, snapped_x)
+        self._roi_canvas_y0 = min(anchor_y, snapped_y)
+        self._roi_canvas_x1 = max(anchor_x, snapped_x)
+        self._roi_canvas_y1 = max(anchor_y, snapped_y)
+        self.map_grid_x = nx
+        self.map_grid_y = ny
+
+        # Live-update measurement count entries (cell-size entries stay locked)
+        self._roi_spin_x.delete(0, "end")
+        self._roi_spin_x.insert(0, str(nx))
+        self._roi_spin_y.delete(0, "end")
+        self._roi_spin_y.insert(0, str(ny))
+
+        self._roi_redraw_grid(canvas,
+                              self._roi_canvas_x0, self._roi_canvas_y0,
+                              self._roi_canvas_x1, self._roi_canvas_y1)
+        self._update_roi_info_labels()
+
+    def _roi_pan_release(self, event, canvas):
+        """<ButtonRelease-1>: finalise a move or resize drag.
+
+        Move mode:   Only the position changed — cell sizes are locked, so we
+                     simply update the physical origin/end without touching
+                     the cell-size entries.
+
+        Resize mode: The measurement counts were already updated live during
+                     motion.  Cell sizes remain locked (never touched here).
+                     We just commit the final physical bounds.
+        """
+        if not self._roi_pan_active:
+            return
+
+        # Capture mode before clearing state
+        mode = self._roi_mode
+
+        # Clear all drag state
+        self._roi_pan_active    = False
+        self._roi_pan_start     = None
+        self._roi_mode          = "none"
+        self._roi_drag_corner   = None
+        self._roi_resize_anchor = None
+
+        # Recompute physical bounds from the final canvas coords
+        canvas_w = canvas.winfo_width()
+        canvas_h = canvas.winfo_height()
+        px0, py0 = self._canvas_pixel_to_phys(
+            self._roi_canvas_x0, self._roi_canvas_y0, canvas_w, canvas_h)
+        px1, py1 = self._canvas_pixel_to_phys(
+            self._roi_canvas_x1, self._roi_canvas_y1, canvas_w, canvas_h)
+        if px0 is None or px1 is None:
+            return
+
+        self.roi_phys_x_start = min(px0, px1)
+        self.roi_phys_x_end   = max(px0, px1)
+        self.roi_phys_y_start = min(py0, py1)
+        self.roi_phys_y_end   = max(py0, py1)
+
+        # Move mode only: cell sizes are locked, but recompute from physical
+        # extent so minor floating-point drift doesn't accumulate over many drags.
+        if mode == "move" and self.map_grid_x > 1 and self.map_grid_y > 1:
+            phys_w = self.roi_phys_x_end - self.roi_phys_x_start
+            phys_h = self.roi_phys_y_end - self.roi_phys_y_start
+            if hasattr(self, '_roi_cell_x'):
+                self._roi_cell_x.delete(0, "end")
+                self._roi_cell_x.insert(0, f"{phys_w / (self.map_grid_x - 1):.4f}")
+            if hasattr(self, '_roi_cell_y'):
+                self._roi_cell_y.delete(0, "end")
+                self._roi_cell_y.insert(0, f"{phys_h / (self.map_grid_y - 1):.4f}")
+
+        # Resize mode: meas count entries were updated live; cell-size entries
+        # are intentionally left unchanged (cell sizes are strictly locked).
+
+        self._update_roi_info_labels()
+
+        # Restore contextual cursor: run the hover-zone logic at the release point
+        # so the cursor never gets stuck as hand2 / fleur after a drag ends.
+        self._on_canvas_motion(event, canvas)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Contextual cursor
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _on_canvas_motion(self, event, canvas):
+        """<Motion> handler: update the canvas cursor based on hover zone.
+
+        Zone priority (checked in order):
+          0. Ctrl held (event.state bit 2) → "crosshair"  (drawing mode)
+          1. Within CORNER_R of a corner handle → "hand1"  (open grab)
+          2. Inside the grid bounding box     → "fleur"   (4-way move)
+          3. Outside / no ROI                → "arrow"   (default)
+
+        Also called explicitly from _roi_pan_release so the cursor is never
+        left stuck in "hand2" or "fleur" after a drag completes.
+        """
+        # 0. Ctrl held → crosshair regardless of position
+        if event.state & 0x0004:
+            canvas.configure(cursor="crosshair")
+            return
+
+        # No active ROI on this canvas → plain arrow
+        if (self._roi_active_canvas is not canvas
+                or self._roi_canvas_x0 >= self._roi_canvas_x1):
+            canvas.configure(cursor="arrow")
+            return
+
+        CORNER_R = 10   # must match the hit-radius used in _roi_or_move_press
+        x0, y0 = self._roi_canvas_x0, self._roi_canvas_y0
+        x1, y1 = self._roi_canvas_x1, self._roi_canvas_y1
+        mx, my = event.x, event.y
+
+        # 1. Corner handles → open hand
+        for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
+            if abs(mx - cx) <= CORNER_R and abs(my - cy) <= CORNER_R:
+                canvas.configure(cursor="hand1")
+                return
+
+        # 2. Inside box → 4-way move
+        if x0 <= mx <= x1 and y0 <= my <= y1:
+            canvas.configure(cursor="fleur")
+            return
+
+        # 3. Outside → default arrow
+        canvas.configure(cursor="arrow")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # UI → Canvas sync (entry edits resize / recount the grid)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _update_roi_from_entries(self, event=None):
+        """Called on <KeyRelease> in any dimension entry.
+
+        Parses the current measurement counts and cell sizes, resizes the canvas
+        grid (keeping the top-left corner fixed), recomputes physical bounds, and
+        refreshes the info labels.
+        """
+        self._update_roi_info_labels()   # always refresh labels even if no canvas ROI
+
+        if self._roi_active_canvas is None:
+            return
+        try:
+            nx     = max(2, int(self._roi_spin_x.get()))
+            ny     = max(2, int(self._roi_spin_y.get()))
+            cell_x = float(self._roi_cell_x.get())
+            cell_y = float(self._roi_cell_y.get())
+        except (ValueError, AttributeError):
+            return
+        if cell_x <= 0 or cell_y <= 0:
+            return
+
+        self.map_grid_x = nx
+        self.map_grid_y = ny
+
+        # UI → Canvas: total physical extent → canvas pixel dimensions
+        total_phys_x = cell_x * (nx - 1)
+        total_phys_y = cell_y * (ny - 1)
+        dcx, dcy = self._phys_dist_to_canvas_px(total_phys_x, total_phys_y)
+
+        # Keep top-left corner fixed; stretch bottom-right
+        self._roi_canvas_x1 = self._roi_canvas_x0 + dcx
+        self._roi_canvas_y1 = self._roi_canvas_y0 + dcy
+
+        self._roi_redraw_grid(self._roi_active_canvas,
+                              self._roi_canvas_x0, self._roi_canvas_y0,
+                              self._roi_canvas_x1, self._roi_canvas_y1)
+
+        # Update physical bounds to match new dimensions
+        canvas   = self._roi_active_canvas
+        canvas_w = canvas.winfo_width()
+        canvas_h = canvas.winfo_height()
+        px0, py0 = self._canvas_pixel_to_phys(self._roi_canvas_x0, self._roi_canvas_y0, canvas_w, canvas_h)
+        px1, py1 = self._canvas_pixel_to_phys(self._roi_canvas_x1, self._roi_canvas_y1, canvas_w, canvas_h)
+        if px0 is not None:
+            self.roi_phys_x_start = min(px0, px1)
+            self.roi_phys_x_end   = max(px0, px1)
+            self.roi_phys_y_start = min(py0, py1)
+            self.roi_phys_y_end   = max(py0, py1)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Stitched-view ROI — coord math uses calculate_stitched_phys_coords
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _update_stitched_roi_info_labels(self):
+        """Refresh the calculated output labels in the stitched-view ROI strip."""
+        if not hasattr(self, '_stitch_roi_info_count'):
+            return
+        try:
+            nx     = max(2, int(self._stitch_roi_spin_x.get()))
+            ny     = max(2, int(self._stitch_roi_spin_y.get()))
+            cell_x = float(self._stitch_roi_cell_x.get())
+            cell_y = float(self._stitch_roi_cell_y.get())
+        except (ValueError, AttributeError):
+            return
+        total  = nx * ny
+        area_x = cell_x * (nx - 1)
+        area_y = cell_y * (ny - 1)
+        self._stitch_roi_info_area.set(f"Total Area: {area_x:.3f} × {area_y:.3f} mm")
+        self._stitch_roi_info_count.set(f"Total Points: {total}")
+        self._stitch_roi_info_time.set(f"Est. Duration: ~{total * 4} s")
+
+    def _roi_release_stitched(self, event, canvas, _s,
+                               stitched_w, stitched_h,
+                               grid_x, grid_y, scan_origin_x, scan_origin_y):
+        """Finalise Ctrl+drag ROI on the stitched canvas.
+
+        Converts canvas pixels → full-res stitched pixels → physical mm using
+        the stitched-image mapping; never calls _canvas_pixel_to_phys.
+        """
+        if self._roi_drag_start is None:
+            return
+        x0, y0 = self._roi_drag_start
+        x1, y1 = event.x, event.y
+        self._roi_drag_start = None
+
+        self._roi_canvas_x0 = min(x0, x1)
+        self._roi_canvas_y0 = min(y0, y1)
+        self._roi_canvas_x1 = max(x0, x1)
+        self._roi_canvas_y1 = max(y0, y1)
+
+        def _c2p(cx, cy):
+            fpx = (cx - _s['ox']) / _s['sx']
+            fpy = (cy - _s['oy']) / _s['sy']
+            return self.calculate_stitched_phys_coords(
+                fpx, fpy, stitched_w, stitched_h,
+                grid_x, grid_y, scan_origin_x, scan_origin_y)
+
+        px0, py0 = _c2p(self._roi_canvas_x0, self._roi_canvas_y0)
+        px1, py1 = _c2p(self._roi_canvas_x1, self._roi_canvas_y1)
+
+        self.roi_phys_x_start = min(px0, px1)
+        self.roi_phys_x_end   = max(px0, px1)
+        self.roi_phys_y_start = min(py0, py1)
+        self.roi_phys_y_end   = max(py0, py1)
+
+        phys_w = self.roi_phys_x_end - self.roi_phys_x_start
+        phys_h = self.roi_phys_y_end - self.roi_phys_y_start
+        try:
+            nx = max(2, int(self._stitch_roi_spin_x.get()))
+            ny = max(2, int(self._stitch_roi_spin_y.get()))
+        except (ValueError, AttributeError):
+            nx, ny = 4, 4
+        self.map_grid_x = nx
+        self.map_grid_y = ny
+        if nx > 1:
+            self._stitch_roi_cell_x.delete(0, "end")
+            self._stitch_roi_cell_x.insert(0, f"{phys_w / (nx - 1):.4f}")
+        if ny > 1:
+            self._stitch_roi_cell_y.delete(0, "end")
+            self._stitch_roi_cell_y.insert(0, f"{phys_h / (ny - 1):.4f}")
+
+        self._roi_redraw_grid(canvas, self._roi_canvas_x0, self._roi_canvas_y0,
+                              self._roi_canvas_x1, self._roi_canvas_y1)
+        self._update_stitched_roi_info_labels()
+        self._safe_btn('_stitch_map_surface_btn', state="normal")
+        self._safe_btn('_stitch_clear_points_btn', state="normal")
+        canvas.configure(cursor="crosshair")
+
+    def _roi_or_move_press_stitched(self, event, canvas, on_click_fn):
+        """<Button-1> dispatcher for the stitched canvas.
+
+        Priority:
+          0. Click on an analysis marker / label → ignore (tag_bind owns it).
+          1. Within CORNER_R of a corner handle → resize mode.
+          2. Inside the grid box → move mode.
+          3. Otherwise → delegate to on_click_fn (hardware click-to-move).
+        """
+        current_items = canvas.find_withtag("current")
+        if current_items:
+            item_tags = canvas.gettags(current_items[0])
+            if "custom_pt" in item_tags or "measurement_text" in item_tags:
+                return
+
+        has_roi = (
+            self._roi_active_canvas is canvas
+            and self._roi_canvas_x0 < self._roi_canvas_x1
+        )
+        if has_roi:
+            CORNER_R = 10
+            x0, y0 = self._roi_canvas_x0, self._roi_canvas_y0
+            x1, y1 = self._roi_canvas_x1, self._roi_canvas_y1
+            corners  = {"nw": (x0, y0), "ne": (x1, y0), "sw": (x0, y1), "se": (x1, y1)}
+            opposite = {"nw": "se", "ne": "sw", "sw": "ne", "se": "nw"}
+            for name, (cx, cy) in corners.items():
+                if abs(event.x - cx) <= CORNER_R and abs(event.y - cy) <= CORNER_R:
+                    self._roi_mode          = "resize"
+                    self._roi_drag_corner   = name
+                    self._roi_resize_anchor = corners[opposite[name]]
+                    self._roi_pan_active    = True
+                    canvas.configure(cursor="hand2")
+                    return
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                self._roi_mode       = "move"
+                self._roi_pan_active = True
+                self._roi_pan_start  = (event.x, event.y)
+                canvas.configure(cursor="fleur")
+                return
+        self._roi_mode       = "none"
+        self._roi_pan_active = False
+        on_click_fn(event)
+
+    def _roi_pan_motion_stitched(self, event, canvas, _s):
+        """<B1-Motion> for the stitched canvas: translate (move) or snap-resize.
+
+        Move mode is coord-agnostic (pure canvas-pixel translation).
+        Resize snap uses _s['sx']/_s['sy'] — the live stitched-image scale.
+        """
+        if not self._roi_pan_active:
+            return
+
+        if self._roi_mode == "move":
+            if self._roi_pan_start is None:
+                return
+            canvas.configure(cursor="fleur")
+            dx = event.x - self._roi_pan_start[0]
+            dy = event.y - self._roi_pan_start[1]
+            self._roi_pan_start = (event.x, event.y)
+            self._roi_canvas_x0 += dx;  self._roi_canvas_y0 += dy
+            self._roi_canvas_x1 += dx;  self._roi_canvas_y1 += dy
+            self._roi_redraw_grid(canvas,
+                                  self._roi_canvas_x0, self._roi_canvas_y0,
+                                  self._roi_canvas_x1, self._roi_canvas_y1)
+            return
+
+        if self._roi_mode != "resize" or self._roi_resize_anchor is None:
+            return
+        try:
+            cell_x = float(self._stitch_roi_cell_x.get())
+            cell_y = float(self._stitch_roi_cell_y.get())
+        except (ValueError, AttributeError):
+            return
+        if cell_x <= 0 or cell_y <= 0:
+            return
+
+        canvas.configure(cursor="hand2")
+        SCALE_X, SCALE_Y = 0.001479, 0.001459
+        px_per_cell_x = cell_x * _s['sx'] / SCALE_X
+        px_per_cell_y = cell_y * _s['sy'] / SCALE_Y
+
+        anchor_x, anchor_y = self._roi_resize_anchor
+        cols = max(1, round(abs(event.x - anchor_x) / px_per_cell_x))
+        rows = max(1, round(abs(event.y - anchor_y) / px_per_cell_y))
+        nx, ny = cols + 1, rows + 1
+
+        sign_x = +1 if event.x >= anchor_x else -1
+        sign_y = +1 if event.y >= anchor_y else -1
+        snapped_x = anchor_x + sign_x * cols * px_per_cell_x
+        snapped_y = anchor_y + sign_y * rows * px_per_cell_y
+
+        self._roi_canvas_x0 = min(anchor_x, snapped_x)
+        self._roi_canvas_y0 = min(anchor_y, snapped_y)
+        self._roi_canvas_x1 = max(anchor_x, snapped_x)
+        self._roi_canvas_y1 = max(anchor_y, snapped_y)
+        self.map_grid_x = nx;  self.map_grid_y = ny
+
+        self._stitch_roi_spin_x.delete(0, "end");  self._stitch_roi_spin_x.insert(0, str(nx))
+        self._stitch_roi_spin_y.delete(0, "end");  self._stitch_roi_spin_y.insert(0, str(ny))
+
+        self._roi_redraw_grid(canvas,
+                              self._roi_canvas_x0, self._roi_canvas_y0,
+                              self._roi_canvas_x1, self._roi_canvas_y1)
+        self._update_stitched_roi_info_labels()
+
+    def _roi_pan_release_stitched(self, event, canvas, _s,
+                                   stitched_w, stitched_h,
+                                   grid_x, grid_y, scan_origin_x, scan_origin_y):
+        """<ButtonRelease-1>: commit the final physical bounds for the stitched canvas."""
+        if not self._roi_pan_active:
+            return
+
+        mode = self._roi_mode
+        self._roi_pan_active    = False
+        self._roi_pan_start     = None
+        self._roi_mode          = "none"
+        self._roi_drag_corner   = None
+        self._roi_resize_anchor = None
+
+        def _c2p(cx, cy):
+            fpx = (cx - _s['ox']) / _s['sx']
+            fpy = (cy - _s['oy']) / _s['sy']
+            return self.calculate_stitched_phys_coords(
+                fpx, fpy, stitched_w, stitched_h,
+                grid_x, grid_y, scan_origin_x, scan_origin_y)
+
+        px0, py0 = _c2p(self._roi_canvas_x0, self._roi_canvas_y0)
+        px1, py1 = _c2p(self._roi_canvas_x1, self._roi_canvas_y1)
+
+        self.roi_phys_x_start = min(px0, px1)
+        self.roi_phys_x_end   = max(px0, px1)
+        self.roi_phys_y_start = min(py0, py1)
+        self.roi_phys_y_end   = max(py0, py1)
+
+        # Move mode: recompute cell sizes from the new physical extent
+        if mode == "move" and self.map_grid_x > 1 and self.map_grid_y > 1:
+            phys_w = self.roi_phys_x_end - self.roi_phys_x_start
+            phys_h = self.roi_phys_y_end - self.roi_phys_y_start
+            self._stitch_roi_cell_x.delete(0, "end")
+            self._stitch_roi_cell_x.insert(0, f"{phys_w / (self.map_grid_x - 1):.4f}")
+            self._stitch_roi_cell_y.delete(0, "end")
+            self._stitch_roi_cell_y.insert(0, f"{phys_h / (self.map_grid_y - 1):.4f}")
+
+        self._update_stitched_roi_info_labels()
+        self._on_canvas_motion(event, canvas)
+
+    def _update_roi_from_entries_stitched(self, event, canvas, _s,
+                                           stitched_w, stitched_h,
+                                           grid_x, grid_y, scan_origin_x, scan_origin_y):
+        """Called on <KeyRelease> in any stitched-view dimension entry.
+
+        Resizes the canvas grid (top-left fixed) using the stitched scale
+        factors and recomputes physical bounds.
+        """
+        self._update_stitched_roi_info_labels()
+
+        if self._roi_active_canvas is not canvas:
+            return
+        try:
+            nx     = max(2, int(self._stitch_roi_spin_x.get()))
+            ny     = max(2, int(self._stitch_roi_spin_y.get()))
+            cell_x = float(self._stitch_roi_cell_x.get())
+            cell_y = float(self._stitch_roi_cell_y.get())
+        except (ValueError, AttributeError):
+            return
+        if cell_x <= 0 or cell_y <= 0:
+            return
+
+        self.map_grid_x = nx;  self.map_grid_y = ny
+        SCALE_X, SCALE_Y = 0.001479, 0.001459
+        dcx = cell_x * (nx - 1) * _s['sx'] / SCALE_X
+        dcy = cell_y * (ny - 1) * _s['sy'] / SCALE_Y
+
+        self._roi_canvas_x1 = self._roi_canvas_x0 + dcx
+        self._roi_canvas_y1 = self._roi_canvas_y0 + dcy
+        self._roi_redraw_grid(canvas, self._roi_canvas_x0, self._roi_canvas_y0,
+                              self._roi_canvas_x1, self._roi_canvas_y1)
+
+        def _c2p(cx, cy):
+            fpx = (cx - _s['ox']) / _s['sx']
+            fpy = (cy - _s['oy']) / _s['sy']
+            return self.calculate_stitched_phys_coords(
+                fpx, fpy, stitched_w, stitched_h,
+                grid_x, grid_y, scan_origin_x, scan_origin_y)
+
+        px0, py0 = _c2p(self._roi_canvas_x0, self._roi_canvas_y0)
+        px1, py1 = _c2p(self._roi_canvas_x1, self._roi_canvas_y1)
+        self.roi_phys_x_start = min(px0, px1)
+        self.roi_phys_x_end   = max(px0, px1)
+        self.roi_phys_y_start = min(py0, py1)
+        self.roi_phys_y_end   = max(py0, py1)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Map Surface — validate and (WIP) launch scan
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def start_surface_map(self):
+        """Validate all ROI / grid parameters and confirm the surface mapping job.
+
+        Hardware scan execution is WIP — a TODO comment marks where
+        run_topography_map() should be called in a background Thread.
+        """
+        # ── Validate grid counts ────────────────────────────────────────────
+        try:
+            nx = int(self._roi_spin_x.get())
+            ny = int(self._roi_spin_y.get())
+        except (ValueError, AttributeError):
+            messagebox.showerror("Invalid Input", "Measurement counts must be integers ≥ 2.")
+            return
+        if nx < 2 or ny < 2:
+            messagebox.showerror("Invalid Input", "Measurement counts must be ≥ 2.")
+            return
+
+        # ── Validate cell sizes ─────────────────────────────────────────────
+        try:
+            cell_x = float(self._roi_cell_x.get())
+            cell_y = float(self._roi_cell_y.get())
+        except (ValueError, AttributeError):
+            messagebox.showerror("Invalid Input", "Cell sizes must be positive numbers (mm).")
+            return
+        if cell_x <= 0 or cell_y <= 0:
+            messagebox.showerror("Invalid Input", "Cell sizes must be positive.")
+            return
+
+        # ── Validate CSV name ───────────────────────────────────────────────
+        csv_name = self._roi_csv_name.get().strip()
+        if not csv_name:
+            messagebox.showerror("Invalid Input", "Please enter a CSV output file name.")
+            return
+
+        # ── Require a drawn ROI ─────────────────────────────────────────────
         if self.roi_phys_x_start is None:
             messagebox.showerror("No ROI", "Draw a region first: hold Ctrl and drag on the image.")
             return
 
-        self.map_grid_x = grid_x
-        self.map_grid_y = grid_y
+        # ── Convert to nanometres for the SmarAct API ───────────────────────
+        start_x_nm  = round(self.roi_phys_x_start * 1_000_000)
+        start_y_nm  = round(self.roi_phys_y_start * 1_000_000)
+        step_x_nm   = round(cell_x * 1_000_000)
+        step_y_nm   = round(cell_y * 1_000_000)   # reserved; see TODO below
+        total_pts   = nx * ny
+        est_sec     = total_pts * 4
+
+        self.map_grid_x = nx
+        self.map_grid_y = ny
 
         print(
-            f"Map Height Measurements: "
-            f"X=[{self.roi_phys_x_start:.4f}, {self.roi_phys_x_end:.4f}] mm, "
-            f"Y=[{self.roi_phys_y_start:.4f}, {self.roi_phys_y_end:.4f}] mm, "
-            f"Grid=[{self.map_grid_x} x {self.map_grid_y}]"
+            f"[surface_map] Grid: {nx}×{ny} = {total_pts} points\n"
+            f"  Origin:  ({self.roi_phys_x_start:.4f} mm, {self.roi_phys_y_start:.4f} mm)\n"
+            f"  Step X:  {cell_x:.4f} mm  ({step_x_nm} nm)\n"
+            f"  Step Y:  {cell_y:.4f} mm  ({step_y_nm} nm)\n"
+            f"  Output:  {csv_name}.csv"
+        )
+
+        messagebox.showinfo(
+            "Map Surface — WIP",
+            f"Surface map parameters confirmed:\n\n"
+            f"  Grid:          {nx} × {ny} = {total_pts} points\n"
+            f"  Cell size:     {cell_x:.4f} mm × {cell_y:.4f} mm\n"
+            f"  Coverage:      {cell_x*(nx-1):.3f} mm × {cell_y*(ny-1):.3f} mm\n"
+            f"  Estimated time: WIP (~{est_sec} s)\n"
+            f"  Output file:   {csv_name}.csv\n\n"
+            "Scan execution is WIP — hardware call not yet wired."
+        )
+
+        # TODO: call run_topography_map() in a background Thread and write results
+        #   to {csv_name}.csv.  Note: run_topography_map() currently accepts a single
+        #   step_size_nm; separate X/Y step sizes will require a future API change.
+        #   Suggested call once the API is updated:
+        #     Thread(target=_run_scan, daemon=True).start()
+        #   where _run_scan opens the MCS handle, calls run_topography_map with
+        #   start_x_nm, start_y_nm, step_x_nm, step_y_nm, nx, ny, then writes CSV.
+
+    def start_surface_map_stitched(self):
+        """Variant of start_surface_map that reads from the stitched-view ROI entries."""
+        try:
+            nx = int(self._stitch_roi_spin_x.get())
+            ny = int(self._stitch_roi_spin_y.get())
+        except (ValueError, AttributeError):
+            messagebox.showerror("Invalid Input", "Measurement counts must be integers ≥ 2.")
+            return
+        if nx < 2 or ny < 2:
+            messagebox.showerror("Invalid Input", "Measurement counts must be ≥ 2.")
+            return
+        try:
+            cell_x = float(self._stitch_roi_cell_x.get())
+            cell_y = float(self._stitch_roi_cell_y.get())
+        except (ValueError, AttributeError):
+            messagebox.showerror("Invalid Input", "Cell sizes must be positive numbers (mm).")
+            return
+        if cell_x <= 0 or cell_y <= 0:
+            messagebox.showerror("Invalid Input", "Cell sizes must be positive.")
+            return
+        csv_name = self._stitch_roi_csv_name.get().strip()
+        if not csv_name:
+            messagebox.showerror("Invalid Input", "Please enter a CSV output file name.")
+            return
+        if self.roi_phys_x_start is None:
+            messagebox.showerror("No ROI", "Draw a region first: hold Ctrl and drag on the image.")
+            return
+
+        step_x_nm = round(cell_x * 1_000_000)
+        step_y_nm = round(cell_y * 1_000_000)
+        total_pts = nx * ny
+        est_sec   = total_pts * 4
+        self.map_grid_x = nx
+        self.map_grid_y = ny
+
+        print(
+            f"[surface_map_stitched] Grid: {nx}×{ny} = {total_pts} points\n"
+            f"  Origin:  ({self.roi_phys_x_start:.4f} mm, {self.roi_phys_y_start:.4f} mm)\n"
+            f"  Step X:  {cell_x:.4f} mm  ({step_x_nm} nm)\n"
+            f"  Step Y:  {cell_y:.4f} mm  ({step_y_nm} nm)\n"
+            f"  Output:  {csv_name}.csv"
+        )
+        messagebox.showinfo(
+            "Map Surface — WIP",
+            f"Surface map parameters confirmed:\n\n"
+            f"  Grid:          {nx} × {ny} = {total_pts} points\n"
+            f"  Cell size:     {cell_x:.4f} mm × {cell_y:.4f} mm\n"
+            f"  Coverage:      {cell_x*(nx-1):.3f} mm × {cell_y*(ny-1):.3f} mm\n"
+            f"  Estimated time: ~{est_sec} s\n"
+            f"  Output file:   {csv_name}.csv\n\n"
+            "Scan execution is WIP — hardware call not yet wired."
         )
 
     # -------------------------- Details Tab ------------------------ #
@@ -2995,24 +4580,28 @@ class MainApp(ctk.CTk):
 
     def sequence_wait_for_move(self, image_label):
         if self.module_status != "Idle":
-            self.after(500, lambda: self.sequence_wait_for_move(image_label))
+            self.after(100, lambda: self.sequence_wait_for_move(image_label))
             return
-            
-        self.empty_folder_rpi() 
+
+        self.empty_folder_rpi()
         self.send_simple_command("exe_update_image", checkIdle=False, show_success=False)
         self.empty_folder_pc(self.buffer_testing_folder)
-        
+
         self.module_status = "Capturing Image"
-        self.status_lockout_time = time.time() + 2.0 
-        
+        self.status_lockout_time = time.time() + 0.5
+
         self.sequence_wait_for_capture(image_label)
 
     def sequence_wait_for_capture(self, image_label):
         if self.module_status != "Idle":
-            self.after(500, lambda: self.sequence_wait_for_capture(image_label))
+            self.after(100, lambda: self.sequence_wait_for_capture(image_label))
             return
 
-        self.after(1000, lambda: self.sequence_transfer_and_display(image_label))
+        try:
+            image_label.winfo_exists()
+        except Exception:
+            return
+        self.sequence_transfer_and_display(image_label)
 
     def sequence_transfer_and_display(self, image_label):
         self.transfer_folder_rpi(self.buffer_testing_folder, False)
