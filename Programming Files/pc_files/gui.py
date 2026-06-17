@@ -372,6 +372,9 @@ class MainApp(ctk.CTk):
             return
 
         stitched_w, stitched_h = stitched_pil.size
+        # Persisted so _process_measurement_results can reconstruct canvas coords
+        self._stitch_img_w = stitched_w
+        self._stitch_img_h = stitched_h
         OVERLAP = 0.20
 
         tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
@@ -462,7 +465,13 @@ class MainApp(ctk.CTk):
         self._stitch_roi_csv_name = ctk.CTkEntry(_ss_row1, width=130, placeholder_text="filename.csv")
         self._stitch_roi_csv_name.pack(side="left", padx=(0, 5))
 
-        # ── Row 2: info labels + Map Surface (right) ─────────────────────────────
+        # "Measure Heights" claims the far-right of row 1 (mirroring the Image tab)
+        self._stitch_measure_heights_btn = ctk.CTkButton(
+            _ss_row1, text="Measure Heights", fg_color="#1f6aa5",
+            state="disabled", command=self.execute_custom_measurements)
+        self._stitch_measure_heights_btn.pack(side="right", padx=(10, 5))
+
+        # ── Row 2: info labels + analysis label + Clear Points / Map Surface ──────
         _ss_row2 = ctk.CTkFrame(_stitch_strip)
         _ss_row2.pack(fill='x', padx=5, pady=(2, 5))
 
@@ -470,15 +479,30 @@ class MainApp(ctk.CTk):
         self._stitch_roi_info_count = ctk.StringVar(value="Total Points: --")
         self._stitch_roi_info_time  = ctk.StringVar(value="Est. Duration: -- s")
 
-        # Map Surface on the far right; labels fill in to its left
-        ctk.CTkButton(_ss_row2, text="Map Surface", fg_color="#7B2FBE",
-                      command=self.start_surface_map_stitched).pack(side="right", padx=(10, 5))
+        # Action frame: Clear Points + Map Surface stacked on the far right
+        _stitch_action_frame = ctk.CTkFrame(_ss_row2, fg_color="transparent")
+        _stitch_action_frame.pack(side="right", padx=(10, 5))
+
+        self._stitch_clear_points_btn = ctk.CTkButton(
+            _stitch_action_frame, text="Clear Points", fg_color="#555555",
+            state="disabled", command=self._clear_custom_points)
+        self._stitch_clear_points_btn.pack(side="top", pady=(0, 2), fill="x")
+
+        self._stitch_map_surface_btn = ctk.CTkButton(
+            _stitch_action_frame, text="Map Surface", fg_color="#7B2FBE",
+            state="disabled", command=self.start_surface_map_stitched)
+        self._stitch_map_surface_btn.pack(side="top", pady=0, fill="x")
 
         ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_time,
                      font=("Arial", 12, "bold"), text_color="orange").pack(side="right", padx=(12, 5))
         ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_count,
                      font=("Arial", 12, "bold"), text_color="#00FF88").pack(side="right", padx=(12, 5))
         ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_area).pack(side="right", padx=(12, 5))
+
+        # Analysis readout — fixed width prevents frame resize on text change
+        ctk.CTkLabel(_ss_row2, textvariable=self.analysis_result_var,
+                     font=("Arial", 12, "bold"), text_color="#00CFFF",
+                     width=260).pack(side="left", padx=(8, 5))
 
         canvas.pack(expand=True, fill="both", padx=5, pady=(5, 0))
 
@@ -560,6 +584,11 @@ class MainApp(ctk.CTk):
                                       self._roi_canvas_x0, self._roi_canvas_y0,
                                       self._roi_canvas_x1, self._roi_canvas_y1)
 
+            # Redraw any custom measurement points — zoom/pan safe via _s
+            self._redraw_custom_points_stitched(
+                canvas, _s, stitched_w, stitched_h,
+                grid_x, grid_y, scan_origin_x, scan_origin_y)
+
         def _on_click(event):
             if self.module_status != "Idle":
                 return
@@ -596,8 +625,10 @@ class MainApp(ctk.CTk):
                 self.main_right_frame.after(60, _render)
 
         def _start_pan(event):
-            canvas._pan_start_x = event.x
-            canvas._pan_start_y = event.y
+            canvas._pan_start_x  = event.x
+            canvas._pan_start_y  = event.y
+            canvas._pan_origin_x = event.x   # total-distance anchor
+            canvas._pan_origin_y = event.y
 
         def _do_pan(event):
             dx = event.x - canvas._pan_start_x
@@ -606,7 +637,12 @@ class MainApp(ctk.CTk):
             _s['pan_y'] += dy
             canvas._pan_start_x = event.x
             canvas._pan_start_y = event.y
-            _schedule_render()
+            # Suppress renders for sub-5-px jitter so a right-click-to-drop-point
+            # doesn't accidentally flash the canvas.
+            total_drag = ((event.x - canvas._pan_origin_x) ** 2 +
+                          (event.y - canvas._pan_origin_y) ** 2) ** 0.5
+            if total_drag > 5:
+                _schedule_render()
 
         def _zoom(event):
             cw = max(canvas.winfo_width(), 400)
@@ -678,13 +714,25 @@ class MainApp(ctk.CTk):
         canvas.bind("<KeyPress-Control_R>",   lambda e: canvas.configure(cursor="crosshair"))
         canvas.bind("<KeyRelease-Control_L>", lambda e: canvas.configure(cursor="arrow"))
         canvas.bind("<KeyRelease-Control_R>", lambda e: canvas.configure(cursor="arrow"))
-        # Right-click pan + scroll zoom (unchanged)
-        canvas.bind("<ButtonPress-3>", _start_pan)
-        canvas.bind("<B3-Motion>",     _do_pan)
+        # Right-click: pan on drag, point-drop on clean release (no drag)
+        canvas.bind("<ButtonPress-3>",  _start_pan)
+        canvas.bind("<B3-Motion>",      _do_pan)
+        canvas.bind("<ButtonRelease-3>",
+                    lambda e, _c=canvas, _ss=_s: self._on_stitched_right_click_point(
+                        e, _c, _ss, stitched_w, stitched_h,
+                        grid_x, grid_y, scan_origin_x, scan_origin_y))
         canvas.bind("<Button-4>",      _zoom)
         canvas.bind("<Button-5>",      _zoom)
-        canvas.update_idletasks()
-        _render()
+        # Poll until the canvas has real dimensions, then render once.
+        # Avoids the race where winfo_width() still returns 1 even after <Map>.
+        def _wait_for_geometry():
+            if not canvas.winfo_exists():
+                return
+            if canvas.winfo_width() <= 10 or canvas.winfo_height() <= 10:
+                self.after(50, _wait_for_geometry)
+            else:
+                _render()
+        _wait_for_geometry()
 
     #------------------------------- Pop-up Windows ------------------------------------------#
 
@@ -1398,10 +1446,11 @@ class MainApp(ctk.CTk):
 
         ctk.CTkLabel(row2, textvariable=self._roi_info_area).pack(side="right", padx=(12, 5))
 
-        # Analysis result — fills the remaining left space in row 2
+        # Analysis result — fixed width prevents frame resize on text change
         self.analysis_result_var = ctk.StringVar(value="Analysis: Select points...")
         ctk.CTkLabel(row2, textvariable=self.analysis_result_var,
-                     font=("Arial", 12, "bold"), text_color="#00CFFF").pack(side="left", padx=(8, 5))
+                     font=("Arial", 12, "bold"), text_color="#00CFFF",
+                     width=260).pack(side="left", padx=(8, 5))
 
         # Bind live updates: any keystroke in the dimension entries redraws the grid
         for _e in (self._roi_spin_x, self._roi_spin_y, self._roi_cell_x, self._roi_cell_y):
@@ -1587,57 +1636,69 @@ class MainApp(ctk.CTk):
             self._canvas_img_path = image_path
             img_pil = Image.open(image_path)
 
-            canvas.update_idletasks()
-            canvas_w = max(canvas.winfo_width(), 400)
-            canvas_h = max(canvas.winfo_height(), 400)
+            # PIL is open; defer canvas drawing until geometry is ready.
+            def _wait_for_geometry():
+                if not canvas.winfo_exists():
+                    return
+                if canvas.winfo_width() <= 10 or canvas.winfo_height() <= 10:
+                    self.after(50, _wait_for_geometry)
+                    return
 
-            aspect_ratio = img_pil.width / img_pil.height
-            if aspect_ratio > 1:
-                new_width = canvas_w
-                new_height = int(canvas_w / aspect_ratio)
-            else:
-                new_height = canvas_h
-                new_width = int(canvas_h * aspect_ratio)
+                canvas_w = canvas.winfo_width()
+                canvas_h = canvas.winfo_height()
 
-            new_width  = max(new_width, 1)
-            new_height = max(new_height, 1)
+                aspect_ratio = img_pil.width / img_pil.height
+                if aspect_ratio > 1:
+                    new_width  = canvas_w
+                    new_height = int(canvas_w / aspect_ratio)
+                else:
+                    new_height = canvas_h
+                    new_width  = int(canvas_h * aspect_ratio)
 
-            self._canvas_disp_w = new_width
-            self._canvas_disp_h = new_height
-            self._canvas_orig_w = img_pil.width
-            self._canvas_orig_h = img_pil.height
+                new_width  = max(new_width, 1)
+                new_height = max(new_height, 1)
 
-            resized_img = img_pil.resize((new_width, new_height), Image.LANCZOS)
-            self._canvas_img_tk = ImageTk.PhotoImage(resized_img)
+                self._canvas_disp_w = new_width
+                self._canvas_disp_h = new_height
+                self._canvas_orig_w = img_pil.width
+                self._canvas_orig_h = img_pil.height
+                # Capture hardware position so _phys_to_canvas_pixel has a stable
+                # reference even if the stage moves before the next redraw.
+                self._image_tab_ref_x = float(self.x_pos)
+                self._image_tab_ref_y = float(self.y_pos)
 
-            canvas.delete("all")
-            canvas.create_image(canvas_w // 2, canvas_h // 2, anchor="center",
-                                image=self._canvas_img_tk)
+                resized_img = img_pil.resize((new_width, new_height), Image.LANCZOS)
+                self._canvas_img_tk = ImageTk.PhotoImage(resized_img)
 
-            canvas.bind("<Double-Button-1>", lambda e: self.expand_image(image_path))
-            # <Button-1> dispatches to pan-drag (if inside ROI box) or click-to-move
-            canvas.bind("<Button-1>",        lambda e: self._roi_or_move_press(
-                e, canvas, new_width, new_height, img_pil.width, img_pil.height))
-            canvas.bind("<B1-Motion>",        lambda e: self._roi_pan_motion(e, canvas))
-            canvas.bind("<ButtonRelease-1>",  lambda e: self._roi_pan_release(e, canvas))
-            canvas.bind("<Control-ButtonPress-1>",   lambda e: self._roi_press(e, canvas))
-            canvas.bind("<Control-B1-Motion>",        lambda e: self._roi_drag(e, canvas))
-            canvas.bind("<Control-ButtonRelease-1>", lambda e: self._roi_release(e, canvas))
+                canvas.delete("all")
+                canvas.create_image(canvas_w // 2, canvas_h // 2, anchor="center",
+                                    image=self._canvas_img_tk)
 
-            # ── Contextual cursor tracking ─────────────────────────────────────
-            # <Motion> handles the three hover zones: arrow / fleur / hand1.
-            # Key bindings catch Ctrl press/release while the mouse is stationary.
-            # <Enter> gives the canvas keyboard focus so key events are received.
-            canvas.bind("<Motion>",               lambda e: self._on_canvas_motion(e, canvas))
-            canvas.bind("<Enter>",                lambda e: canvas.focus_set())
-            canvas.bind("<KeyPress-Control_L>",   lambda e: canvas.configure(cursor="crosshair"))
-            canvas.bind("<KeyPress-Control_R>",   lambda e: canvas.configure(cursor="crosshair"))
-            canvas.bind("<KeyRelease-Control_L>", lambda e: canvas.configure(cursor="arrow"))
-            canvas.bind("<KeyRelease-Control_R>", lambda e: canvas.configure(cursor="arrow"))
+                # Redraw any custom measurement points that survived the canvas wipe
+                self._redraw_custom_points_image_tab(canvas, canvas_w, canvas_h)
 
-            canvas.bind("<Button-3>", lambda e: self._on_right_click_point(e, canvas))
+                canvas.bind("<Double-Button-1>", lambda e: self.expand_image(image_path))
+                # <Button-1> dispatches to pan-drag (if inside ROI box) or click-to-move
+                canvas.bind("<Button-1>",        lambda e: self._roi_or_move_press(
+                    e, canvas, new_width, new_height, img_pil.width, img_pil.height))
+                canvas.bind("<B1-Motion>",        lambda e: self._roi_pan_motion(e, canvas))
+                canvas.bind("<ButtonRelease-1>",  lambda e: self._roi_pan_release(e, canvas))
+                canvas.bind("<Control-ButtonPress-1>",   lambda e: self._roi_press(e, canvas))
+                canvas.bind("<Control-B1-Motion>",        lambda e: self._roi_drag(e, canvas))
+                canvas.bind("<Control-ButtonRelease-1>", lambda e: self._roi_release(e, canvas))
 
-            print("Image updated successfully :)")
+                canvas.bind("<Motion>",               lambda e: self._on_canvas_motion(e, canvas))
+                canvas.bind("<Enter>",                lambda e: canvas.focus_set())
+                canvas.bind("<KeyPress-Control_L>",   lambda e: canvas.configure(cursor="crosshair"))
+                canvas.bind("<KeyPress-Control_R>",   lambda e: canvas.configure(cursor="crosshair"))
+                canvas.bind("<KeyRelease-Control_L>", lambda e: canvas.configure(cursor="arrow"))
+                canvas.bind("<KeyRelease-Control_R>", lambda e: canvas.configure(cursor="arrow"))
+
+                canvas.bind("<Button-3>", lambda e: self._on_right_click_point(e, canvas))
+
+                print("Image updated successfully :)")
+
+            _wait_for_geometry()
 
         except Exception as e:
             print(f"Error displaying image on canvas: {e}")
@@ -1866,14 +1927,25 @@ class MainApp(ctk.CTk):
 
         return canvas_px, canvas_py
 
+    def _safe_btn(self, attr_name, **kw):
+        """Configure a CTk button widget only if it still exists in the widget tree.
+        Prevents TclError when stitched-view buttons are configured after the frame
+        they live in has been destroyed by clear_frame / view switching."""
+        try:
+            w = getattr(self, attr_name, None)
+            if w is not None and w.winfo_exists():
+                w.configure(**kw)
+        except Exception:
+            pass
+
     def _roi_press(self, event, canvas):
         """Begin a new Ctrl+drag ROI — clears the previous grid."""
         self._roi_drag_start = (event.x, event.y)
         canvas.delete("roi_grid")
         self._roi_active_canvas = canvas
         canvas.configure(cursor="crosshair")
-        if hasattr(self, '_map_surface_btn'):
-            self._map_surface_btn.configure(state="disabled")
+        for _ms in ('_map_surface_btn', '_stitch_map_surface_btn'):
+            self._safe_btn(_ms, state="disabled")
 
     def _roi_drag(self, event, canvas):
         """Live-redraw the measurement grid as the user drags."""
@@ -1932,8 +2004,8 @@ class MainApp(ctk.CTk):
         self._roi_redraw_grid(canvas, self._roi_canvas_x0, self._roi_canvas_y0,
                               self._roi_canvas_x1, self._roi_canvas_y1)
         self._update_roi_info_labels()
-        if hasattr(self, '_map_surface_btn'):
-            self._map_surface_btn.configure(state="normal")
+        self._safe_btn('_map_surface_btn', state="normal")
+        self._safe_btn('_clear_points_btn', state="normal")
         print(f"ROI selected: X=[{self.roi_phys_x_start:.4f}, {self.roi_phys_x_end:.4f}] mm  "
               f"Y=[{self.roi_phys_y_start:.4f}, {self.roi_phys_y_end:.4f}] mm  "
               f"Grid={nx}×{ny}")
@@ -1945,6 +2017,90 @@ class MainApp(ctk.CTk):
     # ──────────────────────────────────────────────────────────────────────────
     # Custom point-selection (right-click markers)
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _draw_custom_pt_marker(self, canvas, cx, cy):
+        """Draw the standard yellow crosshair + red dot at canvas position (cx, cy)."""
+        R = 8
+        canvas.create_line(cx - R, cy, cx + R, cy,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_line(cx, cy - R, cx, cy + R,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
+                           fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
+
+    def _redraw_custom_points_image_tab(self, canvas, canvas_w, canvas_h):
+        """Re-stamp all custom_measure_points and measured_data text on the Image
+        tab canvas after a canvas.delete('all').  Uses _image_tab_ref_x/y as the
+        stable camera-position anchor so the inverse transform is consistent."""
+        if not self.custom_measure_points:
+            return
+        ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
+        ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
+        measured_indices = {i for i, _ in enumerate(self.measured_data)}
+        for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
+            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
+                                                canvas_w, canvas_h)
+            if cx is None:
+                continue
+            self._draw_custom_pt_marker(canvas, cx, cy)
+        # Re-draw height text for any completed measurements
+        for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
+            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
+                                                canvas_w, canvas_h)
+            if cx is None:
+                continue
+            fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
+            canvas.create_text(cx, cy - 15, text=f"{height:.3f} mm",
+                               fill=fill, font=("Arial", 12, "bold"),
+                               tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
+        if self.measured_data:
+            canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
+
+    def _redraw_custom_points_stitched(self, canvas, _s,
+                                       stitched_w, stitched_h,
+                                       grid_x, grid_y,
+                                       scan_origin_x, scan_origin_y):
+        """Re-stamp all custom_measure_points and measured_data text on the
+        stitched canvas after canvas.delete('all').  Uses _s directly so markers
+        remain correct at any zoom/pan level."""
+        if not self.custom_measure_points and not self.measured_data:
+            return
+
+        # Tile-0 centre in full-res stitched pixels (same constants as _render)
+        OVERLAP = 0.20
+        _tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
+        _tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
+        _t0x = _tile_w / 2.0
+        _t0y = (grid_y - 1) * _tile_h * (1.0 - OVERLAP) + _tile_h / 2.0
+        _A11, _A12 = -0.001479,  0.000044
+        _A21, _A22 =  0.000018,  0.001459
+        _det_B = _A11 * _A22 - _A12 * _A21
+
+        def _phys_to_canvas(phys_x, phys_y):
+            dx = phys_x - scan_origin_x
+            dy = phys_y - scan_origin_y
+            d_px = ((-_A22) * dx + _A12 * dy) / _det_B
+            d_py = ( _A21   * dx - _A11 * dy) / _det_B
+            fpx = _t0x + d_px
+            fpy = _t0y + d_py
+            return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
+
+        # Crosshair markers (only for points not yet in measured_data)
+        measured_set = set(range(len(self.measured_data)))
+        for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
+            cx, cy = _phys_to_canvas(phys_x, phys_y)
+            self._draw_custom_pt_marker(canvas, cx, cy)
+
+        # Height text (measured_data is in optimised order; use its own phys coords)
+        for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
+            cx, cy = _phys_to_canvas(phys_x, phys_y)
+            fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
+            canvas.create_text(cx, cy - 15, text=f"{height:.3f} mm",
+                               fill=fill, font=("Arial", 12, "bold"),
+                               tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
+
+        if self.measured_data:
+            canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
 
     def _on_right_click_point(self, event, canvas):
         """<Button-3>: drop a measurement marker at the clicked canvas position."""
@@ -1966,29 +2122,104 @@ class MainApp(ctk.CTk):
         canvas.create_oval(event.x - 3, event.y - 3, event.x + 3, event.y + 3,
                            fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
 
-        if hasattr(self, '_measure_heights_btn'):
-            self._measure_heights_btn.configure(state="normal")
-        if hasattr(self, '_clear_points_btn'):
-            self._clear_points_btn.configure(state="normal")
+        self._safe_btn('_measure_heights_btn', state="normal")
+        self._safe_btn('_clear_points_btn', state="normal")
 
         print(f"[custom_pt] point {len(self.custom_measure_points)}: "
               f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
 
+    def _on_stitched_right_click_point(self, event, canvas, _s,
+                                       stitched_w, stitched_h,
+                                       grid_x, grid_y,
+                                       scan_origin_x, scan_origin_y):
+        """<ButtonRelease-3> handler for the stitched canvas.
+
+        Drops a custom measurement marker only when the release follows a clean
+        right-click (no significant pan drag).  Converts canvas pixels → full
+        stitched-image pixels → physical mm using the standard helper.
+        """
+        # Ignore if the user was panning (drag threshold = 5 px)
+        start_x = getattr(canvas, '_pan_start_x', event.x)
+        start_y = getattr(canvas, '_pan_start_y', event.y)
+        if abs(event.x - start_x) > 5 or abs(event.y - start_y) > 5:
+            return
+
+        # Canvas px → full-res stitched px → physical mm
+        full_px = (event.x - _s['ox']) / _s['sx']
+        full_py = (event.y - _s['oy']) / _s['sy']
+        phys_x, phys_y = self.calculate_stitched_phys_coords(
+            full_px, full_py,
+            stitched_w, stitched_h,
+            grid_x, grid_y,
+            scan_origin_x, scan_origin_y,
+        )
+
+        self.custom_measure_points.append((phys_x, phys_y))
+        self._roi_active_canvas = canvas
+
+        # Draw yellow crosshair marker at the canvas click position
+        R = 8
+        canvas.create_line(event.x - R, event.y, event.x + R, event.y,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_line(event.x, event.y - R, event.x, event.y + R,
+                           fill="#FFE000", width=2, tags="custom_pt")
+        canvas.create_oval(event.x - 3, event.y - 3, event.x + 3, event.y + 3,
+                           fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
+
+        # Enable action buttons
+        for btn_name in ('_stitch_measure_heights_btn', '_stitch_clear_points_btn',
+                         '_measure_heights_btn', '_clear_points_btn'):
+            self._safe_btn(btn_name, state="normal")
+
+        print(f"[custom_pt/stitched] point {len(self.custom_measure_points)}: "
+              f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
+
     def _clear_custom_points(self):
-        """Clear all custom measurement markers, analysis state, and canvas bindings."""
+        """Universal canvas clear: wipes right-click measurement points AND the
+        Ctrl+Drag ROI grid, resetting all related state and UI to neutral."""
+        # ── Measurement point state ───────────────────────────────────────────
         self.custom_measure_points.clear()
         self.measured_data.clear()
         self.analysis_selected_indices.clear()
         if hasattr(self, 'analysis_result_var'):
             self.analysis_result_var.set("Analysis: Select points...")
+
+        # ── ROI grid state ────────────────────────────────────────────────────
+        self.roi_phys_x_start = None
+        self.roi_phys_x_end   = None
+        self.roi_phys_y_start = None
+        self.roi_phys_y_end   = None
+        self._roi_canvas_x0 = 0.0
+        self._roi_canvas_y0 = 0.0
+        self._roi_canvas_x1 = 0.0
+        self._roi_canvas_y1 = 0.0
+
+        # ── Canvas visuals ────────────────────────────────────────────────────
         if self._roi_active_canvas is not None:
             self._roi_active_canvas.tag_unbind("measurement_text", "<Button-1>")
             self._roi_active_canvas.delete("custom_pt")
-        if hasattr(self, '_measure_heights_btn'):
-            self._measure_heights_btn.configure(state="disabled")
-        if hasattr(self, '_clear_points_btn'):
-            self._clear_points_btn.configure(state="disabled")
-        print("[custom_pt] all custom points cleared")
+            self._roi_active_canvas.delete("roi_grid")
+
+        # ── Info label readouts → neutral dashes ─────────────────────────────
+        for _var, _val in (
+            ('_roi_info_area',        "Total Area: -- × -- mm"),
+            ('_roi_info_count',       "Total Points: --"),
+            ('_roi_info_time',        "Est. Duration: -- s"),
+            ('_stitch_roi_info_area', "Total Area: -- × -- mm"),
+            ('_stitch_roi_info_count',"Total Points: --"),
+            ('_stitch_roi_info_time', "Est. Duration: -- s"),
+        ):
+            if hasattr(self, _var):
+                getattr(self, _var).set(_val)
+
+        # ── Button state: lock everything back to neutral ─────────────────────
+        for btn_name in ('_measure_heights_btn', '_clear_points_btn',
+                         '_map_surface_btn',
+                         '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
+                         '_stitch_map_surface_btn'):
+            self._safe_btn(btn_name, state="disabled")
+
+        print("[clear] measurement points and ROI grid cleared")
 
     def _toggle_analysis_point(self, event):
         """Toggle selection of a measured point label; update the analysis readout."""
@@ -2086,10 +2317,11 @@ class MainApp(ctk.CTk):
                 )
                 return
 
-        # Disable all three action buttons for the duration of the sequence
-        for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn'):
-            if hasattr(self, _btn):
-                getattr(self, _btn).configure(state="disabled")
+        # Disable action buttons on both tabs for the duration of the sequence
+        for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
+                     '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
+                     '_stitch_map_surface_btn'):
+            self._safe_btn(_btn, state="disabled")
 
         # Preserve optimised order so _process_measurement_results can pair
         # each height with the correct physical coordinate.
@@ -2183,13 +2415,42 @@ class MainApp(ctk.CTk):
 
         # ── Draw height values directly above each marker on the canvas ───────
         canvas = self._roi_active_canvas
-        if canvas is not None and self._canvas_disp_w > 0:
-            ref_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
-            ref_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
+        if canvas is not None:
             cw = canvas.winfo_width()
             ch = canvas.winfo_height()
+
+            # Determine whether the active canvas is the stitched view or the
+            # standard Image tab, and pick the matching inverse-transform path.
+            is_stitched = (self.active_main_view == "stitched")
+
             for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
-                cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
+                if is_stitched:
+                    # Use stitched-image coordinate helper (zoom/pan-aware via _s
+                    # was already applied at click time; use stored scan geometry).
+                    grid_x  = getattr(self, 'scanning_grid_x', 1)
+                    grid_y  = getattr(self, 'scanning_grid_y', 1)
+                    step_x  = self.scanning_data.get('step_x', 1.0)
+                    step_y  = self.scanning_data.get('step_y', 1.0)
+                    scan_end_x   = getattr(self, 'scan_end_x', 0.0)
+                    scan_end_y   = getattr(self, 'scan_end_y', 0.0)
+                    scan_origin_x = scan_end_x - (grid_x - 1) * step_x
+                    scan_origin_y = scan_end_y - (grid_y - 1) * step_y
+                    stitched_w = getattr(self, '_stitch_img_w', cw)
+                    stitched_h = getattr(self, '_stitch_img_h', ch)
+                    cx, cy = self.calculate_phys_to_stitched_pixel_coords(
+                        phys_x, phys_y,
+                        stitched_w, stitched_h,
+                        grid_x, grid_y,
+                        scan_origin_x, scan_origin_y,
+                        cw, ch,
+                    )
+                else:
+                    if self._canvas_disp_w == 0:
+                        continue
+                    ref_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
+                    ref_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
+                    cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
+
                 if cx is not None:
                     canvas.create_text(
                         cx, cy - 15,
@@ -2218,13 +2479,14 @@ class MainApp(ctk.CTk):
             return
 
         print("[sequence] origin reached — unlocking action buttons")
-        if hasattr(self, '_measure_heights_btn'):
-            self._measure_heights_btn.configure(state="normal")
-        if hasattr(self, '_clear_points_btn'):
-            self._clear_points_btn.configure(state="normal")
+        # Re-enable whichever tab's buttons are currently in the widget tree
+        for btn_name in ('_measure_heights_btn', '_stitch_measure_heights_btn',
+                         '_clear_points_btn', '_stitch_clear_points_btn'):
+            self._safe_btn(btn_name, state="normal")
         # Map Surface re-enables only if the grid is still valid
-        if hasattr(self, '_map_surface_btn') and self.roi_phys_x_start is not None:
-            self._map_surface_btn.configure(state="normal")
+        if self.roi_phys_x_start is not None:
+            for ms_btn in ('_map_surface_btn', '_stitch_map_surface_btn'):
+                self._safe_btn(ms_btn, state="normal")
 
     def confirm_map_measurements(self):
         """Legacy shim — delegates to start_surface_map."""
@@ -2712,16 +2974,25 @@ class MainApp(ctk.CTk):
         self._roi_redraw_grid(canvas, self._roi_canvas_x0, self._roi_canvas_y0,
                               self._roi_canvas_x1, self._roi_canvas_y1)
         self._update_stitched_roi_info_labels()
+        self._safe_btn('_stitch_map_surface_btn', state="normal")
+        self._safe_btn('_stitch_clear_points_btn', state="normal")
         canvas.configure(cursor="crosshair")
 
     def _roi_or_move_press_stitched(self, event, canvas, on_click_fn):
         """<Button-1> dispatcher for the stitched canvas.
 
         Priority:
+          0. Click on an analysis marker / label → ignore (tag_bind owns it).
           1. Within CORNER_R of a corner handle → resize mode.
           2. Inside the grid box → move mode.
           3. Otherwise → delegate to on_click_fn (hardware click-to-move).
         """
+        current_items = canvas.find_withtag("current")
+        if current_items:
+            item_tags = canvas.gettags(current_items[0])
+            if "custom_pt" in item_tags or "measurement_text" in item_tags:
+                return
+
         has_roi = (
             self._roi_active_canvas is canvas
             and self._roi_canvas_x0 < self._roi_canvas_x1
