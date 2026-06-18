@@ -128,6 +128,7 @@ class MainApp(ctk.CTk):
         self.custom_measure_points = []   # list of (phys_x_mm, phys_y_mm) tuples
         self.measured_data = []           # list of (phys_x, phys_y, height) after a sequence
         self.analysis_selected_indices = []  # indices into measured_data currently highlighted
+        self.datum_point = None           # (phys_x, phys_y) of Ctrl+RClick datum, or None
 
         # ROI bounding box in canvas pixels (normalized: x0<x1, y0<y1)
         self._roi_canvas_x0 = 0.0
@@ -727,6 +728,10 @@ class MainApp(ctk.CTk):
         canvas.bind("<B3-Motion>",      _do_pan)
         canvas.bind("<ButtonRelease-3>",
                     lambda e, _c=canvas, _ss=_s: self._on_stitched_right_click_point(
+                        e, _c, _ss, stitched_w, stitched_h,
+                        grid_x, grid_y, scan_origin_x, scan_origin_y))
+        canvas.bind("<Control-ButtonRelease-3>",
+                    lambda e, _c=canvas, _ss=_s: self._on_datum_point_stitched(
                         e, _c, _ss, stitched_w, stitched_h,
                         grid_x, grid_y, scan_origin_x, scan_origin_y))
         canvas.bind("<Button-4>",      _zoom)
@@ -1703,6 +1708,8 @@ class MainApp(ctk.CTk):
                 canvas.bind("<KeyRelease-Control_R>", lambda e: canvas.configure(cursor="arrow"))
 
                 canvas.bind("<Button-3>", lambda e: self._on_right_click_point(e, canvas))
+                canvas.bind("<Control-ButtonRelease-3>",
+                            lambda e: self._on_datum_point_image(e, canvas))
 
                 print("Image updated successfully :)")
 
@@ -2036,15 +2043,30 @@ class MainApp(ctk.CTk):
         canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
                            fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
 
+    def _draw_datum_pt_marker(self, canvas, cx, cy):
+        """Draw the cyan crosshair + blue dot datum marker at canvas position (cx, cy)."""
+        R = 10
+        canvas.create_line(cx - R, cy, cx + R, cy,
+                           fill="#00CFFF", width=2, tags="datum_pt")
+        canvas.create_line(cx, cy - R, cx, cy + R,
+                           fill="#00CFFF", width=2, tags="datum_pt")
+        canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
+                           fill="#0044FF", outline="#00CFFF", width=1, tags="datum_pt")
+
     def _redraw_custom_points_image_tab(self, canvas, canvas_w, canvas_h):
         """Re-stamp all custom_measure_points and measured_data text on the Image
         tab canvas after a canvas.delete('all').  Uses _image_tab_ref_x/y as the
         stable camera-position anchor so the inverse transform is consistent."""
-        if not self.custom_measure_points:
+        if not self.custom_measure_points and not self.measured_data and self.datum_point is None:
             return
         ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
         ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
-        measured_indices = {i for i, _ in enumerate(self.measured_data)}
+        # Re-draw datum marker if one was placed
+        if self.datum_point is not None:
+            dcx, dcy = self._phys_to_canvas_pixel(
+                self.datum_point[0], self.datum_point[1], ref_x, ref_y, canvas_w, canvas_h)
+            if dcx is not None:
+                self._draw_datum_pt_marker(canvas, dcx, dcy)
         for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
             cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
                                                 canvas_w, canvas_h)
@@ -2057,8 +2079,15 @@ class MainApp(ctk.CTk):
                                                 canvas_w, canvas_h)
             if cx is None:
                 continue
-            fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
-            canvas.create_text(cx, cy - 15, text=f"{height:.3f} mm",
+            is_datum = (self.datum_point is not None and (phys_x, phys_y) == self.datum_point)
+            if is_datum:
+                fill = "magenta"
+                label = f"{height:.3f} mm (Datum)"
+            elif i in self.analysis_selected_indices:
+                fill, label = "#00FF44", f"{height:.3f} mm"
+            else:
+                fill, label = "cyan", f"{height:.3f} mm"
+            canvas.create_text(cx, cy - 15, text=label,
                                fill=fill, font=("Arial", 12, "bold"),
                                tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
         if self.measured_data:
@@ -2071,7 +2100,7 @@ class MainApp(ctk.CTk):
         """Re-stamp all custom_measure_points and measured_data text on the
         stitched canvas after canvas.delete('all').  Uses _s directly so markers
         remain correct at any zoom/pan level."""
-        if not self.custom_measure_points and not self.measured_data:
+        if not self.custom_measure_points and not self.measured_data and self.datum_point is None:
             return
 
         # Tile-0 centre in full-res stitched pixels (same constants as _render)
@@ -2093,8 +2122,12 @@ class MainApp(ctk.CTk):
             fpy = _t0y + d_py
             return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
 
-        # Crosshair markers (only for points not yet in measured_data)
-        measured_set = set(range(len(self.measured_data)))
+        # Re-draw datum marker if one was placed
+        if self.datum_point is not None:
+            dcx, dcy = _phys_to_canvas(self.datum_point[0], self.datum_point[1])
+            self._draw_datum_pt_marker(canvas, dcx, dcy)
+
+        # Crosshair markers for custom measurement points
         for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
             cx, cy = _phys_to_canvas(phys_x, phys_y)
             self._draw_custom_pt_marker(canvas, cx, cy)
@@ -2102,8 +2135,15 @@ class MainApp(ctk.CTk):
         # Height text (measured_data is in optimised order; use its own phys coords)
         for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
             cx, cy = _phys_to_canvas(phys_x, phys_y)
-            fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
-            canvas.create_text(cx, cy - 15, text=f"{height:.3f} mm",
+            is_datum = (self.datum_point is not None and (phys_x, phys_y) == self.datum_point)
+            if is_datum:
+                fill = "magenta"
+                label = f"{height:.3f} mm (Datum)"
+            elif i in self.analysis_selected_indices:
+                fill, label = "#00FF44", f"{height:.3f} mm"
+            else:
+                fill, label = "cyan", f"{height:.3f} mm"
+            canvas.create_text(cx, cy - 15, text=label,
                                fill=fill, font=("Arial", 12, "bold"),
                                tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
 
@@ -2112,6 +2152,8 @@ class MainApp(ctk.CTk):
 
     def _on_right_click_point(self, event, canvas):
         """<Button-3>: drop a measurement marker at the clicked canvas position."""
+        if event.state & 0x4:  # Ctrl held — this is a datum drop, handled separately
+            return
         canvas_w = canvas.winfo_width()
         canvas_h = canvas.winfo_height()
         phys_x, phys_y = self._canvas_pixel_to_phys(event.x, event.y, canvas_w, canvas_h)
@@ -2146,6 +2188,9 @@ class MainApp(ctk.CTk):
         right-click (no significant pan drag).  Converts canvas pixels → full
         stitched-image pixels → physical mm using the standard helper.
         """
+        # Ctrl+RClick is a datum drop — let _on_datum_point_stitched handle it
+        if event.state & 0x4:
+            return
         # Ignore if the user was panning (drag threshold = 5 px)
         start_x = getattr(canvas, '_pan_start_x', event.x)
         start_y = getattr(canvas, '_pan_start_y', event.y)
@@ -2182,6 +2227,43 @@ class MainApp(ctk.CTk):
         print(f"[custom_pt/stitched] point {len(self.custom_measure_points)}: "
               f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
 
+    def _on_datum_point_image(self, event, canvas):
+        """<Control-ButtonRelease-3> on the Image tab: place or replace the datum marker."""
+        canvas_w = canvas.winfo_width()
+        canvas_h = canvas.winfo_height()
+        phys_x, phys_y = self._canvas_pixel_to_phys(event.x, event.y, canvas_w, canvas_h)
+        if phys_x is None or phys_y is None:
+            return
+        self.datum_point = (phys_x, phys_y)
+        self._roi_active_canvas = canvas
+        canvas.delete("datum_pt")
+        self._draw_datum_pt_marker(canvas, event.x, event.y)
+        print(f"[datum] set at ({phys_x:.4f} mm, {phys_y:.4f} mm)")
+
+    def _on_datum_point_stitched(self, event, canvas, _s,
+                                  stitched_w, stitched_h,
+                                  grid_x, grid_y,
+                                  scan_origin_x, scan_origin_y):
+        """<Control-ButtonRelease-3> on the stitched canvas: place or replace the datum marker."""
+        # Ignore if the button was released after a pan drag (same 5 px threshold)
+        start_x = getattr(canvas, '_pan_start_x', event.x)
+        start_y = getattr(canvas, '_pan_start_y', event.y)
+        if abs(event.x - start_x) > 5 or abs(event.y - start_y) > 5:
+            return
+        full_px = (event.x - _s['ox']) / _s['sx']
+        full_py = (event.y - _s['oy']) / _s['sy']
+        phys_x, phys_y = self.calculate_stitched_phys_coords(
+            full_px, full_py,
+            stitched_w, stitched_h,
+            grid_x, grid_y,
+            scan_origin_x, scan_origin_y,
+        )
+        self.datum_point = (phys_x, phys_y)
+        self._roi_active_canvas = canvas
+        canvas.delete("datum_pt")
+        self._draw_datum_pt_marker(canvas, event.x, event.y)
+        print(f"[datum/stitched] set at ({phys_x:.4f} mm, {phys_y:.4f} mm)")
+
     def _clear_custom_points(self):
         """Universal canvas clear: wipes right-click measurement points AND the
         Ctrl+Drag ROI grid, resetting all related state and UI to neutral."""
@@ -2189,6 +2271,7 @@ class MainApp(ctk.CTk):
         self.custom_measure_points.clear()
         self.measured_data.clear()
         self.analysis_selected_indices.clear()
+        self.datum_point = None
         if hasattr(self, 'analysis_result_var'):
             self.analysis_result_var.set("Analysis: Select points...")
 
@@ -2207,6 +2290,7 @@ class MainApp(ctk.CTk):
             self._roi_active_canvas.tag_unbind("measurement_text", "<Button-1>")
             self._roi_active_canvas.delete("custom_pt")
             self._roi_active_canvas.delete("roi_grid")
+            self._roi_active_canvas.delete("datum_pt")
 
         # ── Info label readouts → neutral dashes ─────────────────────────────
         for _var, _val in (
@@ -2283,6 +2367,16 @@ class MainApp(ctk.CTk):
             messagebox.showwarning("No Points", "Right-click the image to add measurement points first.")
             return
 
+        # ── Datum check ───────────────────────────────────────────────────────
+        if self.datum_point is None:
+            proceed = messagebox.askyesno(
+                "No Datum Selected",
+                "No datum point selected (Ctrl + Right-Click). Heights will be measured "
+                "with the default sensor datum.\n\nDo you want to proceed?"
+            )
+            if not proceed:
+                return
+
         # ── Save camera assembly origin before any movement ───────────────────
         # Must be captured here, before the confocal offset shifts the targets.
         self._sequence_origin_x = float(self.x_pos)
@@ -2300,6 +2394,12 @@ class MainApp(ctk.CTk):
             unvisited.remove(nearest)
             optimized_route.append(nearest)
             current_x, current_y = nearest
+
+        # ── Append datum point so the sensor physically visits it ────────────
+        # The datum is appended after the nearest-neighbour sort so it is always
+        # the last point visited, minimising unnecessary travel.
+        if self.datum_point is not None:
+            optimized_route.append(self.datum_point)
 
         # ── Apply confocal-camera offset to every target point ────────────────
         # The confocal sensor is offset from the camera by this fixed amount.
@@ -2453,7 +2553,18 @@ class MainApp(ctk.CTk):
         ordered_points = getattr(self, '_optimized_route', self.custom_measure_points)
 
         # ── Persist measurement data for analysis mode ────────────────────────
-        self.measured_data = [(px, py, h) for (px, py), h in zip(ordered_points, results)]
+        # For custom scans subtract datum Z so every height is relative to the datum.
+        if getattr(self, '_sequence_mode', 'custom') != "grid":
+            datum_z = 0.0
+            if self.datum_point is not None:
+                for (px, py), h in zip(ordered_points, results):
+                    if (px, py) == self.datum_point:
+                        datum_z = h
+                        break
+            self.measured_data = [(px, py, h - datum_z)
+                                  for (px, py), h in zip(ordered_points, results)]
+        else:
+            self.measured_data = [(px, py, h) for (px, py), h in zip(ordered_points, results)]
         self.analysis_selected_indices = []
         if hasattr(self, 'analysis_result_var'):
             self.analysis_result_var.set("Analysis: Select points...")
@@ -2500,10 +2611,14 @@ class MainApp(ctk.CTk):
                         cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
 
                     if cx is not None:
+                        is_datum = (self.datum_point is not None
+                                    and (phys_x, phys_y) == self.datum_point)
+                        label = f"{height:.3f} mm (Datum)" if is_datum else f"{height:.3f} mm"
+                        fill  = "magenta" if is_datum else "cyan"
                         canvas.create_text(
                             cx, cy - 15,
-                            text=f"{height:.3f} mm",
-                            fill="cyan", font=("Arial", 12, "bold"),
+                            text=label,
+                            fill=fill, font=("Arial", 12, "bold"),
                             tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
 
                 # Bind left-click on text labels to toggle analysis selection
