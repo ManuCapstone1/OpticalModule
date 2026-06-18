@@ -7,9 +7,17 @@ import json
 import time
 import re
 import os
+import csv
 import shutil
+import socket
+import math
 from threading import Thread
 from stage import home_smaract
+
+# Confocal sensor network settings (CL_Navigator TCP/IP interface)
+_CONFOCAL_IP      = "169.254.0.20"
+_CONFOCAL_PORT    = 24685
+_CONFOCAL_TIMEOUT = 2.0
 
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -37,7 +45,7 @@ class MainApp(ctk.CTk):
         self.x_pos = 0
         self.y_pos = 0
         self.z_pos = 0
-        self.is_at_interferometer = False
+        self.is_at_confocal = False
 
         #Camera and image data
         self.exposure_time = 0
@@ -1057,15 +1065,15 @@ class MainApp(ctk.CTk):
         refresh_coord_btn.grid(row=5,column=0,columnspan = 3, padx=5, pady=5, sticky="ew")
 
         # Additional Controls (Buttons)
-        # Toggle button: Switch stage between interferometer and camera positions
-        self.interferometer_toggle_btn = ctk.CTkButton(
+        # Toggle button: Switch stage between Confocal and Optical positions
+        self.confocal_toggle_btn = ctk.CTkButton(
             button_frame,
             text="Confocal",
             font=("Arial", 14),
             fg_color="green",
             command=self.toggle_interferometer_camera
         )
-        self.interferometer_toggle_btn.pack(pady=5, fill='x')
+        self.confocal_toggle_btn.pack(pady=5, fill='x')
 
         # Homing Button: Starts homing procedure for the motors
         home_btn = ctk.CTkButton(button_frame, text="Homing", width = 200, height = 50, font=("Arial", 20), fg_color="blue", text_color="white",
@@ -2361,22 +2369,59 @@ class MainApp(ctk.CTk):
         self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
 
     def _sequence_wait_then_measure(self, route, index, results):
-        """Poll until the stage reaches Idle (move complete), then simulate a
-        measurement dwell before recording the (dummy) height."""
+        """Poll until the stage reaches Idle (move complete), then fire a
+        daemon thread to read the confocal sensor without blocking the GUI."""
         if self.module_status != "Idle":
             self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
             return
 
-        print(f"[sequence] stage idle — simulating measurement dwell at point {index + 1}/{len(route)}")
-        # No hardware measurement command is sent while in simulation mode.
-        # A 500 ms delay simulates sensor dwell time before reading back the value.
-        self.after(500, lambda: self._sequence_record_height(route, index, results))
+        print(f"[sequence] stage idle — reading confocal sensor at point {index + 1}/{len(route)}")
+        result_holder = [None]   # thread writes float/NaN here; None means not done yet
+        t = Thread(target=self._confocal_read_worker, args=(result_holder,), daemon=True)
+        t.start()
+        self.after(100, lambda: self._sequence_poll_sensor_result(route, index, results, result_holder, t))
 
-    def _sequence_record_height(self, route, index, results):
-        """Record the (dummy) height reading and advance to the next point."""
-        dummy_height = 0.0  # TODO: replace with actual confocal sensor readback
-        results.append(dummy_height)
-        print(f"[sequence] point {index + 1}/{len(route)}: height = {dummy_height:.4f} mm (placeholder)")
+    def _confocal_read_worker(self, result_holder):
+        """Connect to the confocal sensor over TCP, request one measurement,
+        and store the result in result_holder[0]. Runs in a daemon thread."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(_CONFOCAL_TIMEOUT)
+                s.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
+                # Switch controller to measurement mode; drain the acknowledgement
+                s.sendall("R0\r".encode('ascii'))
+                s.recv(1024)
+                # Request a single measurement from channel 1, output 1
+                s.sendall("MS,1,1\r".encode('ascii'))
+                response = s.recv(1024).decode('ascii')
+                parts = response.split(',')
+                if len(parts) >= 2:
+                    result_holder[0] = float(parts[1].strip())
+                else:
+                    print(f"[confocal] unexpected response: {response!r}")
+                    result_holder[0] = float('nan')
+        except Exception as e:
+            print(f"[confocal] WARNING: sensor read failed — {e}")
+            result_holder[0] = float('nan')
+
+    def _sequence_poll_sensor_result(self, route, index, results, result_holder, thread):
+        """Poll every 100 ms until the confocal read thread finishes, then
+        pass the height to _sequence_record_height to advance the sequence."""
+        if thread.is_alive():
+            self.after(100, lambda: self._sequence_poll_sensor_result(
+                route, index, results, result_holder, thread))
+            return
+        height = result_holder[0]
+        if height is None or math.isnan(height):
+            print(f"[sequence] WARNING: sensor returned no data at point {index + 1} — recording NaN")
+            height = float('nan')
+        self._sequence_record_height(route, index, results, height)
+
+    def _sequence_record_height(self, route, index, results, height):
+        """Record the live confocal height and advance to the next point."""
+        results.append(height)
+        height_str = f"{height:.4f} mm" if not math.isnan(height) else "NaN (sensor error)"
+        print(f"[sequence] point {index + 1}/{len(route)}: height = {height_str}")
         self._sequence_measure_point(route, index + 1, results)
 
     def _phys_to_canvas_pixel(self, phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h):
@@ -2423,45 +2468,65 @@ class MainApp(ctk.CTk):
             # standard Image tab, and pick the matching inverse-transform path.
             is_stitched = (self.active_main_view == "stitched")
 
-            for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
-                if is_stitched:
-                    # Use stitched-image coordinate helper (zoom/pan-aware via _s
-                    # was already applied at click time; use stored scan geometry).
-                    grid_x  = getattr(self, 'scanning_grid_x', 1)
-                    grid_y  = getattr(self, 'scanning_grid_y', 1)
-                    step_x  = self.scanning_data.get('step_x', 1.0)
-                    step_y  = self.scanning_data.get('step_y', 1.0)
-                    scan_end_x   = getattr(self, 'scan_end_x', 0.0)
-                    scan_end_y   = getattr(self, 'scan_end_y', 0.0)
-                    scan_origin_x = scan_end_x - (grid_x - 1) * step_x
-                    scan_origin_y = scan_end_y - (grid_y - 1) * step_y
-                    stitched_w = getattr(self, '_stitch_img_w', cw)
-                    stitched_h = getattr(self, '_stitch_img_h', ch)
-                    cx, cy = self.calculate_phys_to_stitched_pixel_coords(
-                        phys_x, phys_y,
-                        stitched_w, stitched_h,
-                        grid_x, grid_y,
-                        scan_origin_x, scan_origin_y,
-                        cw, ch,
-                    )
-                else:
-                    if self._canvas_disp_w == 0:
-                        continue
-                    ref_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
-                    ref_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
-                    cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
+            # Skip per-point canvas labels for grid scans — thousands of labels
+            # would be unreadable and slow; data is captured in the CSV instead.
+            if getattr(self, '_sequence_mode', 'custom') != "grid":
+                for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
+                    if is_stitched:
+                        # Use stitched-image coordinate helper (zoom/pan-aware via _s
+                        # was already applied at click time; use stored scan geometry).
+                        grid_x  = getattr(self, 'scanning_grid_x', 1)
+                        grid_y  = getattr(self, 'scanning_grid_y', 1)
+                        step_x  = self.scanning_data.get('step_x', 1.0)
+                        step_y  = self.scanning_data.get('step_y', 1.0)
+                        scan_end_x   = getattr(self, 'scan_end_x', 0.0)
+                        scan_end_y   = getattr(self, 'scan_end_y', 0.0)
+                        scan_origin_x = scan_end_x - (grid_x - 1) * step_x
+                        scan_origin_y = scan_end_y - (grid_y - 1) * step_y
+                        stitched_w = getattr(self, '_stitch_img_w', cw)
+                        stitched_h = getattr(self, '_stitch_img_h', ch)
+                        cx, cy = self.calculate_phys_to_stitched_pixel_coords(
+                            phys_x, phys_y,
+                            stitched_w, stitched_h,
+                            grid_x, grid_y,
+                            scan_origin_x, scan_origin_y,
+                            cw, ch,
+                        )
+                    else:
+                        if self._canvas_disp_w == 0:
+                            continue
+                        ref_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
+                        ref_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
+                        cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
 
-                if cx is not None:
-                    canvas.create_text(
-                        cx, cy - 15,
-                        text=f"{height:.3f} mm",
-                        fill="cyan", font=("Arial", 12, "bold"),
-                        tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
+                    if cx is not None:
+                        canvas.create_text(
+                            cx, cy - 15,
+                            text=f"{height:.3f} mm",
+                            fill="cyan", font=("Arial", 12, "bold"),
+                            tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
 
-            # Bind left-click on text labels to toggle analysis selection
-            canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
+                # Bind left-click on text labels to toggle analysis selection
+                canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
 
-        # ── Return camera assembly to its pre-sequence position ───────────────
+        # ── CSV export for grid scans ─────────────────────────────────────────
+        if getattr(self, '_sequence_mode', 'custom') == "grid":
+            export_dir = os.path.join(os.path.expanduser('~'), 'optical_module', 'Data_Exports')
+            os.makedirs(export_dir, exist_ok=True)
+            csv_path = os.path.join(export_dir, self._sequence_csv)
+            try:
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['X_mm', 'Y_mm', 'Z_mm'])
+                    for px, py, h in self.measured_data:
+                        writer.writerow([f"{px:.4f}", f"{py:.4f}", f"{h:.4f}"])
+                print(f"[surface_map] Grid scan complete. Data saved to {csv_path}")
+                messagebox.showinfo("Scan Complete", f"Surface map successfully completed!\n\nData saved to:\n{csv_path}")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
+            self._sequence_mode = "custom"   # reset so the next custom scan draws labels
+
+        # ── Return Optical assembly to its pre-sequence position ──────────────
         origin_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
         origin_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
         print(f"[sequence] returning to origin ({origin_x:.4f}, {origin_y:.4f}) mm")
@@ -3213,43 +3278,51 @@ class MainApp(ctk.CTk):
             messagebox.showerror("No ROI", "Draw a region first: hold Ctrl and drag on the image.")
             return
 
-        # ── Convert to nanometres for the SmarAct API ───────────────────────
-        start_x_nm  = round(self.roi_phys_x_start * 1_000_000)
-        start_y_nm  = round(self.roi_phys_y_start * 1_000_000)
-        step_x_nm   = round(cell_x * 1_000_000)
-        step_y_nm   = round(cell_y * 1_000_000)   # reserved; see TODO below
-        total_pts   = nx * ny
-        est_sec     = total_pts * 4
-
         self.map_grid_x = nx
         self.map_grid_y = ny
 
-        print(
-            f"[surface_map] Grid: {nx}×{ny} = {total_pts} points\n"
-            f"  Origin:  ({self.roi_phys_x_start:.4f} mm, {self.roi_phys_y_start:.4f} mm)\n"
-            f"  Step X:  {cell_x:.4f} mm  ({step_x_nm} nm)\n"
-            f"  Step Y:  {cell_y:.4f} mm  ({step_y_nm} nm)\n"
-            f"  Output:  {csv_name}.csv"
-        )
+        # ── Phase 2: Generate raster-snake Optical coordinates ───────────────
+        dx = (self.roi_phys_x_end - self.roi_phys_x_start) / (nx - 1) if nx > 1 else 0
+        dy = (self.roi_phys_y_end - self.roi_phys_y_start) / (ny - 1) if ny > 1 else 0
+        snake_route = []
+        for j in range(ny):
+            y = self.roi_phys_y_start + j * dy
+            x_indices = range(nx) if j % 2 == 0 else reversed(range(nx))
+            for i in x_indices:
+                snake_route.append((self.roi_phys_x_start + i * dx, y))
+        self._optimized_route = snake_route
 
-        messagebox.showinfo(
-            "Map Surface — WIP",
-            f"Surface map parameters confirmed:\n\n"
-            f"  Grid:          {nx} × {ny} = {total_pts} points\n"
-            f"  Cell size:     {cell_x:.4f} mm × {cell_y:.4f} mm\n"
-            f"  Coverage:      {cell_x*(nx-1):.3f} mm × {cell_y*(ny-1):.3f} mm\n"
-            f"  Estimated time: WIP (~{est_sec} s)\n"
-            f"  Output file:   {csv_name}.csv\n\n"
-            "Scan execution is WIP — hardware call not yet wired."
-        )
+        # ── Phase 2: Apply Confocal→Optical offset and bounds check ──────────
+        CONFOCAL_DX = -1.418137875
+        CONFOCAL_DY = -72.258765875
+        offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in snake_route]
 
-        # TODO: call run_topography_map() in a background Thread and write results
-        #   to {csv_name}.csv.  Note: run_topography_map() currently accepts a single
-        #   step_size_nm; separate X/Y step sizes will require a future API change.
-        #   Suggested call once the API is updated:
-        #     Thread(target=_run_scan, daemon=True).start()
-        #   where _run_scan opens the MCS handle, calls run_topography_map with
-        #   start_x_nm, start_y_nm, step_x_nm, step_y_nm, nx, ny, then writes CSV.
+        for target_x, target_y in offset_route:
+            if target_x < 0 or target_y < 0:
+                messagebox.showerror(
+                    "Hardware Limit Exceeded",
+                    f"Cannot execute grid scan: applying the Confocal sensor offset would require "
+                    f"the stage to move to ({target_x:.3f} mm, {target_y:.3f} mm), which exceeds "
+                    f"the hardware limit of 0 mm.\n\n"
+                    f"Please reposition the sample so the entire scan region is within stage bounds."
+                )
+                return
+
+        # ── Phase 3: Launch execution ─────────────────────────────────────────
+        self._sequence_mode     = "grid"
+        self._sequence_csv      = csv_name if csv_name.endswith('.csv') else f"{csv_name}.csv"
+        self._sequence_origin_x = float(self.x_pos)
+        self._sequence_origin_y = float(self.y_pos)
+
+        for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
+                     '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
+                     '_stitch_map_surface_btn'):
+            self._safe_btn(_btn, state="disabled")
+
+        print(f"[surface_map] Grid {nx}×{ny} = {len(offset_route)} pts  "
+              f"origin ({self._sequence_origin_x:.4f}, {self._sequence_origin_y:.4f}) mm  "
+              f"→ {self._sequence_csv}")
+        self._sequence_measure_point(offset_route, 0, [])
 
     def start_surface_map_stitched(self):
         """Variant of start_surface_map that reads from the stitched-view ROI entries."""
@@ -3279,30 +3352,51 @@ class MainApp(ctk.CTk):
             messagebox.showerror("No ROI", "Draw a region first: hold Ctrl and drag on the image.")
             return
 
-        step_x_nm = round(cell_x * 1_000_000)
-        step_y_nm = round(cell_y * 1_000_000)
-        total_pts = nx * ny
-        est_sec   = total_pts * 4
         self.map_grid_x = nx
         self.map_grid_y = ny
 
-        print(
-            f"[surface_map_stitched] Grid: {nx}×{ny} = {total_pts} points\n"
-            f"  Origin:  ({self.roi_phys_x_start:.4f} mm, {self.roi_phys_y_start:.4f} mm)\n"
-            f"  Step X:  {cell_x:.4f} mm  ({step_x_nm} nm)\n"
-            f"  Step Y:  {cell_y:.4f} mm  ({step_y_nm} nm)\n"
-            f"  Output:  {csv_name}.csv"
-        )
-        messagebox.showinfo(
-            "Map Surface — WIP",
-            f"Surface map parameters confirmed:\n\n"
-            f"  Grid:          {nx} × {ny} = {total_pts} points\n"
-            f"  Cell size:     {cell_x:.4f} mm × {cell_y:.4f} mm\n"
-            f"  Coverage:      {cell_x*(nx-1):.3f} mm × {cell_y*(ny-1):.3f} mm\n"
-            f"  Estimated time: ~{est_sec} s\n"
-            f"  Output file:   {csv_name}.csv\n\n"
-            "Scan execution is WIP — hardware call not yet wired."
-        )
+        # ── Phase 2: Generate raster-snake Optical coordinates ───────────────
+        dx = (self.roi_phys_x_end - self.roi_phys_x_start) / (nx - 1) if nx > 1 else 0
+        dy = (self.roi_phys_y_end - self.roi_phys_y_start) / (ny - 1) if ny > 1 else 0
+        snake_route = []
+        for j in range(ny):
+            y = self.roi_phys_y_start + j * dy
+            x_indices = range(nx) if j % 2 == 0 else reversed(range(nx))
+            for i in x_indices:
+                snake_route.append((self.roi_phys_x_start + i * dx, y))
+        self._optimized_route = snake_route
+
+        # ── Phase 2: Apply Confocal→Optical offset and bounds check ──────────
+        CONFOCAL_DX = -1.418137875
+        CONFOCAL_DY = -72.258765875
+        offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in snake_route]
+
+        for target_x, target_y in offset_route:
+            if target_x < 0 or target_y < 0:
+                messagebox.showerror(
+                    "Hardware Limit Exceeded",
+                    f"Cannot execute grid scan: applying the Confocal sensor offset would require "
+                    f"the stage to move to ({target_x:.3f} mm, {target_y:.3f} mm), which exceeds "
+                    f"the hardware limit of 0 mm.\n\n"
+                    f"Please reposition the sample so the entire scan region is within stage bounds."
+                )
+                return
+
+        # ── Phase 3: Launch execution ─────────────────────────────────────────
+        self._sequence_mode     = "grid"
+        self._sequence_csv      = csv_name if csv_name.endswith('.csv') else f"{csv_name}.csv"
+        self._sequence_origin_x = float(self.x_pos)
+        self._sequence_origin_y = float(self.y_pos)
+
+        for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
+                     '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
+                     '_stitch_map_surface_btn'):
+            self._safe_btn(_btn, state="disabled")
+
+        print(f"[surface_map_stitched] Grid {nx}×{ny} = {len(offset_route)} pts  "
+              f"origin ({self._sequence_origin_x:.4f}, {self._sequence_origin_y:.4f}) mm  "
+              f"→ {self._sequence_csv}")
+        self._sequence_measure_point(offset_route, 0, [])
 
     # -------------------------- Details Tab ------------------------ #
 
@@ -4487,7 +4581,7 @@ class MainApp(ctk.CTk):
         )
 
     def toggle_interferometer_camera(self):
-        if not self.is_at_interferometer:
+        if not self.is_at_confocal:
             dx, dy = -1.418137875, -72.258765875
             new_label = "Optical"
         else:
@@ -4512,8 +4606,8 @@ class MainApp(ctk.CTk):
             print(f"Warning: toggle move failed — {e}")
             return
 
-        self.is_at_interferometer = not self.is_at_interferometer
-        self.interferometer_toggle_btn.configure(text=new_label)
+        self.is_at_confocal = not self.is_at_confocal
+        self.confocal_toggle_btn.configure(text=new_label)
 
     def _start_smaract_homing(self):
         """
