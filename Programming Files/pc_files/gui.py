@@ -15,9 +15,14 @@ from threading import Thread
 from stage import home_smaract
 
 # Confocal sensor network settings (CL_Navigator TCP/IP interface)
-_CONFOCAL_IP      = "169.254.0.20"
-_CONFOCAL_PORT    = 24685
-_CONFOCAL_TIMEOUT = 2.0
+_CONFOCAL_IP           = "169.254.0.20"
+_CONFOCAL_PORT         = 24685
+_CONFOCAL_TIMEOUT      = 2.0
+# Mechanical settling delay: time (ms) to wait after the motor controller reports
+# "Idle" before triggering a measurement.  The SmarAct servo reports move-complete
+# when the encoder is within dead-band, but the physical assembly continues to ring.
+# 500 ms is a conservative starting value; reduce only after vibration characterisation.
+_SETTLING_DELAY_MS     = 500
 
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -2191,9 +2196,11 @@ class MainApp(ctk.CTk):
         # Ctrl+RClick is a datum drop — let _on_datum_point_stitched handle it
         if event.state & 0x4:
             return
-        # Ignore if the user was panning (drag threshold = 5 px)
-        start_x = getattr(canvas, '_pan_start_x', event.x)
-        start_y = getattr(canvas, '_pan_start_y', event.y)
+        # Ignore if the user was panning (drag threshold = 5 px).
+        # Use _pan_origin_x/y (set once on press) not _pan_start_x/y (reset each
+        # _do_pan tick), so the total drag distance is measured correctly.
+        start_x = getattr(canvas, '_pan_origin_x', event.x)
+        start_y = getattr(canvas, '_pan_origin_y', event.y)
         if abs(event.x - start_x) > 5 or abs(event.y - start_y) > 5:
             return
 
@@ -2245,9 +2252,10 @@ class MainApp(ctk.CTk):
                                   grid_x, grid_y,
                                   scan_origin_x, scan_origin_y):
         """<Control-ButtonRelease-3> on the stitched canvas: place or replace the datum marker."""
-        # Ignore if the button was released after a pan drag (same 5 px threshold)
-        start_x = getattr(canvas, '_pan_start_x', event.x)
-        start_y = getattr(canvas, '_pan_start_y', event.y)
+        # Ignore if the button was released after a pan drag (same 5 px threshold).
+        # Use _pan_origin_x/y (set once on press) not _pan_start_x/y (reset each tick).
+        start_x = getattr(canvas, '_pan_origin_x', event.x)
+        start_y = getattr(canvas, '_pan_origin_y', event.y)
         if abs(event.x - start_x) > 5 or abs(event.y - start_y) > 5:
             return
         full_px = (event.x - _s['ox']) / _s['sx']
@@ -2425,6 +2433,26 @@ class MainApp(ctk.CTk):
                 )
                 return
 
+        # ── Open persistent Confocal socket; send R0 exactly once ────────────
+        # Keeping the socket open for the whole sequence mirrors confocal_looped.py:
+        # the CL-Navigator's AGC and averaging buffer stay warm, eliminating the
+        # per-point state-machine reset that caused measurement instability.
+        try:
+            _cs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _cs.settimeout(_CONFOCAL_TIMEOUT)
+            _cs.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
+            _cs.sendall("R0\r".encode('ascii'))
+            _cs.recv(1024)   # drain mode-switch acknowledgement
+            self._confocal_socket = _cs
+            print("[confocal] persistent socket open; measurement mode active")
+        except Exception as _e:
+            messagebox.showerror(
+                "Confocal Unreachable",
+                f"Cannot connect to the Confocal sensor:\n{_e}\n\n"
+                f"Check that CL-Navigator is running and the network cable is connected."
+            )
+            return
+
         # Disable action buttons on both tabs for the duration of the sequence
         for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
                      '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
@@ -2458,6 +2486,7 @@ class MainApp(ctk.CTk):
                 f"Point {index + 1}/{len(route)} ({target_x:.4f}, {target_y:.4f} mm) "
                 f"is out of stage range.\nSequence aborted."
             )
+            self._close_confocal_socket()
             self._sequence_unlock_buttons()
             return
 
@@ -2469,40 +2498,65 @@ class MainApp(ctk.CTk):
         self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
 
     def _sequence_wait_then_measure(self, route, index, results):
-        """Poll until the stage reaches Idle (move complete), then fire a
-        daemon thread to read the confocal sensor without blocking the GUI."""
+        """Poll until the stage reaches Idle, wait for mechanical settling, then
+        fire a daemon thread to read the confocal sensor without blocking the GUI."""
         if self.module_status != "Idle":
             self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
             return
 
-        print(f"[sequence] stage idle — reading confocal sensor at point {index + 1}/{len(route)}")
+        # Insert a mandatory settling delay before measuring.  The motor controller
+        # reports "Idle" when the servo encoder is within dead-band, but the physical
+        # camera assembly continues to ring for hundreds of milliseconds afterward.
+        # Measuring without this delay was the confirmed primary cause of the 269 µm
+        # run-to-run tramming discrepancy.
+        print(f"[sequence] stage idle — waiting {_SETTLING_DELAY_MS} ms for mechanical settling "
+              f"(point {index + 1}/{len(route)})")
+        self.after(_SETTLING_DELAY_MS, lambda: self._sequence_fire_sensor_read(route, index, results))
+
+    def _sequence_fire_sensor_read(self, route, index, results):
+        """Called after the mechanical settling delay has elapsed; starts the
+        confocal read thread and schedules the result-polling loop."""
+        print(f"[sequence] settling complete — reading confocal sensor at point {index + 1}/{len(route)}")
         result_holder = [None]   # thread writes float/NaN here; None means not done yet
         t = Thread(target=self._confocal_read_worker, args=(result_holder,), daemon=True)
         t.start()
         self.after(100, lambda: self._sequence_poll_sensor_result(route, index, results, result_holder, t))
 
     def _confocal_read_worker(self, result_holder):
-        """Connect to the confocal sensor over TCP, request one measurement,
-        and store the result in result_holder[0]. Runs in a daemon thread."""
+        """Read one height from the persistent socket opened by execute_custom_measurements.
+        Runs in a daemon thread.  R0 is NOT re-sent here — the socket is already in
+        measurement mode and the CL-Navigator's internal AGC/averaging state is stable.
+
+        Two-phase MS read: flush one buffered sample (may have been captured at the
+        exact moment the assembly stopped), then take the authoritative reading."""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(_CONFOCAL_TIMEOUT)
-                s.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
-                # Switch controller to measurement mode; drain the acknowledgement
-                s.sendall("R0\r".encode('ascii'))
-                s.recv(1024)
-                # Request a single measurement from channel 1, output 1
-                s.sendall("MS,1,1\r".encode('ascii'))
-                response = s.recv(1024).decode('ascii')
-                parts = response.split(',')
-                if len(parts) >= 2:
-                    result_holder[0] = float(parts[1].strip())
-                else:
-                    print(f"[confocal] unexpected response: {response!r}")
-                    result_holder[0] = float('nan')
+            s = self._confocal_socket
+            # Flush: discard the sample most recently buffered by the controller
+            s.sendall("MS,1,1\r".encode('ascii'))
+            s.recv(1024)
+            # Real measurement: freshly acquired after the flush round-trip
+            s.sendall("MS,1,1\r".encode('ascii'))
+            response = s.recv(1024).decode('ascii')
+            parts = response.split(',')
+            if len(parts) >= 2:
+                result_holder[0] = float(parts[1].strip())
+            else:
+                print(f"[confocal] unexpected response: {response!r}")
+                result_holder[0] = float('nan')
         except Exception as e:
             print(f"[confocal] WARNING: sensor read failed — {e}")
             result_holder[0] = float('nan')
+
+    def _close_confocal_socket(self):
+        """Safely close and discard the persistent Confocal TCP socket.
+        Safe to call even if the socket was never opened or already closed."""
+        s = getattr(self, '_confocal_socket', None)
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+            self._confocal_socket = None
 
     def _sequence_poll_sensor_result(self, route, index, results, result_holder, thread):
         """Poll every 100 ms until the confocal read thread finishes, then
@@ -2641,6 +2695,9 @@ class MainApp(ctk.CTk):
                 messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
             self._sequence_mode = "custom"   # reset so the next custom scan draws labels
 
+        # ── Close Confocal socket now that all measurements are complete ─────
+        self._close_confocal_socket()
+
         # ── Return Optical assembly to its pre-sequence position ──────────────
         origin_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
         origin_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
@@ -2657,6 +2714,9 @@ class MainApp(ctk.CTk):
         if self.module_status != "Idle":
             self.after(500, self._sequence_unlock_buttons)
             return
+
+        # Safety-net: close socket in case any abort path didn't reach _process_measurement_results
+        self._close_confocal_socket()
 
         print("[sequence] origin reached — unlocking action buttons")
         # Re-enable whichever tab's buttons are currently in the widget tree
@@ -3429,6 +3489,23 @@ class MainApp(ctk.CTk):
         self._sequence_origin_x = float(self.x_pos)
         self._sequence_origin_y = float(self.y_pos)
 
+        # Open persistent Confocal socket; send R0 exactly once before the sequence.
+        try:
+            _cs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _cs.settimeout(_CONFOCAL_TIMEOUT)
+            _cs.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
+            _cs.sendall("R0\r".encode('ascii'))
+            _cs.recv(1024)
+            self._confocal_socket = _cs
+            print("[confocal] persistent socket open; measurement mode active")
+        except Exception as _e:
+            messagebox.showerror(
+                "Confocal Unreachable",
+                f"Cannot connect to the Confocal sensor:\n{_e}\n\n"
+                f"Check that CL-Navigator is running and the network cable is connected."
+            )
+            return
+
         for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
                      '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
                      '_stitch_map_surface_btn'):
@@ -3502,6 +3579,23 @@ class MainApp(ctk.CTk):
         self._sequence_csv      = csv_name if csv_name.endswith('.csv') else f"{csv_name}.csv"
         self._sequence_origin_x = float(self.x_pos)
         self._sequence_origin_y = float(self.y_pos)
+
+        # Open persistent Confocal socket; send R0 exactly once before the sequence.
+        try:
+            _cs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _cs.settimeout(_CONFOCAL_TIMEOUT)
+            _cs.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
+            _cs.sendall("R0\r".encode('ascii'))
+            _cs.recv(1024)
+            self._confocal_socket = _cs
+            print("[confocal] persistent socket open; measurement mode active")
+        except Exception as _e:
+            messagebox.showerror(
+                "Confocal Unreachable",
+                f"Cannot connect to the Confocal sensor:\n{_e}\n\n"
+                f"Check that CL-Navigator is running and the network cable is connected."
+            )
+            return
 
         for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
                      '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
