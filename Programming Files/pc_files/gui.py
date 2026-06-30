@@ -15,9 +15,14 @@ from threading import Thread
 from stage import home_smaract
 
 # Confocal sensor network settings (CL_Navigator TCP/IP interface)
-_CONFOCAL_IP      = "169.254.0.20"
-_CONFOCAL_PORT    = 24685
-_CONFOCAL_TIMEOUT = 2.0
+_CONFOCAL_IP           = "169.254.0.20"
+_CONFOCAL_PORT         = 24685
+_CONFOCAL_TIMEOUT      = 2.0
+# Mechanical settling delay: time (ms) to wait after the motor controller reports
+# "Idle" before triggering a measurement.  The SmarAct servo reports move-complete
+# when the encoder is within dead-band, but the physical assembly continues to ring.
+# 500 ms is a conservative starting value; reduce only after vibration characterisation.
+_SETTLING_DELAY_MS     = 500
 
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -96,7 +101,9 @@ class MainApp(ctk.CTk):
         self.sampling_state = 0
         self.scanning_state = 0
         self.is_stitching = False
+        self.stitching_generation = 0    # incremented each scan; stale pollers use this to self-discard
         self.scan_in_progress = False    # set when scan command sent; cleared on state 0→1
+        self.saw_scanning_status = False # True once Pi sends a "Scanning" status; prevents premature 0→1 trigger
         self.sample_in_progress = False  # set when sampling command sent; cleared on state 0→1
 
         #-------------- Main Tab View State -----------------#
@@ -126,8 +133,10 @@ class MainApp(ctk.CTk):
         self._canvas_img_path = None     # path of image currently on canvas
         # Custom point-selection state (right-click markers)
         self.custom_measure_points = []   # list of (phys_x_mm, phys_y_mm) tuples
+        self._canvas_click_cache = {}     # (phys_x, phys_y) → (canvas_px, canvas_py) for Image tab
         self.measured_data = []           # list of (phys_x, phys_y, height) after a sequence
         self.analysis_selected_indices = []  # indices into measured_data currently highlighted
+        self.datum_point = None           # (phys_x, phys_y) of Ctrl+RClick datum, or None
 
         # ROI bounding box in canvas pixels (normalized: x0<x1, y0<y1)
         self._roi_canvas_x0 = 0.0
@@ -729,6 +738,10 @@ class MainApp(ctk.CTk):
                     lambda e, _c=canvas, _ss=_s: self._on_stitched_right_click_point(
                         e, _c, _ss, stitched_w, stitched_h,
                         grid_x, grid_y, scan_origin_x, scan_origin_y))
+        canvas.bind("<Control-ButtonRelease-3>",
+                    lambda e, _c=canvas, _ss=_s: self._on_datum_point_stitched(
+                        e, _c, _ss, stitched_w, stitched_h,
+                        grid_x, grid_y, scan_origin_x, scan_origin_y))
         canvas.bind("<Button-4>",      _zoom)
         canvas.bind("<Button-5>",      _zoom)
         # Poll until the canvas has real dimensions, then render once.
@@ -883,8 +896,7 @@ class MainApp(ctk.CTk):
         image_scanning_window.minsize(335, 210)   # Limit the minimum size
         image_scanning_window.maxsize(335, 200)   # Limit the maximum size
 
-        image_scanning_window.wait_visibility()
-        image_scanning_window.grab_set()
+        image_scanning_window.after(100, image_scanning_window.grab_set)
 
         # Label with instructions
         label = ctk.CTkLabel(image_scanning_window, text="Please enter the scanning bounding box:", font=("Arial", 12, "bold"))
@@ -1703,6 +1715,8 @@ class MainApp(ctk.CTk):
                 canvas.bind("<KeyRelease-Control_R>", lambda e: canvas.configure(cursor="arrow"))
 
                 canvas.bind("<Button-3>", lambda e: self._on_right_click_point(e, canvas))
+                canvas.bind("<Control-ButtonRelease-3>",
+                            lambda e: self._on_datum_point_image(e, canvas))
 
                 print("Image updated successfully :)")
 
@@ -2036,15 +2050,30 @@ class MainApp(ctk.CTk):
         canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
                            fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
 
+    def _draw_datum_pt_marker(self, canvas, cx, cy):
+        """Draw the cyan crosshair + blue dot datum marker at canvas position (cx, cy)."""
+        R = 10
+        canvas.create_line(cx - R, cy, cx + R, cy,
+                           fill="#00CFFF", width=2, tags="datum_pt")
+        canvas.create_line(cx, cy - R, cx, cy + R,
+                           fill="#00CFFF", width=2, tags="datum_pt")
+        canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
+                           fill="#0044FF", outline="#00CFFF", width=1, tags="datum_pt")
+
     def _redraw_custom_points_image_tab(self, canvas, canvas_w, canvas_h):
         """Re-stamp all custom_measure_points and measured_data text on the Image
         tab canvas after a canvas.delete('all').  Uses _image_tab_ref_x/y as the
         stable camera-position anchor so the inverse transform is consistent."""
-        if not self.custom_measure_points:
+        if not self.custom_measure_points and not self.measured_data and self.datum_point is None:
             return
         ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
         ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
-        measured_indices = {i for i, _ in enumerate(self.measured_data)}
+        # Re-draw datum marker if one was placed
+        if self.datum_point is not None:
+            dcx, dcy = self._phys_to_canvas_pixel(
+                self.datum_point[0], self.datum_point[1], ref_x, ref_y, canvas_w, canvas_h)
+            if dcx is not None:
+                self._draw_datum_pt_marker(canvas, dcx, dcy)
         for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
             cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
                                                 canvas_w, canvas_h)
@@ -2053,12 +2082,21 @@ class MainApp(ctk.CTk):
             self._draw_custom_pt_marker(canvas, cx, cy)
         # Re-draw height text for any completed measurements
         for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
-            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
-                                                canvas_w, canvas_h)
+            cx, cy = self._canvas_click_cache.get((phys_x, phys_y), (None, None))
             if cx is None:
                 continue
-            fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
-            canvas.create_text(cx, cy - 15, text=f"{height:.3f} mm",
+            is_datum = (self.datum_point is not None and (phys_x, phys_y) == self.datum_point)
+            if math.isnan(height):
+                fill = "red"
+                label = "Out of Range"
+            elif is_datum:
+                fill = "magenta"
+                label = f"{height:.3f} mm (Datum)"
+            elif i in self.analysis_selected_indices:
+                fill, label = "#00FF44", f"{height:.3f} mm"
+            else:
+                fill, label = "cyan", f"{height:.3f} mm"
+            canvas.create_text(cx, cy - 15, text=label,
                                fill=fill, font=("Arial", 12, "bold"),
                                tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
         if self.measured_data:
@@ -2071,7 +2109,7 @@ class MainApp(ctk.CTk):
         """Re-stamp all custom_measure_points and measured_data text on the
         stitched canvas after canvas.delete('all').  Uses _s directly so markers
         remain correct at any zoom/pan level."""
-        if not self.custom_measure_points and not self.measured_data:
+        if not self.custom_measure_points and not self.measured_data and self.datum_point is None:
             return
 
         # Tile-0 centre in full-res stitched pixels (same constants as _render)
@@ -2093,8 +2131,12 @@ class MainApp(ctk.CTk):
             fpy = _t0y + d_py
             return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
 
-        # Crosshair markers (only for points not yet in measured_data)
-        measured_set = set(range(len(self.measured_data)))
+        # Re-draw datum marker if one was placed
+        if self.datum_point is not None:
+            dcx, dcy = _phys_to_canvas(self.datum_point[0], self.datum_point[1])
+            self._draw_datum_pt_marker(canvas, dcx, dcy)
+
+        # Crosshair markers for custom measurement points
         for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
             cx, cy = _phys_to_canvas(phys_x, phys_y)
             self._draw_custom_pt_marker(canvas, cx, cy)
@@ -2102,8 +2144,15 @@ class MainApp(ctk.CTk):
         # Height text (measured_data is in optimised order; use its own phys coords)
         for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
             cx, cy = _phys_to_canvas(phys_x, phys_y)
-            fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
-            canvas.create_text(cx, cy - 15, text=f"{height:.3f} mm",
+            is_datum = (self.datum_point is not None and (phys_x, phys_y) == self.datum_point)
+            if is_datum:
+                fill = "magenta"
+                label = f"{height:.3f} mm (Datum)"
+            elif i in self.analysis_selected_indices:
+                fill, label = "#00FF44", f"{height:.3f} mm"
+            else:
+                fill, label = "cyan", f"{height:.3f} mm"
+            canvas.create_text(cx, cy - 15, text=label,
                                fill=fill, font=("Arial", 12, "bold"),
                                tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
 
@@ -2112,6 +2161,13 @@ class MainApp(ctk.CTk):
 
     def _on_right_click_point(self, event, canvas):
         """<Button-3>: drop a measurement marker at the clicked canvas position."""
+        if getattr(self, 'active_main_view', 'default') == 'stitched':
+            messagebox.showwarning("Action Blocked",
+                "Please click 'Finish' on the stitched image tab (Main) first "
+                "before taking measurements on the Image tab.")
+            return
+        if event.state & 0x4:  # Ctrl held — this is a datum drop, handled separately
+            return
         canvas_w = canvas.winfo_width()
         canvas_h = canvas.winfo_height()
         phys_x, phys_y = self._canvas_pixel_to_phys(event.x, event.y, canvas_w, canvas_h)
@@ -2119,6 +2175,7 @@ class MainApp(ctk.CTk):
             return
 
         self.custom_measure_points.append((phys_x, phys_y))
+        self._canvas_click_cache[(phys_x, phys_y)] = (event.x, event.y)
         self._roi_active_canvas = canvas   # ensure Clear Points can find this canvas
 
         # Draw a bright yellow crosshair at the clicked position
@@ -2146,9 +2203,14 @@ class MainApp(ctk.CTk):
         right-click (no significant pan drag).  Converts canvas pixels → full
         stitched-image pixels → physical mm using the standard helper.
         """
-        # Ignore if the user was panning (drag threshold = 5 px)
-        start_x = getattr(canvas, '_pan_start_x', event.x)
-        start_y = getattr(canvas, '_pan_start_y', event.y)
+        # Ctrl+RClick is a datum drop — let _on_datum_point_stitched handle it
+        if event.state & 0x4:
+            return
+        # Ignore if the user was panning (drag threshold = 5 px).
+        # Use _pan_origin_x/y (set once on press) not _pan_start_x/y (reset each
+        # _do_pan tick), so the total drag distance is measured correctly.
+        start_x = getattr(canvas, '_pan_origin_x', event.x)
+        start_y = getattr(canvas, '_pan_origin_y', event.y)
         if abs(event.x - start_x) > 5 or abs(event.y - start_y) > 5:
             return
 
@@ -2182,13 +2244,59 @@ class MainApp(ctk.CTk):
         print(f"[custom_pt/stitched] point {len(self.custom_measure_points)}: "
               f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
 
+    def _on_datum_point_image(self, event, canvas):
+        """<Control-ButtonRelease-3> on the Image tab: place or replace the datum marker."""
+        if getattr(self, 'active_main_view', 'default') == 'stitched':
+            messagebox.showwarning("Action Blocked",
+                "Please click 'Finish' on the stitched image tab (Main) first "
+                "before taking measurements on the Image tab.")
+            return
+        canvas_w = canvas.winfo_width()
+        canvas_h = canvas.winfo_height()
+        phys_x, phys_y = self._canvas_pixel_to_phys(event.x, event.y, canvas_w, canvas_h)
+        if phys_x is None or phys_y is None:
+            return
+        self.datum_point = (phys_x, phys_y)
+        self._canvas_click_cache[(phys_x, phys_y)] = (event.x, event.y)
+        self._roi_active_canvas = canvas
+        canvas.delete("datum_pt")
+        self._draw_datum_pt_marker(canvas, event.x, event.y)
+        print(f"[datum] set at ({phys_x:.4f} mm, {phys_y:.4f} mm)")
+
+    def _on_datum_point_stitched(self, event, canvas, _s,
+                                  stitched_w, stitched_h,
+                                  grid_x, grid_y,
+                                  scan_origin_x, scan_origin_y):
+        """<Control-ButtonRelease-3> on the stitched canvas: place or replace the datum marker."""
+        # Ignore if the button was released after a pan drag (same 5 px threshold).
+        # Use _pan_origin_x/y (set once on press) not _pan_start_x/y (reset each tick).
+        start_x = getattr(canvas, '_pan_origin_x', event.x)
+        start_y = getattr(canvas, '_pan_origin_y', event.y)
+        if abs(event.x - start_x) > 5 or abs(event.y - start_y) > 5:
+            return
+        full_px = (event.x - _s['ox']) / _s['sx']
+        full_py = (event.y - _s['oy']) / _s['sy']
+        phys_x, phys_y = self.calculate_stitched_phys_coords(
+            full_px, full_py,
+            stitched_w, stitched_h,
+            grid_x, grid_y,
+            scan_origin_x, scan_origin_y,
+        )
+        self.datum_point = (phys_x, phys_y)
+        self._roi_active_canvas = canvas
+        canvas.delete("datum_pt")
+        self._draw_datum_pt_marker(canvas, event.x, event.y)
+        print(f"[datum/stitched] set at ({phys_x:.4f} mm, {phys_y:.4f} mm)")
+
     def _clear_custom_points(self):
         """Universal canvas clear: wipes right-click measurement points AND the
         Ctrl+Drag ROI grid, resetting all related state and UI to neutral."""
         # ── Measurement point state ───────────────────────────────────────────
         self.custom_measure_points.clear()
+        self._canvas_click_cache.clear()
         self.measured_data.clear()
         self.analysis_selected_indices.clear()
+        self.datum_point = None
         if hasattr(self, 'analysis_result_var'):
             self.analysis_result_var.set("Analysis: Select points...")
 
@@ -2207,6 +2315,7 @@ class MainApp(ctk.CTk):
             self._roi_active_canvas.tag_unbind("measurement_text", "<Button-1>")
             self._roi_active_canvas.delete("custom_pt")
             self._roi_active_canvas.delete("roi_grid")
+            self._roi_active_canvas.delete("datum_pt")
 
         # ── Info label readouts → neutral dashes ─────────────────────────────
         for _var, _val in (
@@ -2283,6 +2392,16 @@ class MainApp(ctk.CTk):
             messagebox.showwarning("No Points", "Right-click the image to add measurement points first.")
             return
 
+        # ── Datum check ───────────────────────────────────────────────────────
+        if self.datum_point is None:
+            proceed = messagebox.askyesno(
+                "No Datum Selected",
+                "No datum point selected (Ctrl + Right-Click). Heights will be measured "
+                "with the default sensor datum.\n\nDo you want to proceed?"
+            )
+            if not proceed:
+                return
+
         # ── Save camera assembly origin before any movement ───────────────────
         # Must be captured here, before the confocal offset shifts the targets.
         self._sequence_origin_x = float(self.x_pos)
@@ -2300,6 +2419,12 @@ class MainApp(ctk.CTk):
             unvisited.remove(nearest)
             optimized_route.append(nearest)
             current_x, current_y = nearest
+
+        # ── Append datum point so the sensor physically visits it ────────────
+        # The datum is appended after the nearest-neighbour sort so it is always
+        # the last point visited, minimising unnecessary travel.
+        if self.datum_point is not None:
+            optimized_route.append(self.datum_point)
 
         # ── Apply confocal-camera offset to every target point ────────────────
         # The confocal sensor is offset from the camera by this fixed amount.
@@ -2324,6 +2449,26 @@ class MainApp(ctk.CTk):
                     f"{abs(target_y) + 1.0:.2f} mm further away from the limit."
                 )
                 return
+
+        # ── Open persistent Confocal socket; send R0 exactly once ────────────
+        # Keeping the socket open for the whole sequence mirrors confocal_looped.py:
+        # the CL-Navigator's AGC and averaging buffer stay warm, eliminating the
+        # per-point state-machine reset that caused measurement instability.
+        try:
+            _cs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _cs.settimeout(_CONFOCAL_TIMEOUT)
+            _cs.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
+            _cs.sendall("R0\r".encode('ascii'))
+            _cs.recv(1024)   # drain mode-switch acknowledgement
+            self._confocal_socket = _cs
+            print("[confocal] persistent socket open; measurement mode active")
+        except Exception as _e:
+            messagebox.showerror(
+                "Confocal Unreachable",
+                f"Cannot connect to the Confocal sensor:\n{_e}\n\n"
+                f"Check that CL-Navigator is running and the network cable is connected."
+            )
+            return
 
         # Disable action buttons on both tabs for the duration of the sequence
         for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
@@ -2358,6 +2503,7 @@ class MainApp(ctk.CTk):
                 f"Point {index + 1}/{len(route)} ({target_x:.4f}, {target_y:.4f} mm) "
                 f"is out of stage range.\nSequence aborted."
             )
+            self._close_confocal_socket()
             self._sequence_unlock_buttons()
             return
 
@@ -2369,40 +2515,65 @@ class MainApp(ctk.CTk):
         self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
 
     def _sequence_wait_then_measure(self, route, index, results):
-        """Poll until the stage reaches Idle (move complete), then fire a
-        daemon thread to read the confocal sensor without blocking the GUI."""
+        """Poll until the stage reaches Idle, wait for mechanical settling, then
+        fire a daemon thread to read the confocal sensor without blocking the GUI."""
         if self.module_status != "Idle":
             self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
             return
 
-        print(f"[sequence] stage idle — reading confocal sensor at point {index + 1}/{len(route)}")
+        # Insert a mandatory settling delay before measuring.  The motor controller
+        # reports "Idle" when the servo encoder is within dead-band, but the physical
+        # camera assembly continues to ring for hundreds of milliseconds afterward.
+        # Measuring without this delay was the confirmed primary cause of the 269 µm
+        # run-to-run tramming discrepancy.
+        print(f"[sequence] stage idle — waiting {_SETTLING_DELAY_MS} ms for mechanical settling "
+              f"(point {index + 1}/{len(route)})")
+        self.after(_SETTLING_DELAY_MS, lambda: self._sequence_fire_sensor_read(route, index, results))
+
+    def _sequence_fire_sensor_read(self, route, index, results):
+        """Called after the mechanical settling delay has elapsed; starts the
+        confocal read thread and schedules the result-polling loop."""
+        print(f"[sequence] settling complete — reading confocal sensor at point {index + 1}/{len(route)}")
         result_holder = [None]   # thread writes float/NaN here; None means not done yet
         t = Thread(target=self._confocal_read_worker, args=(result_holder,), daemon=True)
         t.start()
         self.after(100, lambda: self._sequence_poll_sensor_result(route, index, results, result_holder, t))
 
     def _confocal_read_worker(self, result_holder):
-        """Connect to the confocal sensor over TCP, request one measurement,
-        and store the result in result_holder[0]. Runs in a daemon thread."""
+        """Read one height from the persistent socket opened by execute_custom_measurements.
+        Runs in a daemon thread.  R0 is NOT re-sent here — the socket is already in
+        measurement mode and the CL-Navigator's internal AGC/averaging state is stable.
+
+        Two-phase MS read: flush one buffered sample (may have been captured at the
+        exact moment the assembly stopped), then take the authoritative reading."""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(_CONFOCAL_TIMEOUT)
-                s.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
-                # Switch controller to measurement mode; drain the acknowledgement
-                s.sendall("R0\r".encode('ascii'))
-                s.recv(1024)
-                # Request a single measurement from channel 1, output 1
-                s.sendall("MS,1,1\r".encode('ascii'))
-                response = s.recv(1024).decode('ascii')
-                parts = response.split(',')
-                if len(parts) >= 2:
-                    result_holder[0] = float(parts[1].strip())
-                else:
-                    print(f"[confocal] unexpected response: {response!r}")
-                    result_holder[0] = float('nan')
+            s = self._confocal_socket
+            # Flush: discard the sample most recently buffered by the controller
+            s.sendall("MS,1,1\r".encode('ascii'))
+            s.recv(1024)
+            # Real measurement: freshly acquired after the flush round-trip
+            s.sendall("MS,1,1\r".encode('ascii'))
+            response = s.recv(1024).decode('ascii')
+            parts = response.split(',')
+            if len(parts) >= 2:
+                result_holder[0] = float(parts[1].strip())
+            else:
+                print(f"[confocal] unexpected response: {response!r}")
+                result_holder[0] = float('nan')
         except Exception as e:
             print(f"[confocal] WARNING: sensor read failed — {e}")
             result_holder[0] = float('nan')
+
+    def _close_confocal_socket(self):
+        """Safely close and discard the persistent Confocal TCP socket.
+        Safe to call even if the socket was never opened or already closed."""
+        s = getattr(self, '_confocal_socket', None)
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+            self._confocal_socket = None
 
     def _sequence_poll_sensor_result(self, route, index, results, result_holder, thread):
         """Poll every 100 ms until the confocal read thread finishes, then
@@ -2453,7 +2624,26 @@ class MainApp(ctk.CTk):
         ordered_points = getattr(self, '_optimized_route', self.custom_measure_points)
 
         # ── Persist measurement data for analysis mode ────────────────────────
-        self.measured_data = [(px, py, h) for (px, py), h in zip(ordered_points, results)]
+        # For custom scans subtract datum Z so every height is relative to the datum.
+        if getattr(self, '_sequence_mode', 'custom') != "grid":
+            datum_z = 0.0
+            if self.datum_point is not None:
+                for (px, py), h in zip(ordered_points, results):
+                    if (px, py) == self.datum_point:
+                        datum_z = h
+                        break
+            # Treat sensor error codes (e.g. -99.9999) as NaN so they don't silently
+            # cancel out in subtraction and produce a false 0.000 mm reading.
+            if datum_z < -90.0 or math.isnan(datum_z) or abs(datum_z) < 0.000001:
+                datum_z = float('nan')
+            self.measured_data = []
+            for (px, py), h in zip(ordered_points, results):
+                if h < -90.0 or math.isnan(h) or abs(h) < 0.000001 or math.isnan(datum_z):
+                    self.measured_data.append((px, py, float('nan')))
+                else:
+                    self.measured_data.append((px, py, h - datum_z))
+        else:
+            self.measured_data = [(px, py, h) for (px, py), h in zip(ordered_points, results)]
         self.analysis_selected_indices = []
         if hasattr(self, 'analysis_result_var'):
             self.analysis_result_var.set("Analysis: Select points...")
@@ -2493,17 +2683,26 @@ class MainApp(ctk.CTk):
                             cw, ch,
                         )
                     else:
-                        if self._canvas_disp_w == 0:
-                            continue
-                        ref_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
-                        ref_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
-                        cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
+                        # Use the pixel coords recorded at click time — avoids
+                        # geometry recalculation drift that clusters labels together.
+                        cx, cy = self._canvas_click_cache.get((phys_x, phys_y), (None, None))
 
                     if cx is not None:
+                        is_datum = (self.datum_point is not None
+                                    and (phys_x, phys_y) == self.datum_point)
+                        if math.isnan(height):
+                            label = "Out of Range"
+                            fill  = "red"
+                        elif is_datum:
+                            label = f"{height:.3f} mm (Datum)"
+                            fill  = "magenta"
+                        else:
+                            label = f"{height:.3f} mm"
+                            fill  = "cyan"
                         canvas.create_text(
                             cx, cy - 15,
-                            text=f"{height:.3f} mm",
-                            fill="cyan", font=("Arial", 12, "bold"),
+                            text=label,
+                            fill=fill, font=("Arial", 12, "bold"),
                             tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
 
                 # Bind left-click on text labels to toggle analysis selection
@@ -2526,6 +2725,9 @@ class MainApp(ctk.CTk):
                 messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
             self._sequence_mode = "custom"   # reset so the next custom scan draws labels
 
+        # ── Close Confocal socket now that all measurements are complete ─────
+        self._close_confocal_socket()
+
         # ── Return Optical assembly to its pre-sequence position ──────────────
         origin_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
         origin_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
@@ -2542,6 +2744,9 @@ class MainApp(ctk.CTk):
         if self.module_status != "Idle":
             self.after(500, self._sequence_unlock_buttons)
             return
+
+        # Safety-net: close socket in case any abort path didn't reach _process_measurement_results
+        self._close_confocal_socket()
 
         print("[sequence] origin reached — unlocking action buttons")
         # Re-enable whichever tab's buttons are currently in the widget tree
@@ -3314,6 +3519,23 @@ class MainApp(ctk.CTk):
         self._sequence_origin_x = float(self.x_pos)
         self._sequence_origin_y = float(self.y_pos)
 
+        # Open persistent Confocal socket; send R0 exactly once before the sequence.
+        try:
+            _cs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _cs.settimeout(_CONFOCAL_TIMEOUT)
+            _cs.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
+            _cs.sendall("R0\r".encode('ascii'))
+            _cs.recv(1024)
+            self._confocal_socket = _cs
+            print("[confocal] persistent socket open; measurement mode active")
+        except Exception as _e:
+            messagebox.showerror(
+                "Confocal Unreachable",
+                f"Cannot connect to the Confocal sensor:\n{_e}\n\n"
+                f"Check that CL-Navigator is running and the network cable is connected."
+            )
+            return
+
         for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
                      '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
                      '_stitch_map_surface_btn'):
@@ -3387,6 +3609,23 @@ class MainApp(ctk.CTk):
         self._sequence_csv      = csv_name if csv_name.endswith('.csv') else f"{csv_name}.csv"
         self._sequence_origin_x = float(self.x_pos)
         self._sequence_origin_y = float(self.y_pos)
+
+        # Open persistent Confocal socket; send R0 exactly once before the sequence.
+        try:
+            _cs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _cs.settimeout(_CONFOCAL_TIMEOUT)
+            _cs.connect((_CONFOCAL_IP, _CONFOCAL_PORT))
+            _cs.sendall("R0\r".encode('ascii'))
+            _cs.recv(1024)
+            self._confocal_socket = _cs
+            print("[confocal] persistent socket open; measurement mode active")
+        except Exception as _e:
+            messagebox.showerror(
+                "Confocal Unreachable",
+                f"Cannot connect to the Confocal sensor:\n{_e}\n\n"
+                f"Check that CL-Navigator is running and the network cable is connected."
+            )
+            return
 
         for _btn in ('_measure_heights_btn', '_clear_points_btn', '_map_surface_btn',
                      '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
@@ -3589,7 +3828,7 @@ class MainApp(ctk.CTk):
         stitched_img_path = f"{self.buffer_stitching_folder}/stitched_{self.curr_sample_id}.jpg"
         self.complete_image_btn = ctk.CTkButton(button_frame, text="Image Stitching...", fg_color="green", width=150, height=30,
                                                 state="disabled",
-                                                command=lambda: self.display_stitched_inline(stitched_img_path))
+                                                command=lambda: self.after(10, lambda: self.display_stitched_inline(stitched_img_path)))
         self.complete_image_btn.pack(side=ctk.LEFT, expand=True, padx=5, pady=1)
 
         #Finish button - creates new folder with time stamp, and transfers images from buffer to complete
@@ -3599,9 +3838,12 @@ class MainApp(ctk.CTk):
         finish_button.pack(side=ctk.RIGHT, expand=True, padx=1, pady=1)
 
         #Stop button
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
-                                    command=lambda:[self.display_main_tab(), 
-                                                    self.send_simple_command("exe_stop",False)])
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red",
+                                    command=lambda:[self.display_main_tab(),
+                                                    self.send_simple_command("exe_stop", False),
+                                                    setattr(self, 'scan_in_progress', False),
+                                                    setattr(self, 'saw_scanning_status', False),
+                                                    setattr(self, 'scanning_state', 0)])
         stop_button.pack(side=ctk.RIGHT, expand=True, padx=5, pady=1)
 
         #Layout
@@ -3652,7 +3894,7 @@ class MainApp(ctk.CTk):
 
         #Get all files in the folder, sorted numerically by integer prefix (e.g. 1_V.jpg, 2_V.jpg, 10_V.jpg)
         for filename in sorted(os.listdir(folder_path), key=lambda x: int(x.split('_')[0]) if x.split('_')[0].isdigit() else float('inf')):
-            if filename.lower().endswith(supported_extensions) and not filename.startswith("._"):
+            if filename.lower().endswith(supported_extensions) and not filename.startswith("._") and not filename.startswith("stitched_"):
                 full_path = os.path.join(folder_path, filename)
                 try:
                     with Image.open(full_path) as img:
@@ -4299,13 +4541,21 @@ class MainApp(ctk.CTk):
         self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
 
         #Stitching Image Process
+        # Track when Pi reports a scanning status so we only trigger the 0→1
+        # transition on a genuine Scanning→Idle edge, not on a spurious Idle
+        # that arrives before the hardware starts moving.
+        if "Scanning" in self.module_status:
+            self.saw_scanning_status = True
+
         #Change state to start scanning process
         if (self.scanning_state == 0
             and self.scan_in_progress
-            and self.module_status == "Idle"):
+            and self.module_status == "Idle"
+            and self.saw_scanning_status):
 
             # Module returned to Idle after a commanded scan — stage is at the
             # last tile (top-right corner). Snapshot for click-to-move maths.
+            self.saw_scanning_status = False
             self.scan_end_x = float(self.x_pos)
             self.scan_end_y = float(self.y_pos)
             self.scan_in_progress = False
@@ -4320,12 +4570,18 @@ class MainApp(ctk.CTk):
 
         #When folders transfered, calculate x and y grid, empty folder on rpi, and start image stitching thread
         if self.scanning_state == 2 and not self.transfer_rpi_thread.is_alive() :
-            self.scanning_grid_x , self.scanning_grid_y = self.extract_unique_positions(self.buffer_stitching_folder) 
+            self.scanning_grid_x , self.scanning_grid_y = self.extract_unique_positions(self.buffer_stitching_folder)
+
+            # Remove any stitched file left by a previous run's Fiji thread that finished
+            # after empty_folder_pc ran, so it cannot bleed into the new tile grid.
+            _stale_stitched = os.path.join(self.buffer_stitching_folder, f"stitched_{self.curr_sample_id}.jpg")
+            if os.path.exists(_stale_stitched):
+                os.remove(_stale_stitched)
+
             self.start_stitching(self.scanning_grid_x, self.scanning_grid_y, self.buffer_stitching_folder, self.buffer_stitching_folder, self.curr_sample_id)
             self.display_scanning_layout(self.scanning_grid_x, self.scanning_grid_y, self.main_right_frame)
-            self.empty_folder_rpi()
 
-            self.scanning_state = 3 
+            self.scanning_state = 3
         
         # Stitching thread has finished; file-ready polling is already running
         # via .after() from start_stitching — only reset the state machine here.
@@ -4501,6 +4757,7 @@ class MainApp(ctk.CTk):
                 self.after(0, lambda: self.send_json_error_check(scanning_data_snapshot, "Scanning request sent."))
 
             self.scan_in_progress = True
+            self.scanning_state = 0  # reset state machine so 0→1 can fire on scan completion
             Thread(target=_clear_pi_then_scan, daemon=True).start()
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
@@ -4703,8 +4960,6 @@ class MainApp(ctk.CTk):
 
 
 
-
-
     # =============================== Image Stitching ==========================================#
     
     def set_stitcher(self, stitcher) :
@@ -4722,27 +4977,27 @@ class MainApp(ctk.CTk):
 
         self.stitcher = stitcher
 
-    def check_stitched_file_ready(self, filepath, retries=120):
+    def check_stitched_file_ready(self, filepath, retries=120, generation=0):
         """
         Non-blocking poll for the stitched output JPEG. Always called from the
         Tkinter main thread via .after() — never from the stitching thread.
 
-        The is_stitching lock prevents the button from being enabled more than
-        once per scan and blocks spurious triggers if the file already existed
-        from a previous run before the new one is written.
+        The generation parameter matches self.stitching_generation at spawn time.
+        If a newer scan has started, the generation will differ and this stale
+        poller silently exits, preventing it from enabling the new scan's button.
 
         Args:
             filepath (str): Absolute path to the expected stitched JPEG.
             retries (int): Remaining 500 ms poll attempts (default 120 = 60 s).
+            generation (int): Scan generation at the time this poller was created.
         """
+        if generation != self.stitching_generation:
+            return  # stale poller from a previous scan — discard
         if os.path.exists(filepath):
-            # File confirmed on disk — disarm lock and update button unconditionally.
-            # check_stitched_file_ready is always invoked from the Tkinter main thread
-            # via .after(), so no after(0) indirection is required here.
             self.is_stitching = False
             self.complete_image_btn.configure(text="Open Completed Image", state="normal")
         elif retries > 0:
-            self.after(500, lambda: self.check_stitched_file_ready(filepath, retries - 1))
+            self.after(500, lambda: self.check_stitched_file_ready(filepath, retries - 1, generation))
         else:
             self.is_stitching = False
             print(f"Stitched file transfer timed out: {filepath}")
@@ -4764,9 +5019,13 @@ class MainApp(ctk.CTk):
         """
         stitched_path = os.path.join(output_dir, f"stitched_{sample_id}.jpg")
 
+        # Increment generation so any poller from a previous scan self-discards.
+        self.stitching_generation += 1
+        gen = self.stitching_generation
+
         # Arm lock and start poll on the main thread before the thread begins
         self.is_stitching = True
-        self.after(500, lambda: self.check_stitched_file_ready(stitched_path))
+        self.after(500, lambda: self.check_stitched_file_ready(stitched_path, generation=gen))
 
         self.stitching_thread = Thread(
             target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id),
