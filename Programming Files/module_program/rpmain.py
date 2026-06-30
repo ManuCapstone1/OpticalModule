@@ -47,13 +47,16 @@ def send_status_updates():
     Publishes updated module status data every second.
     """
     while True:
-        # Update data
-        update_status_data()
+        try:
+            # Update data
+            update_status_data()
 
-        # Send data to the PC
-        print("sending")
-        pub_socket.send_json(status_data)
-        print("Sent status update to the PC...")
+            # Send data to the PC
+            print("sending")
+            pub_socket.send_json(status_data)
+            print("Sent status update to the PC...")
+        except Exception as e:
+            print(f"Error in send_status_updates: {e}")
 
         time.sleep(1)  # Wait 1 second before sending the next update
 
@@ -72,10 +75,10 @@ def update_status_data():
     
     # Update camera settings data
     with shabam.cam.settingsLock:
-        status_data["exposure_time"] = shabam.cam.currExposureTime,
-        status_data["analog_gain"] = shabam.cam.currAnalogGain,
-        status_data["contrast"] = shabam.cam.currContrast,
-        status_data["colour_temp"] = shabam.cam.currColourTemp,
+        status_data["exposure_time"] = shabam.cam.currExposureTime
+        status_data["analog_gain"] = shabam.cam.currAnalogGain
+        status_data["contrast"] = shabam.cam.currContrast
+        status_data["colour_temp"] = shabam.cam.currColourTemp
     
     # Update image count data
     with shabam.imageCountLock:

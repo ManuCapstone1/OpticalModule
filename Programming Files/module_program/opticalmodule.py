@@ -545,9 +545,6 @@ class OpticalModule:
         with self.imageCountLock:
             self.totalImages = numImages
 
-        # Create list of captured images
-        capturedImages = []
-
         # Extract x and y coordinates from the bounding box
         x_coords = [point[0] for point in self.currSample.boundingBox]
         y_coords = [point[1] for point in self.currSample.boundingBox]
@@ -576,14 +573,13 @@ class OpticalModule:
 
             # Save images without or with metadata file (this should be changed in the future)
             if saveImages:
-                imageArr = self.cam.save_image(self.bufferDir, self.currSample)
+                self.cam.save_image(self.bufferDir, self.currSample)
             else:
-                imageArr = self.update_image()
+                self.update_image()
 
-            # Increment image count and save current image to captured images list
+            # Increment image count
             with self.imageCountLock:
                 self.cam.imageCount = self.cam.imageCount + 1
-            capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
 
         # Reset image counters and increment current sample layer
         with self.imageCountLock:
@@ -594,7 +590,6 @@ class OpticalModule:
 
         # Return camera carriage to home position for robot sample pickup
         # self.home_xy()  # Disabled: camera head stays in place after sampling for click-to-move use
-        return capturedImages
 
     def scanning_images(self, step_size_x, step_size_y, saveImages: bool):
         """
@@ -631,9 +626,6 @@ class OpticalModule:
                     self.alarmStatus = "Sample not detected or not in focus"
             return
 
-        # Create list of captured images
-        capturedImages = []
-
         # Create list of X and Y positions to capture overlapping images covering the bounding box area
         x_coords = [point[0] for point in self.currSample.boundingBox]
         y_coords = [point[1] for point in self.currSample.boundingBox]
@@ -665,25 +657,23 @@ class OpticalModule:
 
                 # Save images without or with metadata file (this should be changed in the future)
                 if saveImages:
-                    imageArr = self.cam.save_image(self.saveDir, self.currSample)
+                    self.cam.save_image(self.saveDir, self.currSample)
                 else:
-                    imageArr = self.update_image()
+                    self.update_image()
 
-                # Update image count and captured image list
+                # Update image count
                 with self.imageCountLock:
                     self.cam.imageCount = self.cam.imageCount + 1
-                capturedImages.append(cv2.cvtColor(imageArr, cv2.COLOR_BGR2RGB))
 
         # Reset image counters and increment current sample layer
         with self.imageCountLock:
             self.totalImages = 0
-            self.imageCount = 0
+            self.cam.imageCount = 0  # fixed: was self.imageCount (AttributeError)
 
         self.currSample.currLayer = self.currSample.currLayer + 1 # This may need to be changed in the future if a layer is not always removed
 
         # Return camera carriage to home position for robot sample pickup
         # self.home_xy()  # Disabled: camera head stays in place after scanning for click-to-move use
-        return capturedImages
 
     def calibrate_platform(self):
         """
@@ -1022,20 +1012,21 @@ class Camera:
             Captured image as an array
 
         """
+        array = None
         try:
             self.picam.start()
             array = self.picam.capture_array("main")
-            self.picam.stop()
 
             if updateImage:
                 with self.imageLock:
                     self.currImage = array
 
-            return array
-
         except Exception as e:
             print(f"Error capturing image: {e}")
-            return ""
+        finally:
+            self.picam.stop()
+
+        return array if array is not None else ""
 
     def save_image(self, dir: str, sample, image=None):
         """

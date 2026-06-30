@@ -101,7 +101,9 @@ class MainApp(ctk.CTk):
         self.sampling_state = 0
         self.scanning_state = 0
         self.is_stitching = False
+        self.stitching_generation = 0    # incremented each scan; stale pollers use this to self-discard
         self.scan_in_progress = False    # set when scan command sent; cleared on state 0→1
+        self.saw_scanning_status = False # True once Pi sends a "Scanning" status; prevents premature 0→1 trigger
         self.sample_in_progress = False  # set when sampling command sent; cleared on state 0→1
 
         #-------------- Main Tab View State -----------------#
@@ -131,6 +133,7 @@ class MainApp(ctk.CTk):
         self._canvas_img_path = None     # path of image currently on canvas
         # Custom point-selection state (right-click markers)
         self.custom_measure_points = []   # list of (phys_x_mm, phys_y_mm) tuples
+        self._canvas_click_cache = {}     # (phys_x, phys_y) → (canvas_px, canvas_py) for Image tab
         self.measured_data = []           # list of (phys_x, phys_y, height) after a sequence
         self.analysis_selected_indices = []  # indices into measured_data currently highlighted
         self.datum_point = None           # (phys_x, phys_y) of Ctrl+RClick datum, or None
@@ -893,8 +896,7 @@ class MainApp(ctk.CTk):
         image_scanning_window.minsize(335, 210)   # Limit the minimum size
         image_scanning_window.maxsize(335, 200)   # Limit the maximum size
 
-        image_scanning_window.wait_visibility()
-        image_scanning_window.grab_set()
+        image_scanning_window.after(100, image_scanning_window.grab_set)
 
         # Label with instructions
         label = ctk.CTkLabel(image_scanning_window, text="Please enter the scanning bounding box:", font=("Arial", 12, "bold"))
@@ -2080,12 +2082,14 @@ class MainApp(ctk.CTk):
             self._draw_custom_pt_marker(canvas, cx, cy)
         # Re-draw height text for any completed measurements
         for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
-            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
-                                                canvas_w, canvas_h)
+            cx, cy = self._canvas_click_cache.get((phys_x, phys_y), (None, None))
             if cx is None:
                 continue
             is_datum = (self.datum_point is not None and (phys_x, phys_y) == self.datum_point)
-            if is_datum:
+            if math.isnan(height):
+                fill = "red"
+                label = "Out of Range"
+            elif is_datum:
                 fill = "magenta"
                 label = f"{height:.3f} mm (Datum)"
             elif i in self.analysis_selected_indices:
@@ -2157,6 +2161,11 @@ class MainApp(ctk.CTk):
 
     def _on_right_click_point(self, event, canvas):
         """<Button-3>: drop a measurement marker at the clicked canvas position."""
+        if getattr(self, 'active_main_view', 'default') == 'stitched':
+            messagebox.showwarning("Action Blocked",
+                "Please click 'Finish' on the stitched image tab (Main) first "
+                "before taking measurements on the Image tab.")
+            return
         if event.state & 0x4:  # Ctrl held — this is a datum drop, handled separately
             return
         canvas_w = canvas.winfo_width()
@@ -2166,6 +2175,7 @@ class MainApp(ctk.CTk):
             return
 
         self.custom_measure_points.append((phys_x, phys_y))
+        self._canvas_click_cache[(phys_x, phys_y)] = (event.x, event.y)
         self._roi_active_canvas = canvas   # ensure Clear Points can find this canvas
 
         # Draw a bright yellow crosshair at the clicked position
@@ -2236,12 +2246,18 @@ class MainApp(ctk.CTk):
 
     def _on_datum_point_image(self, event, canvas):
         """<Control-ButtonRelease-3> on the Image tab: place or replace the datum marker."""
+        if getattr(self, 'active_main_view', 'default') == 'stitched':
+            messagebox.showwarning("Action Blocked",
+                "Please click 'Finish' on the stitched image tab (Main) first "
+                "before taking measurements on the Image tab.")
+            return
         canvas_w = canvas.winfo_width()
         canvas_h = canvas.winfo_height()
         phys_x, phys_y = self._canvas_pixel_to_phys(event.x, event.y, canvas_w, canvas_h)
         if phys_x is None or phys_y is None:
             return
         self.datum_point = (phys_x, phys_y)
+        self._canvas_click_cache[(phys_x, phys_y)] = (event.x, event.y)
         self._roi_active_canvas = canvas
         canvas.delete("datum_pt")
         self._draw_datum_pt_marker(canvas, event.x, event.y)
@@ -2277,6 +2293,7 @@ class MainApp(ctk.CTk):
         Ctrl+Drag ROI grid, resetting all related state and UI to neutral."""
         # ── Measurement point state ───────────────────────────────────────────
         self.custom_measure_points.clear()
+        self._canvas_click_cache.clear()
         self.measured_data.clear()
         self.analysis_selected_indices.clear()
         self.datum_point = None
@@ -2615,8 +2632,16 @@ class MainApp(ctk.CTk):
                     if (px, py) == self.datum_point:
                         datum_z = h
                         break
-            self.measured_data = [(px, py, h - datum_z)
-                                  for (px, py), h in zip(ordered_points, results)]
+            # Treat sensor error codes (e.g. -99.9999) as NaN so they don't silently
+            # cancel out in subtraction and produce a false 0.000 mm reading.
+            if datum_z < -90.0 or math.isnan(datum_z) or abs(datum_z) < 0.000001:
+                datum_z = float('nan')
+            self.measured_data = []
+            for (px, py), h in zip(ordered_points, results):
+                if h < -90.0 or math.isnan(h) or abs(h) < 0.000001 or math.isnan(datum_z):
+                    self.measured_data.append((px, py, float('nan')))
+                else:
+                    self.measured_data.append((px, py, h - datum_z))
         else:
             self.measured_data = [(px, py, h) for (px, py), h in zip(ordered_points, results)]
         self.analysis_selected_indices = []
@@ -2658,17 +2683,22 @@ class MainApp(ctk.CTk):
                             cw, ch,
                         )
                     else:
-                        if self._canvas_disp_w == 0:
-                            continue
-                        ref_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
-                        ref_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
-                        cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
+                        # Use the pixel coords recorded at click time — avoids
+                        # geometry recalculation drift that clusters labels together.
+                        cx, cy = self._canvas_click_cache.get((phys_x, phys_y), (None, None))
 
                     if cx is not None:
                         is_datum = (self.datum_point is not None
                                     and (phys_x, phys_y) == self.datum_point)
-                        label = f"{height:.3f} mm (Datum)" if is_datum else f"{height:.3f} mm"
-                        fill  = "magenta" if is_datum else "cyan"
+                        if math.isnan(height):
+                            label = "Out of Range"
+                            fill  = "red"
+                        elif is_datum:
+                            label = f"{height:.3f} mm (Datum)"
+                            fill  = "magenta"
+                        else:
+                            label = f"{height:.3f} mm"
+                            fill  = "cyan"
                         canvas.create_text(
                             cx, cy - 15,
                             text=label,
@@ -3798,7 +3828,7 @@ class MainApp(ctk.CTk):
         stitched_img_path = f"{self.buffer_stitching_folder}/stitched_{self.curr_sample_id}.jpg"
         self.complete_image_btn = ctk.CTkButton(button_frame, text="Image Stitching...", fg_color="green", width=150, height=30,
                                                 state="disabled",
-                                                command=lambda: self.display_stitched_inline(stitched_img_path))
+                                                command=lambda: self.after(10, lambda: self.display_stitched_inline(stitched_img_path)))
         self.complete_image_btn.pack(side=ctk.LEFT, expand=True, padx=5, pady=1)
 
         #Finish button - creates new folder with time stamp, and transfers images from buffer to complete
@@ -3808,9 +3838,12 @@ class MainApp(ctk.CTk):
         finish_button.pack(side=ctk.RIGHT, expand=True, padx=1, pady=1)
 
         #Stop button
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
-                                    command=lambda:[self.display_main_tab(), 
-                                                    self.send_simple_command("exe_stop",False)])
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red",
+                                    command=lambda:[self.display_main_tab(),
+                                                    self.send_simple_command("exe_stop", False),
+                                                    setattr(self, 'scan_in_progress', False),
+                                                    setattr(self, 'saw_scanning_status', False),
+                                                    setattr(self, 'scanning_state', 0)])
         stop_button.pack(side=ctk.RIGHT, expand=True, padx=5, pady=1)
 
         #Layout
@@ -3861,7 +3894,7 @@ class MainApp(ctk.CTk):
 
         #Get all files in the folder, sorted numerically by integer prefix (e.g. 1_V.jpg, 2_V.jpg, 10_V.jpg)
         for filename in sorted(os.listdir(folder_path), key=lambda x: int(x.split('_')[0]) if x.split('_')[0].isdigit() else float('inf')):
-            if filename.lower().endswith(supported_extensions) and not filename.startswith("._"):
+            if filename.lower().endswith(supported_extensions) and not filename.startswith("._") and not filename.startswith("stitched_"):
                 full_path = os.path.join(folder_path, filename)
                 try:
                     with Image.open(full_path) as img:
@@ -4508,13 +4541,21 @@ class MainApp(ctk.CTk):
         self.last_refreshed_var.set(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
 
         #Stitching Image Process
+        # Track when Pi reports a scanning status so we only trigger the 0→1
+        # transition on a genuine Scanning→Idle edge, not on a spurious Idle
+        # that arrives before the hardware starts moving.
+        if "Scanning" in self.module_status:
+            self.saw_scanning_status = True
+
         #Change state to start scanning process
         if (self.scanning_state == 0
             and self.scan_in_progress
-            and self.module_status == "Idle"):
+            and self.module_status == "Idle"
+            and self.saw_scanning_status):
 
             # Module returned to Idle after a commanded scan — stage is at the
             # last tile (top-right corner). Snapshot for click-to-move maths.
+            self.saw_scanning_status = False
             self.scan_end_x = float(self.x_pos)
             self.scan_end_y = float(self.y_pos)
             self.scan_in_progress = False
@@ -4529,12 +4570,18 @@ class MainApp(ctk.CTk):
 
         #When folders transfered, calculate x and y grid, empty folder on rpi, and start image stitching thread
         if self.scanning_state == 2 and not self.transfer_rpi_thread.is_alive() :
-            self.scanning_grid_x , self.scanning_grid_y = self.extract_unique_positions(self.buffer_stitching_folder) 
+            self.scanning_grid_x , self.scanning_grid_y = self.extract_unique_positions(self.buffer_stitching_folder)
+
+            # Remove any stitched file left by a previous run's Fiji thread that finished
+            # after empty_folder_pc ran, so it cannot bleed into the new tile grid.
+            _stale_stitched = os.path.join(self.buffer_stitching_folder, f"stitched_{self.curr_sample_id}.jpg")
+            if os.path.exists(_stale_stitched):
+                os.remove(_stale_stitched)
+
             self.start_stitching(self.scanning_grid_x, self.scanning_grid_y, self.buffer_stitching_folder, self.buffer_stitching_folder, self.curr_sample_id)
             self.display_scanning_layout(self.scanning_grid_x, self.scanning_grid_y, self.main_right_frame)
-            self.empty_folder_rpi()
 
-            self.scanning_state = 3 
+            self.scanning_state = 3
         
         # Stitching thread has finished; file-ready polling is already running
         # via .after() from start_stitching — only reset the state machine here.
@@ -4710,6 +4757,7 @@ class MainApp(ctk.CTk):
                 self.after(0, lambda: self.send_json_error_check(scanning_data_snapshot, "Scanning request sent."))
 
             self.scan_in_progress = True
+            self.scanning_state = 0  # reset state machine so 0→1 can fire on scan completion
             Thread(target=_clear_pi_then_scan, daemon=True).start()
         else:
             messagebox.showerror("Status not in idle, wait to request scanning mode.")
@@ -4912,8 +4960,6 @@ class MainApp(ctk.CTk):
 
 
 
-
-
     # =============================== Image Stitching ==========================================#
     
     def set_stitcher(self, stitcher) :
@@ -4931,27 +4977,27 @@ class MainApp(ctk.CTk):
 
         self.stitcher = stitcher
 
-    def check_stitched_file_ready(self, filepath, retries=120):
+    def check_stitched_file_ready(self, filepath, retries=120, generation=0):
         """
         Non-blocking poll for the stitched output JPEG. Always called from the
         Tkinter main thread via .after() — never from the stitching thread.
 
-        The is_stitching lock prevents the button from being enabled more than
-        once per scan and blocks spurious triggers if the file already existed
-        from a previous run before the new one is written.
+        The generation parameter matches self.stitching_generation at spawn time.
+        If a newer scan has started, the generation will differ and this stale
+        poller silently exits, preventing it from enabling the new scan's button.
 
         Args:
             filepath (str): Absolute path to the expected stitched JPEG.
             retries (int): Remaining 500 ms poll attempts (default 120 = 60 s).
+            generation (int): Scan generation at the time this poller was created.
         """
+        if generation != self.stitching_generation:
+            return  # stale poller from a previous scan — discard
         if os.path.exists(filepath):
-            # File confirmed on disk — disarm lock and update button unconditionally.
-            # check_stitched_file_ready is always invoked from the Tkinter main thread
-            # via .after(), so no after(0) indirection is required here.
             self.is_stitching = False
             self.complete_image_btn.configure(text="Open Completed Image", state="normal")
         elif retries > 0:
-            self.after(500, lambda: self.check_stitched_file_ready(filepath, retries - 1))
+            self.after(500, lambda: self.check_stitched_file_ready(filepath, retries - 1, generation))
         else:
             self.is_stitching = False
             print(f"Stitched file transfer timed out: {filepath}")
@@ -4973,9 +5019,13 @@ class MainApp(ctk.CTk):
         """
         stitched_path = os.path.join(output_dir, f"stitched_{sample_id}.jpg")
 
+        # Increment generation so any poller from a previous scan self-discards.
+        self.stitching_generation += 1
+        gen = self.stitching_generation
+
         # Arm lock and start poll on the main thread before the thread begins
         self.is_stitching = True
-        self.after(500, lambda: self.check_stitched_file_ready(stitched_path))
+        self.after(500, lambda: self.check_stitched_file_ready(stitched_path, generation=gen))
 
         self.stitching_thread = Thread(
             target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id),
