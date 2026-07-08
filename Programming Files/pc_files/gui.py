@@ -1,6 +1,6 @@
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from PIL import Image, ImageTk
 from datetime import datetime
 import json
@@ -21,8 +21,23 @@ _CONFOCAL_TIMEOUT      = 2.0
 # Mechanical settling delay: time (ms) to wait after the motor controller reports
 # "Idle" before triggering a measurement.  The SmarAct servo reports move-complete
 # when the encoder is within dead-band, but the physical assembly continues to ring.
-# 500 ms is a conservative starting value; reduce only after vibration characterisation.
-_SETTLING_DELAY_MS     = 500
+# Trimmed from 500ms to 275ms as a conservative first step (2026-07-08) — the
+# previous value was empirically tuned after a confirmed 269 µm run-to-run tramming
+# discrepancy at a much shorter delay, so this must be re-validated with a
+# repeatability test (same point, several repeat measurements) before trimming
+# further. Revert to 500 if repeat readings show meaningfully more spread than
+# the pre-change baseline.
+_SETTLING_DELAY_MS     = 275
+# Confocal sensor XY offset from the camera optical axis — used by the automatic
+# auto-focus-datum calibration pre-step (see _begin_autofocus_datum). Intentionally
+# not deduplicated with the local CONFOCAL_DX/DY redefinitions inside
+# execute_custom_measurements / start_surface_map / start_surface_map_stitched.
+_CONFOCAL_DX = -1.418137875
+_CONFOCAL_DY = -72.258765875
+# Safety clearance height: Z is raised here BEFORE any XY move during auto-focus,
+# so the camera/sensor assembly can't collide with the sample while crossing to
+# a different XY position at an arbitrary (possibly low) Z.
+_SAFE_CLEARANCE_Z_MM = 90.0
 
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -126,6 +141,8 @@ class MainApp(ctk.CTk):
         self.roi_phys_y_end = None       # mm
         self.map_grid_x = 4              # measurement point count in X (lines incl. border)
         self.map_grid_y = 4              # measurement point count in Y (lines incl. border)
+        self._grid_datum_ij = (0, 0)     # (i, j) screen-space grid node used as the grid-scan datum;
+                                          # (0, 0) = visual top-left, the default until overridden
         self._canvas_disp_w = 0          # displayed image width on canvas (px)
         self._canvas_disp_h = 0          # displayed image height on canvas (px)
         self._canvas_orig_w = 0          # original image width (sensor px)
@@ -300,6 +317,10 @@ class MainApp(ctk.CTk):
         sampling_btn.pack(pady=5, fill='x')
         scanning_btn.pack(pady=5, fill='x')
 
+        upload_csv_btn = ctk.CTkButton(left_frame, text="Import Confocal Points", font=("Arial", 20),
+                                       width=200, height=100, command=self.load_csv_points)
+        upload_csv_btn.pack(pady=5, fill='x')
+
         #Calibration button. Uncomment to use
         #"exe_calibration" is NOT currently seupt in Raspberry Pi (April 5, 2025)
 
@@ -448,10 +469,24 @@ class MainApp(ctk.CTk):
 
         canvas = tk.Canvas(self.main_right_frame, bg="#1a1a1a",
                            highlightthickness=0, cursor="arrow")
+        # Stashed so external callers (e.g. load_csv_points) can trigger a
+        # lightweight re-render without rebuilding the whole stitched layout.
+        self._stitched_canvas = canvas
 
         # ── ROI measurement control strip (BOTTOM, packed before canvas) ──────
         _stitch_strip = ctk.CTkFrame(self.main_right_frame)
         _stitch_strip.pack(side=ctk.BOTTOM, fill='x', padx=10, pady=(0, 5))
+
+        _coord_strip = ctk.CTkFrame(self.main_right_frame, fg_color="transparent", height=20)
+        _coord_strip.pack(side=ctk.BOTTOM, fill='x', padx=15, pady=(0, 5))
+
+        ctk.CTkLabel(_coord_strip, text="Live Position: ", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(_coord_strip, text="X:").pack(side="left", padx=(10, 2))
+        ctk.CTkLabel(_coord_strip, textvariable=self.rpi_x_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(_coord_strip, text="Y:").pack(side="left", padx=(15, 2))
+        ctk.CTkLabel(_coord_strip, textvariable=self.rpi_y_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(_coord_strip, text="Z:").pack(side="left", padx=(15, 2))
+        ctk.CTkLabel(_coord_strip, textvariable=self.rpi_z_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
 
         _ss_row1 = ctk.CTkFrame(_stitch_strip)
         _ss_row1.pack(fill='x', padx=5, pady=(5, 2))
@@ -483,9 +518,13 @@ class MainApp(ctk.CTk):
         self._stitch_roi_csv_name.pack(side="left", padx=(0, 5))
 
         # "Measure Heights" claims the far-right of row 1 (mirroring the Image tab)
+        # Start enabled if points/datum were already loaded (e.g. via CSV import)
+        # before this view was ever rendered — otherwise the button would be
+        # stuck disabled despite there being points ready to measure.
         self._stitch_measure_heights_btn = ctk.CTkButton(
             _ss_row1, text="Measure Heights", fg_color="#1f6aa5",
-            state="disabled", command=self.execute_custom_measurements)
+            state="normal" if (self.custom_measure_points or self.datum_point is not None) else "disabled",
+            command=self.execute_custom_measurements)
         self._stitch_measure_heights_btn.pack(side="right", padx=(10, 5))
 
         # ── Row 2: info labels + analysis label + Clear Points / Map Surface ──────
@@ -606,6 +645,27 @@ class MainApp(ctk.CTk):
                 canvas, _s, stitched_w, stitched_h,
                 grid_x, grid_y, scan_origin_x, scan_origin_y)
 
+            # Draw Dynamic FOV Scale Bar in Bottom Right
+            # The canvas pixel width of the FOV is 2 * _s['half_cw']
+            bar_px = _s['half_cw'] * 2
+
+            # 30px padding from the bottom right corner
+            margin = 30
+            x1 = cw - margin
+            y1 = ch - margin
+            x0 = x1 - bar_px
+
+            label_text = "5.60 mm"
+
+            # Draw the scale bar line and end-caps
+            canvas.create_line(x0, y1, x1, y1, fill="white", width=3)
+            canvas.create_line(x0, y1-6, x0, y1+6, fill="white", width=3)
+            canvas.create_line(x1, y1-6, x1, y1+6, fill="white", width=3)
+
+            # Draw the text label
+            canvas.create_text((x0 + x1) / 2, y1 - 15, text=label_text,
+                               fill="white", font=("Arial", 12, "bold"))
+
         def _on_click(event):
             if self.module_status != "Idle":
                 return
@@ -640,6 +700,10 @@ class MainApp(ctk.CTk):
             if not self.main_right_frame._render_pending:
                 self.main_right_frame._render_pending = True
                 self.main_right_frame.after(60, _render)
+
+        # Stashed for the same reason as self._stitched_canvas above — lets
+        # load_csv_points (and similar) request a redraw without a full rebuild.
+        self._schedule_render = _schedule_render
 
         def _start_pan(event):
             canvas._pan_start_x  = event.x
@@ -1392,6 +1456,17 @@ class MainApp(ctk.CTk):
             lambda e: self._image_tab_canvas.coords(
                 "placeholder_text", e.width / 2, e.height / 2))
 
+        coord_strip = ctk.CTkFrame(right_frame, fg_color="transparent", height=20)
+        coord_strip.pack(fill='x', padx=15, pady=(0, 5))
+
+        ctk.CTkLabel(coord_strip, text="Live Position: ", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(coord_strip, text="X:").pack(side="left", padx=(10, 2))
+        ctk.CTkLabel(coord_strip, textvariable=self.rpi_x_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(coord_strip, text="Y:").pack(side="left", padx=(15, 2))
+        ctk.CTkLabel(coord_strip, textvariable=self.rpi_y_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(coord_strip, text="Z:").pack(side="left", padx=(15, 2))
+        ctk.CTkLabel(coord_strip, textvariable=self.rpi_z_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
+
         # ROI measurement control strip (two rows)
         self._roi_active_canvas = None   # reset on each Image tab load
         roi_strip = ctk.CTkFrame(right_frame)
@@ -1402,8 +1477,12 @@ class MainApp(ctk.CTk):
         row1.pack(fill='x', padx=5, pady=(5, 2))
 
         # Measure Heights owns the far-right of row1; packed first to claim space
+        # Start enabled if points/datum were already loaded (e.g. via CSV import)
+        # before this tab was ever rendered — otherwise the button would be stuck
+        # disabled despite there being points ready to measure.
         self._measure_heights_btn = ctk.CTkButton(
-            row1, text="Measure Heights", fg_color="#1E6FA8", state="disabled",
+            row1, text="Measure Heights", fg_color="#1E6FA8",
+            state="normal" if (self.custom_measure_points or self.datum_point is not None) else "disabled",
             command=self.execute_custom_measurements)
         self._measure_heights_btn.pack(side="right", padx=(10, 5))
 
@@ -1962,8 +2041,13 @@ class MainApp(ctk.CTk):
 
     def _roi_press(self, event, canvas):
         """Begin a new Ctrl+drag ROI — clears the previous grid."""
+        # Prevent overwriting ROI globals from the micro-view while macro-view is active
+        if getattr(self, 'active_main_view', 'default') == 'stitched' and canvas is getattr(self, '_image_tab_canvas', None):
+            messagebox.showwarning("Action Blocked", "Please click 'Finish' on the stitched image tab (Main) first before drawing regions on the Image tab.")
+            return
         self._roi_drag_start = (event.x, event.y)
         canvas.delete("roi_grid")
+        self._grid_datum_ij = (0, 0)   # new grid: reset the datum pick back to top-left
         self._roi_active_canvas = canvas
         canvas.configure(cursor="crosshair")
         for _ms in ('_map_surface_btn', '_stitch_map_surface_btn'):
@@ -2051,14 +2135,14 @@ class MainApp(ctk.CTk):
                            fill="#FF4500", outline="#FFE000", width=1, tags="custom_pt")
 
     def _draw_datum_pt_marker(self, canvas, cx, cy):
-        """Draw the cyan crosshair + blue dot datum marker at canvas position (cx, cy)."""
+        """Draw the cyan crosshair + pink dot datum marker at canvas position (cx, cy)."""
         R = 10
         canvas.create_line(cx - R, cy, cx + R, cy,
                            fill="#00CFFF", width=2, tags="datum_pt")
         canvas.create_line(cx, cy - R, cx, cy + R,
                            fill="#00CFFF", width=2, tags="datum_pt")
         canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
-                           fill="#0044FF", outline="#00CFFF", width=1, tags="datum_pt")
+                           fill="pink", outline="#00CFFF", width=1, tags="datum_pt")
 
     def _redraw_custom_points_image_tab(self, canvas, canvas_w, canvas_h):
         """Re-stamp all custom_measure_points and measured_data text on the Image
@@ -2091,11 +2175,11 @@ class MainApp(ctk.CTk):
                 label = "Out of Range"
             elif is_datum:
                 fill = "magenta"
-                label = f"{height:.3f} mm (Datum)"
+                label = "0"
             elif i in self.analysis_selected_indices:
-                fill, label = "#00FF44", f"{height:.3f} mm"
+                fill, label = "#00FF44", str(i + 1)
             else:
-                fill, label = "cyan", f"{height:.3f} mm"
+                fill, label = "cyan", str(i + 1)
             canvas.create_text(cx, cy - 15, text=label,
                                fill=fill, font=("Arial", 12, "bold"),
                                tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
@@ -2145,13 +2229,16 @@ class MainApp(ctk.CTk):
         for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
             cx, cy = _phys_to_canvas(phys_x, phys_y)
             is_datum = (self.datum_point is not None and (phys_x, phys_y) == self.datum_point)
-            if is_datum:
+            if math.isnan(height):
+                fill = "red"
+                label = "Out of Range"
+            elif is_datum:
                 fill = "magenta"
-                label = f"{height:.3f} mm (Datum)"
+                label = "0"
             elif i in self.analysis_selected_indices:
-                fill, label = "#00FF44", f"{height:.3f} mm"
+                fill, label = "#00FF44", str(i + 1)
             else:
-                fill, label = "cyan", f"{height:.3f} mm"
+                fill, label = "cyan", str(i + 1)
             canvas.create_text(cx, cy - 15, text=label,
                                fill=fill, font=("Arial", 12, "bold"),
                                tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
@@ -2244,12 +2331,32 @@ class MainApp(ctk.CTk):
         print(f"[custom_pt/stitched] point {len(self.custom_measure_points)}: "
               f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
 
+    def _pick_grid_datum_node(self, event, canvas):
+        """If a grid is currently drawn on *canvas*, snap this Ctrl+Right-Click to the
+        nearest grid node and use it as the grid-scan datum instead of an arbitrary
+        point. Returns True if handled (caller should return without falling through
+        to the ordinary arbitrary-datum-point logic), False if no grid is present."""
+        if not (self._roi_active_canvas is canvas
+                and self._roi_canvas_x0 < self._roi_canvas_x1):
+            return False
+        x0, y0 = self._roi_canvas_x0, self._roi_canvas_y0
+        x1, y1 = self._roi_canvas_x1, self._roi_canvas_y1
+        nx = max(2, self.map_grid_x)
+        ny = max(2, self.map_grid_y)
+        i, j = self._nearest_grid_node(event.x, event.y, x0, y0, x1, y1, nx, ny)
+        self._grid_datum_ij = (i, j)
+        self._roi_redraw_grid(canvas, x0, y0, x1, y1)
+        print(f"[grid_datum] node ({i},{j}) selected as grid-scan datum")
+        return True
+
     def _on_datum_point_image(self, event, canvas):
         """<Control-ButtonRelease-3> on the Image tab: place or replace the datum marker."""
         if getattr(self, 'active_main_view', 'default') == 'stitched':
             messagebox.showwarning("Action Blocked",
                 "Please click 'Finish' on the stitched image tab (Main) first "
                 "before taking measurements on the Image tab.")
+            return
+        if self._pick_grid_datum_node(event, canvas):
             return
         canvas_w = canvas.winfo_width()
         canvas_h = canvas.winfo_height()
@@ -2273,6 +2380,8 @@ class MainApp(ctk.CTk):
         start_x = getattr(canvas, '_pan_origin_x', event.x)
         start_y = getattr(canvas, '_pan_origin_y', event.y)
         if abs(event.x - start_x) > 5 or abs(event.y - start_y) > 5:
+            return
+        if self._pick_grid_datum_node(event, canvas):
             return
         full_px = (event.x - _s['ox']) / _s['sx']
         full_py = (event.y - _s['oy']) / _s['sy']
@@ -2337,6 +2446,146 @@ class MainApp(ctk.CTk):
             self._safe_btn(btn_name, state="disabled")
 
         print("[clear] measurement points and ROI grid cleared")
+
+    def load_csv_points(self):
+        """Bulk-load measurement points from a CSV (Site, X_mm, Y_mm, ...).
+        Independent of any stitched scan — Site 0 becomes the datum point,
+        every other row is appended to custom_measure_points."""
+        # Placeholder stage travel limits — adjust STAGE_MAX_X/Y once the actual
+        # hardware travel range is known. Only a lower bound (0 mm) is enforced
+        # elsewhere in this file today; this is the first upper-bound check.
+        STAGE_MIN_X, STAGE_MAX_X = 0.0, 150.0
+        STAGE_MIN_Y, STAGE_MAX_Y = 0.0, 150.0
+
+        file_path = filedialog.askopenfilename(
+            title="Select Points CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+
+                # Validate only the first three columns — extra trailing columns
+                # (e.g. Z_mm, Height_mm) are accepted and simply ignored below.
+                if not header or len(header) < 3:
+                    messagebox.showerror("Format Error", "CSV must have at least 3 columns: Site, X_mm, Y_mm")
+                    return
+
+                h_site, h_x, h_y = header[0].lower(), header[1].lower(), header[2].lower()
+                if 'site' not in h_site or 'x' not in h_x or 'y' not in h_y:
+                    messagebox.showerror("Format Error", f"The first three columns must be Site, X, Y.\nFound: {header[0]}, {header[1]}, {header[2]}")
+                    return
+
+                self._clear_custom_points()
+
+                for row in reader:
+                    if len(row) < 3:
+                        continue   # skip empty or malformed rows
+
+                    try:
+                        site = row[0].strip()
+                        x_val = float(row[1])
+                        y_val = float(row[2])
+                    except (ValueError, IndexError):
+                        messagebox.showerror("Parse Error", f"Invalid number format in CSV row: {row}")
+                        self._clear_custom_points()
+                        return
+
+                    # Pre-flight bounds check: validate the actual motor destination
+                    # (point + confocal-sensor offset), not the raw CSV coordinate —
+                    # matches the offset applied everywhere else in this file.
+                    motor_dest_x = x_val + _CONFOCAL_DX
+                    motor_dest_y = y_val + _CONFOCAL_DY
+                    if not (STAGE_MIN_X <= motor_dest_x <= STAGE_MAX_X) or not (STAGE_MIN_Y <= motor_dest_y <= STAGE_MAX_Y):
+                        messagebox.showerror(
+                            "Hardware Safety Fault",
+                            f"CSV Import Aborted.\n\nSite {site} ({x_val}, {y_val}) will push the motors "
+                            f"out of bounds after applying the Confocal offset.\n"
+                            f"Target Motor X: {motor_dest_x:.2f}\nTarget Motor Y: {motor_dest_y:.2f}\n\n"
+                            f"Please correct the CSV and try again."
+                        )
+                        self._clear_custom_points()   # wipe any partially loaded points
+                        return
+
+                    if site == "0":
+                        self.datum_point = (x_val, y_val)
+                    else:
+                        self.custom_measure_points.append((x_val, y_val))
+        except Exception as e:
+            messagebox.showerror("CSV Load Error", f"Failed to load points:\n{e}")
+            return
+
+        for btn_name in ('_measure_heights_btn', '_clear_points_btn',
+                         '_stitch_measure_heights_btn', '_stitch_clear_points_btn'):
+            self._safe_btn(btn_name, state="normal")
+
+        # ── Make the loaded points visible immediately and give "Clear Points" a
+        # canvas to act on — without this, self._roi_active_canvas stays whatever
+        # it was before the import (often None), so Clear Points can't wipe the
+        # on-screen markers until the user clicks the canvas at least once.
+        if (getattr(self, 'active_main_view', 'default') == 'stitched'
+                and getattr(self, '_stitched_canvas', None) is not None
+                and self._stitched_canvas.winfo_exists()):
+            self._roi_active_canvas = self._stitched_canvas
+            if getattr(self, '_schedule_render', None) is not None:
+                self._schedule_render()
+        elif (getattr(self, '_image_tab_canvas', None) is not None
+                and self._image_tab_canvas.winfo_exists()):
+            self._roi_active_canvas = self._image_tab_canvas
+            # _redraw_custom_points_image_tab assumes a pre-wiped canvas; clear any
+            # stale markers first in case this canvas wasn't self._roi_active_canvas
+            # the last time points were cleared (i.e. exactly bug #1's scenario).
+            self._image_tab_canvas.delete("custom_pt", "measurement_text", "datum_pt")
+            self._redraw_custom_points_image_tab(
+                self._image_tab_canvas,
+                self._image_tab_canvas.winfo_width(),
+                self._image_tab_canvas.winfo_height())
+
+        print(f"[csv_import] loaded {len(self.custom_measure_points)} point(s) "
+              f"{'with datum' if self.datum_point is not None else 'without datum'} from {file_path}")
+
+    def launch_gwyddion(self):
+        """Strip the 'Site' column from the last-exported CSV, save a clean
+        X, Y, Z .xyz file, and open it in Gwyddion via subprocess."""
+        if not hasattr(self, 'last_exported_csv') or not os.path.exists(self.last_exported_csv):
+            messagebox.showerror("Error", "No recent CSV found to export.")
+            return
+
+        base, _ = os.path.splitext(self.last_exported_csv)
+        xyz_path = base + "_gwyddion.xyz"
+
+        try:
+            with open(self.last_exported_csv, 'r') as infile, open(xyz_path, 'w', newline='') as outfile:
+                reader = csv.reader(infile)
+                writer = csv.writer(outfile)
+
+                header = next(reader, None)
+                # Points export header: Site, X_mm, Y_mm, Z_mm, Height_mm (5 cols) —
+                # the measured height is Height_mm (index 4).
+                # Grid export header: Site, X_mm, Y_mm, Z_mm (4 cols) — the measured
+                # height is Z_mm itself (index 3). Both keep X/Y at indices 1/2.
+                is_points_format = header and len(header) >= 5
+
+                for row in reader:
+                    if not row:
+                        continue
+                    if is_points_format:
+                        if len(row) >= 5 and row[4].strip().lower() != "nan":
+                            writer.writerow([row[1], row[2], row[4]])
+                    else:
+                        if len(row) >= 4 and row[3].strip().lower() != "nan":
+                            writer.writerow([row[1], row[2], row[3]])
+
+            import subprocess
+            subprocess.Popen(["gwyddion", xyz_path])
+        except FileNotFoundError:
+            messagebox.showerror("Launch Error", "Could not find 'gwyddion' executable.\nPlease ensure Gwyddion is installed and added to your system PATH.")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to prepare file for Gwyddion:\n{e}")
 
     def _toggle_analysis_point(self, event):
         """Toggle selection of a measured point label; update the analysis readout."""
@@ -2480,7 +2729,10 @@ class MainApp(ctk.CTk):
         # each height with the correct physical coordinate.
         self._optimized_route = optimized_route
 
-        self._sequence_measure_point(offset_route, 0, [])
+        if self.datum_point is None:
+            self._sequence_measure_point(offset_route, 0, [])   # no datum: unchanged behavior
+        else:
+            self._begin_autofocus_datum(offset_route)
 
     def _sequence_measure_point(self, route, index, results):
         """Non-blocking dispatcher: move to route[index] when the stage is Idle,
@@ -2490,7 +2742,7 @@ class MainApp(ctk.CTk):
             return
 
         if self.module_status != "Idle":
-            self.after(500, lambda: self._sequence_measure_point(route, index, results))
+            self.after(100, lambda: self._sequence_measure_point(route, index, results))
             return
 
         target_x, target_y = route[index]
@@ -2512,13 +2764,13 @@ class MainApp(ctk.CTk):
         self.module_status = "Changing Position"
         self.status_lockout_time = time.time() + 2.0
 
-        self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
+        self.after(100, lambda: self._sequence_wait_then_measure(route, index, results))
 
     def _sequence_wait_then_measure(self, route, index, results):
         """Poll until the stage reaches Idle, wait for mechanical settling, then
         fire a daemon thread to read the confocal sensor without blocking the GUI."""
         if self.module_status != "Idle":
-            self.after(500, lambda: self._sequence_wait_then_measure(route, index, results))
+            self.after(100, lambda: self._sequence_wait_then_measure(route, index, results))
             return
 
         # Insert a mandatory settling delay before measuring.  The motor controller
@@ -2595,6 +2847,121 @@ class MainApp(ctk.CTk):
         print(f"[sequence] point {index + 1}/{len(route)}: height = {height_str}")
         self._sequence_measure_point(route, index + 1, results)
 
+    # ── Auto-focus-datum calibration ────────────────────────────────────────
+    # Automatic pre-step, run once before the real measurement route starts:
+    # drive to the datum (confocal-offset applied), read the sensor once, then
+    # jog Z so the confocal reads ~0 mm there. Mirrors the _sequence_* .after()
+    # idiom above — never blocks the main thread; only the socket read runs in
+    # a background Thread (via the existing _confocal_read_worker).
+
+    def _begin_autofocus_datum(self, route):
+        """Entry point: called once the persistent confocal socket is already open
+        and action buttons are already disabled — a drop-in replacement for the
+        final self._sequence_measure_point(route, 0, []) call in each launcher."""
+        datum_x = self.datum_point[0] + _CONFOCAL_DX
+        datum_y = self.datum_point[1] + _CONFOCAL_DY
+        if datum_x < 0 or datum_y < 0:
+            messagebox.showerror(
+                "Cannot Reach Datum",
+                f"Auto-focus aborted: the datum plus confocal offset requires the stage "
+                f"to move to ({datum_x:.4f}, {datum_y:.4f}) mm, which exceeds the "
+                f"hardware limit (0 mm)."
+            )
+            self._close_confocal_socket()
+            self._sequence_unlock_buttons()
+            return
+        print(f"[autofocus] datum target ({datum_x:.4f}, {datum_y:.4f}) mm — "
+              f"starting auto-focus calibration")
+        self._autofocus_raise_z(route, datum_x, datum_y)
+
+    def _autofocus_raise_z(self, route, datum_x, datum_y):
+        """Hardware safety: raise Z to a clearance height at the CURRENT XY position
+        before moving XY to the datum, so the assembly never crosses to a new XY
+        position while sitting at an arbitrary (possibly collision-risk) Z."""
+        if self.module_status != "Idle":
+            self.after(100, lambda: self._autofocus_raise_z(route, datum_x, datum_y))
+            return
+        print(f"[autofocus] raising Z to {_SAFE_CLEARANCE_Z_MM:.1f} mm clearance before XY move")
+        self.send_goto_command(float(self.x_pos), float(self.y_pos), _SAFE_CLEARANCE_Z_MM, show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+        self.after(100, lambda: self._autofocus_wait_z_clear(route, datum_x, datum_y))
+
+    def _autofocus_wait_z_clear(self, route, datum_x, datum_y):
+        if self.module_status != "Idle":
+            self.after(100, lambda: self._autofocus_wait_z_clear(route, datum_x, datum_y))
+            return
+        self._autofocus_goto_datum(route, datum_x, datum_y)
+
+    def _autofocus_goto_datum(self, route, datum_x, datum_y):
+        if self.module_status != "Idle":
+            self.after(100, lambda: self._autofocus_goto_datum(route, datum_x, datum_y))
+            return
+        self.send_goto_command(datum_x, datum_y, float(self.z_pos), show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+        self.after(100, lambda: self._autofocus_wait_arrival(route, datum_x, datum_y))
+
+    def _autofocus_wait_arrival(self, route, datum_x, datum_y):
+        if self.module_status != "Idle":
+            self.after(100, lambda: self._autofocus_wait_arrival(route, datum_x, datum_y))
+            return
+        print(f"[autofocus] at datum — waiting {_SETTLING_DELAY_MS} ms for mechanical settling")
+        self.after(_SETTLING_DELAY_MS, lambda: self._autofocus_fire_sensor_read(route, datum_x, datum_y))
+
+    def _autofocus_fire_sensor_read(self, route, datum_x, datum_y):
+        result_holder = [None]
+        t = Thread(target=self._confocal_read_worker, args=(result_holder,), daemon=True)
+        t.start()
+        self.after(100, lambda: self._autofocus_poll_sensor_result(route, datum_x, datum_y, result_holder, t))
+
+    def _autofocus_poll_sensor_result(self, route, datum_x, datum_y, result_holder, thread):
+        if thread.is_alive():
+            self.after(100, lambda: self._autofocus_poll_sensor_result(
+                route, datum_x, datum_y, result_holder, thread))
+            return
+        reading = result_holder[0]
+        if reading is None or math.isnan(reading) or reading < -90.0:
+            print(f"[autofocus] ERROR: invalid confocal reading ({reading!r}) at datum — aborting")
+            messagebox.showerror(
+                "Auto-Focus Failed",
+                "Auto-focus datum calibration failed: the confocal sensor returned an "
+                "invalid reading.\nCheck the CL-Navigator connection and datum position, "
+                "then try again."
+            )
+            self._close_confocal_socket()
+            self._sequence_unlock_buttons()
+            return
+
+        new_z = float(self.z_pos) - reading
+        if new_z < 0:
+            print(f"[autofocus] ERROR: computed Z jog ({new_z:.4f} mm) out of range — aborting")
+            messagebox.showerror(
+                "Auto-Focus Failed",
+                f"Auto-focus datum calibration failed: the computed Z position "
+                f"({new_z:.4f} mm) is out of stage range.\nSequence aborted."
+            )
+            self._close_confocal_socket()
+            self._sequence_unlock_buttons()
+            return
+
+        print(f"[autofocus] reading={reading:.4f} mm, current_z={float(self.z_pos):.4f} mm "
+              f"-> new_z={new_z:.4f} mm")
+        self.send_goto_command(datum_x, datum_y, new_z, show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+        self.after(100, lambda: self._autofocus_wait_z_settle(route))
+
+    def _autofocus_wait_z_settle(self, route):
+        if self.module_status != "Idle":
+            self.after(100, lambda: self._autofocus_wait_z_settle(route))
+            return
+        self.after(_SETTLING_DELAY_MS, lambda: self._autofocus_complete(route))
+
+    def _autofocus_complete(self, route):
+        print("[autofocus] datum Z calibration complete — starting main measurement sequence")
+        self._sequence_measure_point(route, 0, [])
+
     def _phys_to_canvas_pixel(self, phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h):
         """Inverse of _canvas_pixel_to_phys: map physical mm coords back to canvas pixels.
         ref_x/ref_y must be the camera assembly position when the image was displayed."""
@@ -2624,26 +2991,25 @@ class MainApp(ctk.CTk):
         ordered_points = getattr(self, '_optimized_route', self.custom_measure_points)
 
         # ── Persist measurement data for analysis mode ────────────────────────
-        # For custom scans subtract datum Z so every height is relative to the datum.
-        if getattr(self, '_sequence_mode', 'custom') != "grid":
-            datum_z = 0.0
-            if self.datum_point is not None:
-                for (px, py), h in zip(ordered_points, results):
-                    if (px, py) == self.datum_point:
-                        datum_z = h
-                        break
-            # Treat sensor error codes (e.g. -99.9999) as NaN so they don't silently
-            # cancel out in subtraction and produce a false 0.000 mm reading.
-            if datum_z < -90.0 or math.isnan(datum_z) or abs(datum_z) < 0.000001:
-                datum_z = float('nan')
-            self.measured_data = []
+        # Subtract datum Z so every height is relative to the datum — applies to
+        # both custom-points scans and grid scans (grid scans always have a valid
+        # self.datum_point: the picked/default grid node, see start_surface_map).
+        datum_z = 0.0
+        if self.datum_point is not None:
             for (px, py), h in zip(ordered_points, results):
-                if h < -90.0 or math.isnan(h) or abs(h) < 0.000001 or math.isnan(datum_z):
-                    self.measured_data.append((px, py, float('nan')))
-                else:
-                    self.measured_data.append((px, py, h - datum_z))
-        else:
-            self.measured_data = [(px, py, h) for (px, py), h in zip(ordered_points, results)]
+                if (px, py) == self.datum_point:
+                    datum_z = h
+                    break
+        # Treat sensor error codes (e.g. -99.9999) as NaN so they don't silently
+        # cancel out in subtraction and produce a false 0.000 mm reading.
+        if datum_z < -90.0 or math.isnan(datum_z) or abs(datum_z) < 0.000001:
+            datum_z = float('nan')
+        self.measured_data = []
+        for (px, py), h in zip(ordered_points, results):
+            if h < -90.0 or math.isnan(h) or abs(h) < 0.000001 or math.isnan(datum_z):
+                self.measured_data.append((px, py, float('nan')))
+            else:
+                self.measured_data.append((px, py, h - datum_z))
         self.analysis_selected_indices = []
         if hasattr(self, 'analysis_result_var'):
             self.analysis_result_var.set("Analysis: Select points...")
@@ -2694,10 +3060,10 @@ class MainApp(ctk.CTk):
                             label = "Out of Range"
                             fill  = "red"
                         elif is_datum:
-                            label = f"{height:.3f} mm (Datum)"
+                            label = "0"
                             fill  = "magenta"
                         else:
-                            label = f"{height:.3f} mm"
+                            label = str(i + 1)
                             fill  = "cyan"
                         canvas.create_text(
                             cx, cy - 15,
@@ -2708,22 +3074,83 @@ class MainApp(ctk.CTk):
                 # Bind left-click on text labels to toggle analysis selection
                 canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
 
-        # ── CSV export for grid scans ─────────────────────────────────────────
+        # ── CSV Export Logic ──────────────────────────────────────────────────
+        export_base = os.path.join(os.path.expanduser('~'), 'optical_module', 'Data_Exports')
+        map_dir = os.path.join(export_base, 'Mapped_Surfaces')
+        pts_dir = os.path.join(export_base, 'Individual_Points')
+        os.makedirs(map_dir, exist_ok=True)
+        os.makedirs(pts_dir, exist_ok=True)
+
+        def show_custom_success_popup(file_path, is_grid=True):
+            """Scan-complete confirmation. Gwyddion only makes sense for a dense
+            grid scan — a handful of sparse individual points can't be turned into
+            a surface, so that branch only ever gets a Close button."""
+            popup = ctk.CTkToplevel(self)
+            popup.title("Scan Complete")
+            popup.geometry("450x200")
+            popup.attributes("-topmost", True)
+            popup.grab_set()   # focus lock
+
+            ctk.CTkLabel(popup, text="Measurement successfully completed",
+                         font=("Arial", 16, "bold")).pack(pady=(20, 5))
+            ctk.CTkLabel(popup, text=f"Data saved to:\n{file_path}",
+                         wraplength=400).pack(pady=(0, 20), padx=20)
+
+            btn_frame = ctk.CTkFrame(popup, fg_color="transparent")
+            btn_frame.pack(fill="x", pady=10)
+
+            if is_grid:
+                btn_frame.grid_columnconfigure(0, weight=1)
+                btn_frame.grid_columnconfigure(3, weight=1)
+
+                close_btn = ctk.CTkButton(btn_frame, text="Close", width=120, command=popup.destroy)
+                close_btn.grid(row=0, column=1, padx=10)
+
+                gwyddion_btn = ctk.CTkButton(
+                    btn_frame, text="View in Gwyddion", fg_color="purple", width=150,
+                    command=lambda: [self.launch_gwyddion(), popup.destroy()])
+                gwyddion_btn.grid(row=0, column=2, padx=10)
+            else:
+                close_btn = ctk.CTkButton(btn_frame, text="Close", width=120, command=popup.destroy)
+                close_btn.pack(pady=10)
+
         if getattr(self, '_sequence_mode', 'custom') == "grid":
-            export_dir = os.path.join(os.path.expanduser('~'), 'optical_module', 'Data_Exports')
-            os.makedirs(export_dir, exist_ok=True)
-            csv_path = os.path.join(export_dir, self._sequence_csv)
+            csv_path = os.path.join(map_dir, self._sequence_csv)
             try:
                 with open(csv_path, 'w', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow(['X_mm', 'Y_mm', 'Z_mm'])
-                    for px, py, h in self.measured_data:
-                        writer.writerow([f"{px:.4f}", f"{py:.4f}", f"{h:.4f}"])
+                    writer.writerow(['Site', 'X_mm', 'Y_mm', 'Z_mm'])
+                    for i, (px, py, h) in enumerate(self.measured_data):
+                        is_datum = (self.datum_point is not None and (px, py) == self.datum_point)
+                        site_label = "0" if is_datum else str(i + 1)
+                        writer.writerow([site_label, f"{px:.4f}", f"{py:.4f}", f"{h:.4f}"])
                 print(f"[surface_map] Grid scan complete. Data saved to {csv_path}")
-                messagebox.showinfo("Scan Complete", f"Surface map successfully completed!\n\nData saved to:\n{csv_path}")
+                self.last_exported_csv = csv_path
+                show_custom_success_popup(csv_path, is_grid=True)
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
             self._sequence_mode = "custom"   # reset so the next custom scan draws labels
+
+        else:
+            # Automatically export Individual Points
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            sample_id = getattr(self, 'curr_sample_id', 'Unknown')
+            csv_path = os.path.join(pts_dir, f"Points_{sample_id}_{timestamp}.csv")
+            try:
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['Site', 'X_mm', 'Y_mm', 'Z_mm', 'Height_mm'])
+                    current_z = self.z_pos
+                    for i, (px, py, h) in enumerate(self.measured_data):
+                        is_datum = (self.datum_point is not None and (px, py) == self.datum_point)
+                        site_label = "0" if is_datum else str(i + 1)
+                        h_str = f"{h:.4f}" if not math.isnan(h) else "NaN"
+                        writer.writerow([site_label, f"{px:.4f}", f"{py:.4f}", current_z, h_str])
+                print(f"[custom_scan] Individual points saved to {csv_path}")
+                self.last_exported_csv = csv_path
+                show_custom_success_popup(csv_path, is_grid=False)
+            except Exception as e:
+                print(f"Failed to save individual points CSV: {e}")
 
         # ── Close Confocal socket now that all measurements are complete ─────
         self._close_confocal_socket()
@@ -2736,13 +3163,13 @@ class MainApp(ctk.CTk):
         self.module_status = "Changing Position"
         self.status_lockout_time = time.time() + 2.0
 
-        self.after(500, self._sequence_unlock_buttons)
+        self.after(100, self._sequence_unlock_buttons)
 
     def _sequence_unlock_buttons(self):
         """Poll until the return-to-origin move finishes, then re-enable all
         three action buttons."""
         if self.module_status != "Idle":
-            self.after(500, self._sequence_unlock_buttons)
+            self.after(100, self._sequence_unlock_buttons)
             return
 
         # Safety-net: close socket in case any abort path didn't reach _process_measurement_results
@@ -2803,21 +3230,50 @@ class MainApp(ctk.CTk):
                                 tags="roi_grid")
 
         # ── Measurement dots at every intersection ────────────────────────────
+        # The node at self._grid_datum_ij (default (0,0) = visual top-left) is the
+        # grid-scan datum; rendered pink and slightly larger so it stands out
+        # (matches the pink used for a datum that lands on a corner handle).
+        datum_ij = getattr(self, '_grid_datum_ij', (0, 0))
         for i in range(nx):
             xi = x0 + i * (x1 - x0) / (nx - 1)
             for j in range(ny):
                 yj = y0 + j * (y1 - y0) / (ny - 1)
-                canvas.create_oval(xi - DOT_R, yj - DOT_R,
-                                    xi + DOT_R, yj + DOT_R,
-                                    fill="#00FF88", outline="",
+                is_datum = (i, j) == datum_ij
+                r = DOT_R + 2 if is_datum else DOT_R
+                color = "pink" if is_datum else "#00FF88"
+                canvas.create_oval(xi - r, yj - r,
+                                    xi + r, yj + r,
+                                    fill=color, outline="",
                                     tags="roi_grid")
 
         # ── Corner handles (drawn last so they sit on top) ────────────────────
+        # A corner handle sits at the same position as a grid node — if that node
+        # is the current datum, tint the handle pink instead of gold so the datum
+        # stays visible (it would otherwise be hidden under the opaque handle).
+        corner_ij = {(x0, y0): (0, 0), (x1, y0): (nx - 1, 0),
+                     (x0, y1): (0, ny - 1), (x1, y1): (nx - 1, ny - 1)}
         for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
+            is_datum_corner = corner_ij[(cx, cy)] == datum_ij
             canvas.create_oval(cx - HANDLE_R, cy - HANDLE_R,
                                 cx + HANDLE_R, cy + HANDLE_R,
-                                fill="#FFD700", outline="#FFFFFF", width=1,
+                                fill="pink" if is_datum_corner else "#FFD700",
+                                outline="#FFFFFF", width=1,
                                 tags="roi_grid")
+
+    def _nearest_grid_node(self, mx, my, x0, y0, x1, y1, nx, ny):
+        """Return the (i, j) screen-space grid node closest to canvas point (mx, my).
+        i = column (0=left), j = row (0=top) — same indexing _roi_redraw_grid uses."""
+        best_ij = (0, 0)
+        best_dist = None
+        for i in range(nx):
+            xi = x0 + i * (x1 - x0) / (nx - 1)
+            for j in range(ny):
+                yj = y0 + j * (y1 - y0) / (ny - 1)
+                dist = (mx - xi) ** 2 + (my - yj) ** 2
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best_ij = (i, j)
+        return best_ij
 
     def _phys_dist_to_canvas_px(self, phys_dx_mm, phys_dy_mm):
         """Convert a physical distance (mm) to canvas-pixel distances.
@@ -2865,6 +3321,10 @@ class MainApp(ctk.CTk):
           2. Click inside the grid box → move mode.
           3. Click outside → fall through to click_to_move (hardware command).
         """
+        # Prevent moving ROI globals from the micro-view while macro-view is active
+        if getattr(self, 'active_main_view', 'default') == 'stitched' and canvas is getattr(self, '_image_tab_canvas', None):
+            messagebox.showwarning("Action Blocked", "Please click 'Finish' on the stitched image tab (Main) first before taking measurements on the Image tab.")
+            return
         # Guard: if the click landed on a measured-point marker or label, do nothing.
         # _toggle_analysis_point (tag_bind) owns that event and returns "break".
         current_items = canvas.find_withtag("current")
@@ -3086,14 +3546,35 @@ class MainApp(ctk.CTk):
         Also called explicitly from _roi_pan_release so the cursor is never
         left stuck in "hand2" or "fleur" after a drag completes.
         """
-        # 0. Ctrl held → crosshair regardless of position
+        has_roi = (self._roi_active_canvas is canvas
+                   and self._roi_canvas_x0 < self._roi_canvas_x1)
+
+        # 0. Ctrl held → crosshair regardless of position, plus a live grid-node
+        # hover preview (yellow) so the user can see which node Ctrl+Right-Click
+        # would select as the grid-scan datum before committing.
         if event.state & 0x0004:
             canvas.configure(cursor="crosshair")
+            if has_roi:
+                x0, y0 = self._roi_canvas_x0, self._roi_canvas_y0
+                x1, y1 = self._roi_canvas_x1, self._roi_canvas_y1
+                nx = max(2, self.map_grid_x)
+                ny = max(2, self.map_grid_y)
+                i, j = self._nearest_grid_node(event.x, event.y, x0, y0, x1, y1, nx, ny)
+                xi = x0 + i * (x1 - x0) / (nx - 1)
+                yj = y0 + j * (y1 - y0) / (ny - 1)
+                R = 5
+                canvas.delete("roi_grid_hover")
+                canvas.create_oval(xi - R, yj - R, xi + R, yj + R,
+                                    fill="yellow", outline="",
+                                    tags="roi_grid_hover")
+            else:
+                canvas.delete("roi_grid_hover")
             return
 
+        canvas.delete("roi_grid_hover")   # Ctrl released — clear any hover preview
+
         # No active ROI on this canvas → plain arrow
-        if (self._roi_active_canvas is not canvas
-                or self._roi_canvas_x0 >= self._roi_canvas_x1):
+        if not has_roi:
             canvas.configure(cursor="arrow")
             return
 
@@ -3497,6 +3978,16 @@ class MainApp(ctk.CTk):
                 snake_route.append((self.roi_phys_x_start + i * dx, y))
         self._optimized_route = snake_route
 
+        # ── Datum: convert the picked/default grid node (screen-space i,j) to a
+        # physical point. Screen-row 0 is the visual top row (roi_phys_y_end),
+        # but snake_route's own j=0 is roi_phys_y_start (visual bottom) — flip.
+        gi, gj_screen = self._grid_datum_ij
+        gi = min(max(gi, 0), nx - 1)
+        gj_screen = min(max(gj_screen, 0), ny - 1)
+        gj_route = (ny - 1) - gj_screen
+        self.datum_point = (self.roi_phys_x_start + gi * dx,
+                             self.roi_phys_y_start + gj_route * dy)
+
         # ── Phase 2: Apply Confocal→Optical offset and bounds check ──────────
         CONFOCAL_DX = -1.418137875
         CONFOCAL_DY = -72.258765875
@@ -3543,8 +4034,9 @@ class MainApp(ctk.CTk):
 
         print(f"[surface_map] Grid {nx}×{ny} = {len(offset_route)} pts  "
               f"origin ({self._sequence_origin_x:.4f}, {self._sequence_origin_y:.4f}) mm  "
+              f"datum ({self.datum_point[0]:.4f}, {self.datum_point[1]:.4f}) mm  "
               f"→ {self._sequence_csv}")
-        self._sequence_measure_point(offset_route, 0, [])
+        self._begin_autofocus_datum(offset_route)
 
     def start_surface_map_stitched(self):
         """Variant of start_surface_map that reads from the stitched-view ROI entries."""
@@ -3587,6 +4079,16 @@ class MainApp(ctk.CTk):
             for i in x_indices:
                 snake_route.append((self.roi_phys_x_start + i * dx, y))
         self._optimized_route = snake_route
+
+        # ── Datum: convert the picked/default grid node (screen-space i,j) to a
+        # physical point. Screen-row 0 is the visual top row (roi_phys_y_end),
+        # but snake_route's own j=0 is roi_phys_y_start (visual bottom) — flip.
+        gi, gj_screen = self._grid_datum_ij
+        gi = min(max(gi, 0), nx - 1)
+        gj_screen = min(max(gj_screen, 0), ny - 1)
+        gj_route = (ny - 1) - gj_screen
+        self.datum_point = (self.roi_phys_x_start + gi * dx,
+                             self.roi_phys_y_start + gj_route * dy)
 
         # ── Phase 2: Apply Confocal→Optical offset and bounds check ──────────
         CONFOCAL_DX = -1.418137875
@@ -3634,8 +4136,9 @@ class MainApp(ctk.CTk):
 
         print(f"[surface_map_stitched] Grid {nx}×{ny} = {len(offset_route)} pts  "
               f"origin ({self._sequence_origin_x:.4f}, {self._sequence_origin_y:.4f}) mm  "
+              f"datum ({self.datum_point[0]:.4f}, {self.datum_point[1]:.4f}) mm  "
               f"→ {self._sequence_csv}")
-        self._sequence_measure_point(offset_route, 0, [])
+        self._begin_autofocus_datum(offset_route)
 
     # -------------------------- Details Tab ------------------------ #
 
