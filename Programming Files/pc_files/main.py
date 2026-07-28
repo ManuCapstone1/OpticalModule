@@ -116,8 +116,9 @@ def main():
         - Cleans up communication sockets.
         """
 
-        stop_event.set() 
-        gui.destroy() 
+        stop_event.set()
+        gui.close_smaract_on_exit()
+        gui.destroy()
         comms.close()
 
     gui.protocol("WM_DELETE_WINDOW", on_closing)

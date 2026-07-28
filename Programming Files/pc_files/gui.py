@@ -11,33 +11,60 @@ import csv
 import shutil
 import socket
 import math
-from threading import Thread
-from stage import home_smaract
+from threading import Thread, Lock
+from stage import home_smaract, open_smaract, close_smaract, get_position, move_to_absolute, CHANNEL_X, CHANNEL_Y
 
-# Confocal sensor network settings (CL_Navigator TCP/IP interface)
+# Confocal sensor network settings 
 _CONFOCAL_IP           = "169.254.0.20"
 _CONFOCAL_PORT         = 24685
 _CONFOCAL_TIMEOUT      = 2.0
-# Mechanical settling delay: time (ms) to wait after the motor controller reports
-# "Idle" before triggering a measurement.  The SmarAct servo reports move-complete
-# when the encoder is within dead-band, but the physical assembly continues to ring.
-# Trimmed from 500ms to 275ms as a conservative first step (2026-07-08) — the
-# previous value was empirically tuned after a confirmed 269 µm run-to-run tramming
-# discrepancy at a much shorter delay, so this must be re-validated with a
-# repeatability test (same point, several repeat measurements) before trimming
-# further. Revert to 500 if repeat readings show meaningfully more spread than
-# the pre-change baseline.
+
+# SmarAct stage: fixed position for the optical to park above the SmarAct 
+SMARACT_PARK_X = 6.401500875
+SMARACT_PARK_Y = 201.070744875
+SMARACT_PARK_Z = 70.0
+# confocal's own ideal Z for a zero-height SmarAct sample, derived empirically:
+# 70.0 (SMARACT_PARK_Z) - 3.0278 (confocal reading, bare stage, no sample) = 66.9722
+# distinct from SMARACT_PARK_Z, which is calibrated for the camera's focus, not
+# the confocal's ~15mm standoff -- the two sensors sit at different heights on the assembly
+SMARACT_CONFOCAL_FOCUS_Z = 66.9722
+# Settling delay: time (ms) to wait after the motor controller reports "Idle" before triggering a measurement.
 _SETTLING_DELAY_MS     = 275
-# Confocal sensor XY offset from the camera optical axis — used by the automatic
-# auto-focus-datum calibration pre-step (see _begin_autofocus_datum). Intentionally
-# not deduplicated with the local CONFOCAL_DX/DY redefinitions inside
-# execute_custom_measurements / start_surface_map / start_surface_map_stitched.
+# piezo stage still rings briefly after the controller reports target-reached.
+# 100ms wasn't enough margin — blur kept showing up late in a 9-point run
+# (points 8-9), suggesting some creep/ringing outlasts the exposure window too
+# (default exposure is itself ~100ms). bumped up, still needs real tuning.
+SMARACT_SETTLING_DELAY_MS = 300
+# Confocal XY offset from the optical
 _CONFOCAL_DX = -1.418137875
 _CONFOCAL_DY = -72.258765875
-# Safety clearance height: Z is raised here BEFORE any XY move during auto-focus,
-# so the camera/sensor assembly can't collide with the sample while crossing to
-# a different XY position at an arbitrary (possibly low) Z.
+# Where the confocal needs to be to sit over the SmarAct
+SMARACT_CONFOCAL_PARK_X = SMARACT_PARK_X + _CONFOCAL_DX
+SMARACT_CONFOCAL_PARK_Y = SMARACT_PARK_Y + _CONFOCAL_DY
+# SmarAct SLC-1720  hard-stop travel limits (mm)
+SMARACT_TRAVEL_MIN = -6.0
+SMARACT_TRAVEL_MAX = 6.0
+SMARACT_TRAVEL_MIN_NM = round(SMARACT_TRAVEL_MIN * 1_000_000)
+SMARACT_TRAVEL_MAX_NM = round(SMARACT_TRAVEL_MAX * 1_000_000)
+# center of travel + full bounds box size (12mm x 12mm)
+SMARACT_CENTRE_X = (SMARACT_TRAVEL_MIN + SMARACT_TRAVEL_MAX) / 2.0
+SMARACT_CENTRE_Y = (SMARACT_TRAVEL_MIN + SMARACT_TRAVEL_MAX) / 2.0
+SMARACT_BOUNDS_W_MM = SMARACT_TRAVEL_MAX - SMARACT_TRAVEL_MIN
+SMARACT_BOUNDS_H_MM = SMARACT_TRAVEL_MAX - SMARACT_TRAVEL_MIN
+# Safety clearance height: Z is raised before any XY move during confocal auto-focus
 _SAFE_CLEARANCE_Z_MM = 90.0
+# The confocal auto-focus datum step starts from a single estimated Z (compensated for
+# sample height) but that estimate can miss the sensor's narrow valid window (CL-Navigator's
+# working range is roughly its ~15mm standoff +/- 1.3mm). Rather than fail outright on one
+# guess, sweep Z around the estimate until a valid (non -99.9999) reading is found. Step must
+# be smaller than the ~2.6mm-wide valid window so at least one step always lands inside it.
+_AUTOFOCUS_SWEEP_RANGE_MM = 2.0
+_AUTOFOCUS_SWEEP_STEP_MM = 0.5
+# Rough estimates for grid-scan "Est. Duration" readout:
+# ~17 s fixed overhead (auto-focus datum calibration + move to the confocal),
+# then ~3.152 s per measurement point (for a 2 mm x/y step size). Actual time varies with step size.
+_GRID_SCAN_SETUP_S     = 17.0
+_GRID_SCAN_PER_POINT_S = 3.152
 
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -79,6 +106,32 @@ class MainApp(ctk.CTk):
 
         # Disable decompression bomb protection for stitched image
         Image.MAX_IMAGE_PIXELS = None 
+
+        # Which physical stage the current sample is mounted on, set from the
+        # "Create New Sample" dialog's sample_location selection.
+        self.use_smaract_stage = False
+        self._compute_overlap = True  # mechanical vs visual stitch toggle, set per-scan
+        self._smaract_scan_abort = False
+        self._smaract_handle = None
+        # Shared SmarAct connection state: the live Motion-tab position display and
+        # an active scan both reuse the same handle; the lock serializes every
+        # stage.py call against it, and the two "active" flags decide when it's
+        # safe to actually close the connection.
+        self._smaract_lock = Lock()
+        self._smaract_poll_active = False
+        self._smaract_scan_running = False
+        self._smaract_move_active = False
+        self._smaract_homing_active = False
+        # Keeps the connection alive for the whole app session once opened at
+        # startup, so Motion tab opens/scans never re-pay SA_OpenSystem's ~4s.
+        # Only close_smaract_on_exit() clears this.
+        self._smaract_startup_active = True
+        self.current_tab = None
+        # Grid parameters recorded by the most recent SmarAct scan, and whether
+        # the currently-displayed stitched image was produced by one (lets
+        # stitched-image click-to-move route to the right stage).
+        self._smaract_last_grid = None
+        self._last_stitched_was_smaract = False
 
         #------ JSON Objects sent to Raspberry Pi ------#
         #Sample data
@@ -148,11 +201,15 @@ class MainApp(ctk.CTk):
         self._canvas_orig_w = 0          # original image width (sensor px)
         self._canvas_orig_h = 0          # original image height (sensor px)
         self._canvas_img_path = None     # path of image currently on canvas
+        self._image_tab_render_pending = False   # debounce guard for resize re-render
+        self._scan_progress_dot_id = None       # canvas item id of the live grid-scan dot
+        self._scan_progress_dot_canvas = None   # which canvas that dot lives on
         # Custom point-selection state (right-click markers)
         self.custom_measure_points = []   # list of (phys_x_mm, phys_y_mm) tuples
         self._canvas_click_cache = {}     # (phys_x, phys_y) → (canvas_px, canvas_py) for Image tab
         self.measured_data = []           # list of (phys_x, phys_y, height) after a sequence
         self.analysis_selected_indices = []  # indices into measured_data currently highlighted
+        self._show_heights_mode = False   # False: labels show point index, True: show measured height
         self.datum_point = None           # (phys_x, phys_y) of Ctrl+RClick datum, or None
 
         # ROI bounding box in canvas pixels (normalized: x0<x1, y0<y1)
@@ -175,6 +232,12 @@ class MainApp(ctk.CTk):
         self.rpi_x_pos_var = ctk.StringVar(value="--")
         self.rpi_y_pos_var = ctk.StringVar(value="--")
         self.rpi_z_pos_var = ctk.StringVar(value="--")
+        # created here (not just in display_motion_tab) so they exist even if the
+        # Image tab or a sample gets created before Motion has ever been visited,
+        # and because polling now starts at app launch, before Motion is ever built
+        self.smaract_x_pos_var = ctk.StringVar(value="--")
+        self.smaract_y_pos_var = ctk.StringVar(value="--")
+        self.smaract_enabled_var = ctk.StringVar(value="--")
 
         #Update camera pane labels
         self.rpi_exposure_var = ctk.StringVar(value="--")
@@ -217,6 +280,16 @@ class MainApp(ctk.CTk):
         self.content_frame.pack(expand=True, fill='both')
 
         self.display_main_tab()
+
+        # Connect to the SmarAct once, in the background, so opening the Motion
+        # tab or starting a scan later doesn't block on SA_OpenSystem's ~4s.
+        Thread(target=self._smaract_startup_connect, daemon=True).start()
+
+        # Live SmarAct X/Y readout: runs for the whole session (not just while the
+        # Motion tab is open), same as the module stage's own Live Position, since
+        # the Image tab's Live Position also reads from this when a SmarAct sample
+        # is active.
+        self._start_smaract_position_polling()
 
     #====================================================================================#
     #----------------------------- GUI Appearances and Main App -------------------------#
@@ -284,6 +357,8 @@ class MainApp(ctk.CTk):
         elif tab_name == "Details":
             self.display_details_tab()
 
+        self.current_tab = tab_name
+
     #Main Tab Frames
     def display_main_tab(self):
         """
@@ -298,9 +373,12 @@ class MainApp(ctk.CTk):
         self.main_right_frame = ctk.CTkFrame(self.content_frame, width=400, height=400)
         self.main_right_frame.pack(side=ctk.RIGHT, expand=True, fill='both')
 
-        # Right-side content: restore stitched map if one is active, else CAD placeholder
+        # Right-side content: restore stitched map, or an in-progress/just-finished
+        # scan's grid view, if one is active; else CAD placeholder
         if self.active_main_view == "stitched" and self.current_stitched_img_path:
             self.display_stitched_inline(self.current_stitched_img_path)
+        elif self.active_main_view == "scanning":
+            self.display_scanning_layout(self.scanning_grid_x, self.scanning_grid_y, self.main_right_frame)
         else:
             self.display_placeholder_image(self.main_right_frame)
 
@@ -317,7 +395,7 @@ class MainApp(ctk.CTk):
         sampling_btn.pack(pady=5, fill='x')
         scanning_btn.pack(pady=5, fill='x')
 
-        upload_csv_btn = ctk.CTkButton(left_frame, text="Import Confocal Points", font=("Arial", 20),
+        upload_csv_btn = ctk.CTkButton(left_frame, text="Import Coordinates", font=("Arial", 20),
                                        width=200, height=100, command=self.load_csv_points)
         upload_csv_btn.pack(pady=5, fill='x')
 
@@ -383,7 +461,7 @@ class MainApp(ctk.CTk):
         btn_bar = ctk.CTkFrame(self.main_right_frame)
         btn_bar.pack(side=ctk.TOP, fill='x', padx=5, pady=(5, 0))
 
-        # Finish — save files, reset state, return to default main view.
+        # Finish: save files, reset state, return to default main view.
         # new_folder_path is evaluated now so the timestamp reflects when the
         # user clicked Finish, consistent with the rest of the codebase.
         new_folder_path = (
@@ -440,22 +518,60 @@ class MainApp(ctk.CTk):
         fov_half_w_px = (FOV_W_MM / SCALE_X) / 2.0   # half-width  in stitched pixels
         fov_half_h_px = (FOV_H_MM / SCALE_Y) / 2.0   # half-height in stitched pixels
 
-        # ── Initial FOV centre: inverse-map current hardware position ─────────
-        # Applies the same 2×2 matrix inverse used in
-        # calculate_phys_to_stitched_pixel_coords, stopping before the canvas-
-        # scale step since _s stores positions in full-res stitched pixels.
-        A11, A12 = -0.001479,  0.000044
-        A21, A22 =  0.000018,  0.001459
-        det_B = A11 * A22 - A12 * A21          # = det(A)
+        # smaract travel bounds box (12mm x 12mm, centered on smaract travel center)
+        # only computed when this stitched image actually came from a smaract scan,
+        # since converting mm -> stitched px needs that scan's grid pitch
+        smaract_bounds_cx_px = None
+        smaract_bounds_cy_px = None
+        smaract_bounds_half_w_px = None
+        smaract_bounds_half_h_px = None
+        if self.use_smaract_stage and self._last_stitched_was_smaract and self._smaract_last_grid is not None:
+            _sb_grid = self._smaract_last_grid
+            _sb_t0x, _sb_t0y, _sb_nm_per_px_x, _sb_nm_per_px_y = self._smaract_stitched_tile_geometry(
+                stitched_w, stitched_h, grid_x, grid_y, _sb_grid)
+            _sb_cx_nm = SMARACT_CENTRE_X * 1_000_000
+            _sb_cy_nm = SMARACT_CENTRE_Y * 1_000_000
+            smaract_bounds_cx_px = _sb_t0x + (_sb_cx_nm - _sb_grid['start_x_nm']) / _sb_nm_per_px_x
+            smaract_bounds_cy_px = _sb_t0y - (_sb_grid['start_y_nm'] - _sb_cy_nm) / _sb_nm_per_px_y
+            smaract_bounds_half_w_px = (SMARACT_BOUNDS_W_MM * 1_000_000 / _sb_nm_per_px_x) / 2.0
+            smaract_bounds_half_h_px = (SMARACT_BOUNDS_H_MM * 1_000_000 / _sb_nm_per_px_y) / 2.0
 
+        # ── Initial FOV centre: inverse-map current hardware position ─────────
         tile0_cx = tile_w / 2.0
         tile0_cy = (grid_y - 1) * step_px_y + tile_h / 2.0
 
-        delta_x = float(self.x_pos) - scan_origin_x
-        delta_y = float(self.y_pos) - scan_origin_y
+        if self._last_stitched_was_smaract and self._smaract_last_grid is not None:
+            # SmarAct: same inverse as calculate_stitched_smaract_coords, using
+            # the recorded grid spacing (exact) instead of the camera matrix,
+            # against the SmarAct's own live position instead of the parked
+            # optical carriage's.
+            grid_params = self._smaract_last_grid
+            step_px_x = tile_w * (1.0 - OVERLAP)
+            if self._smaract_ensure_open():
+                with self._smaract_lock:
+                    curr_x_nm = get_position(self._smaract_handle, CHANNEL_X)
+                    curr_y_nm = get_position(self._smaract_handle, CHANNEL_Y)
+                col = (curr_x_nm - grid_params['start_x_nm']) / grid_params['step_x_nm']
+                # SmarAct Y mounted opposite the camera's Y axis, same flip as the
+                # scan route and the stitched-click inverse.
+                row = (grid_params['start_y_nm'] - curr_y_nm) / grid_params['step_y_nm']
+                init_fov_px = tile0_cx + col * step_px_x
+                init_fov_py = tile0_cy - row * step_px_y
+            else:
+                init_fov_px, init_fov_py = tile0_cx, tile0_cy
+        else:
+            # Applies the same 2×2 matrix inverse used in
+            # calculate_phys_to_stitched_pixel_coords, stopping before the canvas-
+            # scale step since _s stores positions in full-res stitched pixels.
+            A11, A12 = -0.001479,  0.000044
+            A21, A22 =  0.000018,  0.001459
+            det_B = A11 * A22 - A12 * A21          # = det(A)
 
-        init_fov_px = tile0_cx + ((-A22) * delta_x + A12 * delta_y) / det_B
-        init_fov_py = tile0_cy + ( A21   * delta_x - A11 * delta_y) / det_B
+            delta_x = float(self.x_pos) - scan_origin_x
+            delta_y = float(self.y_pos) - scan_origin_y
+
+            init_fov_px = tile0_cx + ((-A22) * delta_x + A12 * delta_y) / det_B
+            init_fov_py = tile0_cy + ( A21   * delta_x - A11 * delta_y) / det_B
 
         _s = {
             'ox': 0.0, 'oy': 0.0,
@@ -465,6 +581,8 @@ class MainApp(ctk.CTk):
             'fov_py': init_fov_py,
             'rect_id': None, 'label_id': None,
             'zoom': 1.0, 'pan_x': 0.0, 'pan_y': 0.0,
+            'bounds_half_w': 0.0, 'bounds_half_h': 0.0,
+            'bounds_rect_id': None, 'bounds_label_id': None,
         }
 
         canvas = tk.Canvas(self.main_right_frame, bg="#1a1a1a",
@@ -519,7 +637,7 @@ class MainApp(ctk.CTk):
 
         # "Measure Heights" claims the far-right of row 1 (mirroring the Image tab)
         # Start enabled if points/datum were already loaded (e.g. via CSV import)
-        # before this view was ever rendered — otherwise the button would be
+        # before this view was ever rendered. otherwise the button would be
         # stuck disabled despite there being points ready to measure.
         self._stitch_measure_heights_btn = ctk.CTkButton(
             _ss_row1, text="Measure Heights", fg_color="#1f6aa5",
@@ -555,10 +673,21 @@ class MainApp(ctk.CTk):
                      font=("Arial", 12, "bold"), text_color="#00FF88").pack(side="right", padx=(12, 5))
         ctk.CTkLabel(_ss_row2, textvariable=self._stitch_roi_info_area).pack(side="right", padx=(12, 5))
 
-        # Analysis readout — fixed width prevents frame resize on text change
-        ctk.CTkLabel(_ss_row2, textvariable=self.analysis_result_var,
+        # Analysis readout + Display Heights/Indices toggle, stacked in the same
+        # footprint as the two-button _stitch_action_frame beside it.
+        _stitch_analysis_frame = ctk.CTkFrame(_ss_row2, fg_color="transparent")
+        _stitch_analysis_frame.pack(side="left", padx=(8, 5))
+
+        ctk.CTkLabel(_stitch_analysis_frame, textvariable=self.analysis_result_var,
                      font=("Arial", 12, "bold"), text_color="#00CFFF",
-                     width=260).pack(side="left", padx=(8, 5))
+                     width=260).pack(side="top", pady=(0, 2))
+
+        self._stitch_display_heights_btn = ctk.CTkButton(
+            _stitch_analysis_frame,
+            text="Display Indices" if self._show_heights_mode else "Display Heights",
+            fg_color="#555555", state="disabled", width=260, height=24,
+            command=self._toggle_display_heights_mode)
+        self._stitch_display_heights_btn.pack(side="top", pady=0, fill="x")
 
         canvas.pack(expand=True, fill="both", padx=5, pady=(5, 0))
 
@@ -576,6 +705,20 @@ class MainApp(ctk.CTk):
                 cx - _s['half_cw'] + 4, cy - _s['half_ch'] + 4,
                 anchor="nw", text="FOV", fill="#00FF88",
                 font=("Arial", 10, "bold"))
+            return r_id, l_id
+
+        def _draw_smaract_bounds():
+            # subtle thin dashed grey box marking the smaract's reachable travel area
+            cx = _s['ox'] + smaract_bounds_cx_px * _s['sx']
+            cy = _s['oy'] + smaract_bounds_cy_px * _s['sy']
+            r_id = canvas.create_rectangle(
+                cx - _s['bounds_half_w'], cy - _s['bounds_half_h'],
+                cx + _s['bounds_half_w'], cy + _s['bounds_half_h'],
+                outline="#888888", width=1, dash=(2, 4))
+            l_id = canvas.create_text(
+                cx - _s['bounds_half_w'] + 4, cy - _s['bounds_half_h'] + 4,
+                anchor="nw", text="SmarAct Bounds", fill="#888888",
+                font=("Arial", 8))
             return r_id, l_id
 
         def _render():
@@ -612,6 +755,12 @@ class MainApp(ctk.CTk):
 
             _s['rect_id'], _s['label_id'] = _draw_fov()
 
+            # smaract travel bounds box, only for a smaract-sourced stitched image
+            if smaract_bounds_cx_px is not None:
+                _s['bounds_half_w'] = smaract_bounds_half_w_px * _s['sx']
+                _s['bounds_half_h'] = smaract_bounds_half_h_px * _s['sy']
+                _s['bounds_rect_id'], _s['bounds_label_id'] = _draw_smaract_bounds()
+
             # Reproject ROI grid using the fresh _s transform (zoom / pan safe)
             if (self._roi_active_canvas is canvas
                     and self.roi_phys_x_start is not None):
@@ -640,7 +789,7 @@ class MainApp(ctk.CTk):
                                       self._roi_canvas_x0, self._roi_canvas_y0,
                                       self._roi_canvas_x1, self._roi_canvas_y1)
 
-            # Redraw any custom measurement points — zoom/pan safe via _s
+            # Redraw any custom measurement points (zoom/pan safe via _s)
             self._redraw_custom_points_stitched(
                 canvas, _s, stitched_w, stitched_h,
                 grid_x, grid_y, scan_origin_x, scan_origin_y)
@@ -673,6 +822,37 @@ class MainApp(ctk.CTk):
             full_px = (event.x - _s['ox']) / _s['sx']
             full_py = (event.y - _s['oy']) / _s['sy']
 
+            if self._last_stitched_was_smaract:
+                grid_params = self._smaract_last_grid
+                if grid_params is None:
+                    return
+                x_nm, y_nm = self.calculate_stitched_smaract_coords(
+                    full_px, full_py,
+                    stitched_w, stitched_h,
+                    grid_x, grid_y,
+                    grid_params,
+                )
+
+                cx, cy = event.x, event.y
+
+                def _on_smaract_click_move_complete():
+                    # Only move the FOV rectangle once the SmarAct move actually
+                    # succeeds. a rejected (e.g. negative-coordinate) or failed
+                    # move must leave the rectangle exactly where it was.
+                    _s['fov_px'] = full_px
+                    _s['fov_py'] = full_py
+                    if _s['rect_id'] is not None and _s['label_id'] is not None:
+                        canvas.coords(_s['rect_id'],
+                                       cx - _s['half_cw'], cy - _s['half_ch'],
+                                       cx + _s['half_cw'], cy + _s['half_ch'])
+                        canvas.coords(_s['label_id'],
+                                       cx - _s['half_cw'] + 4, cy - _s['half_ch'] + 4)
+                    else:
+                        _s['rect_id'], _s['label_id'] = _draw_fov()
+
+                self._smaract_move_to(x_nm, y_nm, on_complete=_on_smaract_click_move_complete)
+                return
+
             target_x, target_y = self.calculate_stitched_phys_coords(
                 full_px, full_py,
                 stitched_w, stitched_h,
@@ -701,7 +881,7 @@ class MainApp(ctk.CTk):
                 self.main_right_frame._render_pending = True
                 self.main_right_frame.after(60, _render)
 
-        # Stashed for the same reason as self._stitched_canvas above — lets
+        # Stashed for the same reason as self._stitched_canvas above: lets
         # load_csv_points (and similar) request a redraw without a full rebuild.
         self._schedule_render = _schedule_render
 
@@ -956,9 +1136,9 @@ class MainApp(ctk.CTk):
         # Window setup
         image_scanning_window = ctk.CTkToplevel(self)
         image_scanning_window.title("Enter Scanning Parameters")
-        image_scanning_window.geometry("335x210")  # Set initial size
-        image_scanning_window.minsize(335, 210)   # Limit the minimum size
-        image_scanning_window.maxsize(335, 200)   # Limit the maximum size
+        image_scanning_window.geometry("335x245")  # Set initial size
+        image_scanning_window.minsize(335, 245)   # Limit the minimum size
+        image_scanning_window.maxsize(335, 245)   # Limit the maximum size
 
         image_scanning_window.after(100, image_scanning_window.grab_set)
 
@@ -978,23 +1158,29 @@ class MainApp(ctk.CTk):
         step_y = ctk.CTkEntry(image_scanning_window, placeholder_text="4")
         step_y.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
 
-        # OK button (closes the window, changes frame, empties rpi image buffer, sends scanning_data to rpi)
+        # toggle mechanical vs visual stitch, sized to match the label text, no hover fill
+        compute_overlap_var = ctk.BooleanVar(value=True)
+        compute_overlap_check = ctk.CTkCheckBox(image_scanning_window, text="Compute Image Overlap",
+                                                variable=compute_overlap_var,
+                                                font=("Arial", 12), checkbox_width=16, checkbox_height=16,
+                                                hover=False)
+        compute_overlap_check.grid(row=4, column=0, columnspan=4, padx=5, pady=5, sticky="ew")
+
+        # OK button (closes the window, changes frame, empties rpi image buffer, starts scan)
         ok_button = ctk.CTkButton(image_scanning_window, text="OK",
                                 command=lambda: [
-                                    self.empty_folder_pc(self.buffer_stitching_folder),
-                                    self.send_scanning_data(int(step_x.get()), int(step_y.get())),
-                                    self.display_loading_frame(frame),
+                                    self._start_scan(int(step_x.get()), int(step_y.get()), frame, compute_overlap_var.get()),
                                     image_scanning_window.destroy()],
                                 width=80, state="disabled")  # Initially disabled
-        ok_button.grid(row=4, column=0, padx=5, pady=10, sticky="ew")
+        ok_button.grid(row=5, column=0, padx=5, pady=10, sticky="ew")
 
         # Cancel button (closes the window)
         cancel_button = ctk.CTkButton(image_scanning_window, text="Cancel", command=image_scanning_window.destroy, width=80)
-        cancel_button.grid(row=4, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
+        cancel_button.grid(row=5, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
 
         # Ensure the buttons are always at the bottom of the window
-        image_scanning_window.grid_rowconfigure(4, weight=1)  # Add this line to allow the window to expand as needed
-        image_scanning_window.grid_rowconfigure(3, weight=0)  # Ensure row 3 (buttons) stays at the bottom
+        image_scanning_window.grid_rowconfigure(5, weight=1)  # Add this line to allow the window to expand as needed
+        image_scanning_window.grid_rowconfigure(4, weight=0)  # Ensure row 4 (buttons) stays at the bottom
 
         # Simple validation function for Step x and Step y
         def validate_input(*args):
@@ -1170,6 +1356,8 @@ class MainApp(ctk.CTk):
         stop_btn.pack(pady=5, fill="x")
 
         # Main Frame: Display dynamic data from Raspberry Pi
+        ctk.CTkLabel(main_frame, text="Optical Stage:", font=("Arial", 14, "bold")).pack(pady=(10, 2), fill='x')
+
         motors_enabled_label = ctk.CTkLabel(main_frame, text="Motors Enabled")
         motors_enabled_label.pack(pady=5, fill='x')
         self.rpi_motors_enabled_var = ctk.StringVar(value="--")  # Dynamic variable
@@ -1197,10 +1385,31 @@ class MainApp(ctk.CTk):
         self.rpi_z_pos_label = ctk.CTkLabel(main_frame, textvariable=self.rpi_z_pos_var)
         self.rpi_z_pos_label.pack(pady=5, fill='x')
 
-        # Last Refreshed label: Shows when the positions were last updated        
+        # Last Refreshed label: Shows when the positions were last updated
         self.last_refreshed_var = ctk.StringVar(value="Last Updated: --")
         self.last_refreshed_label = ctk.CTkLabel(main_frame, textvariable=self.last_refreshed_var, font=("Arial", 12))
         self.last_refreshed_label.pack(pady=5)
+
+        # SmarAct Stage: live position display (nanometers from the MCS1, shown in mm)
+        ctk.CTkLabel(main_frame, text="SmarAct Stage:", font=("Arial", 14, "bold")).pack(pady=(15, 2), fill='x')
+
+        smaract_enabled_label = ctk.CTkLabel(main_frame, text="SmarAct Enabled")
+        smaract_enabled_label.pack(pady=5, fill='x')
+        # var lives in __init__ (see above); only the label is rebuilt here
+        ctk.CTkLabel(main_frame, textvariable=self.smaract_enabled_var).pack(pady=5, fill='x')
+
+        smaract_x_pos_label = ctk.CTkLabel(main_frame, text="X Position (mm)")
+        smaract_x_pos_label.pack(pady=5, fill="x")
+        # var itself lives in __init__ (persistent across tab rebuilds); only the
+        # label is rebuilt here, so other readouts bound to it (e.g. the Image
+        # tab's Live Position) don't get orphaned on a Motion tab revisit
+        ctk.CTkLabel(main_frame, textvariable=self.smaract_x_pos_var).pack(pady=5, fill='x')
+
+        smaract_y_pos_label = ctk.CTkLabel(main_frame, text="Y Position (mm)")
+        smaract_y_pos_label.pack(pady=5, fill="x")
+        ctk.CTkLabel(main_frame, textvariable=self.smaract_y_pos_var).pack(pady=5, fill='x')
+        # polling itself now runs for the whole app session (started once at
+        # launch), not restarted per tab visit — see __init__
 
     def refresh_motor_coord(self):
         """
@@ -1451,19 +1660,40 @@ class MainApp(ctk.CTk):
         self._image_tab_canvas.create_text(200, 200, text="Image will appear here",
                                            fill="white", font=("Arial", 14),
                                            tags="placeholder_text")
-        self._image_tab_canvas.bind(
-            "<Configure>",
-            lambda e: self._image_tab_canvas.coords(
-                "placeholder_text", e.width / 2, e.height / 2))
+        def _render_image_tab():
+            self._image_tab_render_pending = False
+            if not self._image_tab_canvas.winfo_exists() or self._canvas_img_path is None:
+                return
+            self._show_image_on_canvas(os.path.dirname(self._canvas_img_path), self._image_tab_canvas)
+
+        def _schedule_image_tab_render(e):
+            # keep the placeholder text centered even before an image is ever loaded
+            self._image_tab_canvas.coords("placeholder_text", e.width / 2, e.height / 2)
+            if self._canvas_img_path is None:
+                return
+            if not self._image_tab_render_pending:
+                self._image_tab_render_pending = True
+                self.after(60, _render_image_tab)
+
+        self._image_tab_canvas.bind("<Configure>", _schedule_image_tab_render)
 
         coord_strip = ctk.CTkFrame(right_frame, fg_color="transparent", height=20)
         coord_strip.pack(fill='x', padx=15, pady=(0, 5))
 
         ctk.CTkLabel(coord_strip, text="Live Position: ", font=("Arial", 12, "bold")).pack(side="left")
         ctk.CTkLabel(coord_strip, text="X:").pack(side="left", padx=(10, 2))
-        ctk.CTkLabel(coord_strip, textvariable=self.rpi_x_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
+        # X/Y textvariable swaps to the SmarAct's own live position when a SmarAct
+        # sample is active (see send_sample_data); Z always stays the optical
+        # assembly's, since the SmarAct doesn't track its own Z.
+        _init_x_var = self.smaract_x_pos_var if self.use_smaract_stage else self.rpi_x_pos_var
+        _init_y_var = self.smaract_y_pos_var if self.use_smaract_stage else self.rpi_y_pos_var
+        self._image_tab_x_pos_label = ctk.CTkLabel(
+            coord_strip, textvariable=_init_x_var, text_color="cyan", font=("Arial", 12, "bold"))
+        self._image_tab_x_pos_label.pack(side="left")
         ctk.CTkLabel(coord_strip, text="Y:").pack(side="left", padx=(15, 2))
-        ctk.CTkLabel(coord_strip, textvariable=self.rpi_y_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
+        self._image_tab_y_pos_label = ctk.CTkLabel(
+            coord_strip, textvariable=_init_y_var, text_color="cyan", font=("Arial", 12, "bold"))
+        self._image_tab_y_pos_label.pack(side="left")
         ctk.CTkLabel(coord_strip, text="Z:").pack(side="left", padx=(15, 2))
         ctk.CTkLabel(coord_strip, textvariable=self.rpi_z_pos_var, text_color="cyan", font=("Arial", 12, "bold")).pack(side="left")
 
@@ -1478,7 +1708,7 @@ class MainApp(ctk.CTk):
 
         # Measure Heights owns the far-right of row1; packed first to claim space
         # Start enabled if points/datum were already loaded (e.g. via CSV import)
-        # before this tab was ever rendered — otherwise the button would be stuck
+        # before this tab was ever rendered. otherwise the button would be stuck
         # disabled despite there being points ready to measure.
         self._measure_heights_btn = ctk.CTkButton(
             row1, text="Measure Heights", fg_color="#1E6FA8",
@@ -1545,11 +1775,22 @@ class MainApp(ctk.CTk):
 
         ctk.CTkLabel(row2, textvariable=self._roi_info_area).pack(side="right", padx=(12, 5))
 
-        # Analysis result — fixed width prevents frame resize on text change
+        # Analysis result + Display Heights/Indices toggle, stacked in the same
+        # footprint as the two-button _action_frame beside it so this row doesn't grow.
+        _analysis_frame = ctk.CTkFrame(row2, fg_color="transparent")
+        _analysis_frame.pack(side="left", padx=(8, 5))
+
         self.analysis_result_var = ctk.StringVar(value="Analysis: Select points...")
-        ctk.CTkLabel(row2, textvariable=self.analysis_result_var,
+        ctk.CTkLabel(_analysis_frame, textvariable=self.analysis_result_var,
                      font=("Arial", 12, "bold"), text_color="#00CFFF",
-                     width=260).pack(side="left", padx=(8, 5))
+                     width=260).pack(side="top", pady=(0, 2))
+
+        self._display_heights_btn = ctk.CTkButton(
+            _analysis_frame,
+            text="Display Indices" if self._show_heights_mode else "Display Heights",
+            fg_color="#555555", state="disabled", width=260, height=24,
+            command=self._toggle_display_heights_mode)
+        self._display_heights_btn.pack(side="top", pady=0, fill="x")
 
         # Bind live updates: any keystroke in the dimension entries redraws the grid
         for _e in (self._roi_spin_x, self._roi_spin_y, self._roi_cell_x, self._roi_cell_y):
@@ -1647,21 +1888,31 @@ class MainApp(ctk.CTk):
             print(f"Error displaying image: {e}")
             image_label.configure(text="Failed to display image", fg_color="red")
 
-    def click_to_move(self, event, img_disp_width, img_disp_height, orig_img_width, orig_img_height):
+    def click_to_move(self, event):
         """
         Translates image clicks into stage movement
         """
-        if event.state & 0x0004:  # Ctrl held — ROI draw mode, not a move command
+        if event.state & 0x0004:  # Ctrl held: ROI draw mode, not a move command
             return
         if getattr(self, '_roi_pan_active', False):  # ROI box drag in progress
             return
         if self.module_status != "Idle":
             return
-        
+
+        # Read the current display geometry directly (same source of truth as
+        # _canvas_pixel_to_phys) instead of a value captured once at image-load
+        # time, so this stays correct even if the canvas was resized since.
+        img_disp_width  = self._canvas_disp_w
+        img_disp_height = self._canvas_disp_h
+        orig_img_width  = self._canvas_orig_w
+        orig_img_height = self._canvas_orig_h
+        if img_disp_width == 0 or img_disp_height == 0:
+            return
+
         # Get current label dimensions (in case window is resized)
         label_width = event.widget.winfo_width()
         label_height = event.widget.winfo_height()
-        
+
         # Calculate image padding
         x_offset = (label_width - img_disp_width) / 2.0
         y_offset = (label_height - img_disp_height) / 2.0
@@ -1674,7 +1925,7 @@ class MainApp(ctk.CTk):
         if img_click_x < 0 or img_click_x > img_disp_width or img_click_y < 0 or img_click_y > img_disp_height:
             return
 
-        # Scales click to the sensor resolution 
+        # Scales click to the sensor resolution
         i_click = img_click_x * (orig_img_width / img_disp_width)
         j_click = img_click_y * (orig_img_height / img_disp_height)
 
@@ -1692,6 +1943,35 @@ class MainApp(ctk.CTk):
         delta_x = (A11 * delta_i) + (A12 * delta_j)
         delta_y = (A21 * delta_i) + (A22 * delta_j)
 
+        if self.use_smaract_stage:
+            # Same camera/optics, so the pixel->mm delta is reused as-is; it's
+            # added to the SmarAct's own live position instead of the optical
+            # carriage's, and sent via the SmarAct move primitive (Z untouched).
+            if not self._smaract_ensure_open():
+                messagebox.showerror("SmarAct Error", "Could not open SmarAct system.")
+                return
+            with self._smaract_lock:
+                curr_x_nm = get_position(self._smaract_handle, CHANNEL_X)
+                curr_y_nm = get_position(self._smaract_handle, CHANNEL_Y)
+            # SmarAct Y is mounted opposite the camera's Y axis, flip it
+            x_nm = curr_x_nm + round(delta_x * 1_000_000)
+            y_nm = curr_y_nm - round(delta_y * 1_000_000)
+            print(f"Moving SmarAct to X: {x_nm} nm, Y: {y_nm} nm")
+
+            image_label = event.widget
+
+            def _capture_after_smaract_move():
+                # mirrors sequence_wait_for_move's tail once the SmarAct arrives
+                self.empty_folder_rpi()
+                self.send_simple_command("exe_update_image", checkIdle=False, show_success=False)
+                self.empty_folder_pc(self.buffer_testing_folder)
+                self.module_status = "Capturing Image"
+                self.status_lockout_time = time.time() + 0.5
+                self.sequence_wait_for_capture(image_label)
+
+            self._smaract_move_to(x_nm, y_nm, on_complete=_capture_after_smaract_move)
+            return
+
         # Calculate new target position (using current positions tracked from the Raspberry Pi)
         target_x = float(self.x_pos) + delta_x
         target_y = float(self.y_pos) + delta_y
@@ -1701,7 +1981,7 @@ class MainApp(ctk.CTk):
         target_x = max(0.0, target_x)
         target_y = max(0.0, target_y)
 
-        
+
 
         # Send command
         print(f"Moving stage to X: {target_x:.4f}, Y: {target_y:.4f}")
@@ -1746,13 +2026,17 @@ class MainApp(ctk.CTk):
                 canvas_w = canvas.winfo_width()
                 canvas_h = canvas.winfo_height()
 
-                aspect_ratio = img_pil.width / img_pil.height
-                if aspect_ratio > 1:
+                # fit to canvas preserving aspect ratio: compare image aspect vs
+                # canvas aspect (not just the image's own aspect) so a canvas
+                # proportionally wider/taller than the image doesn't overflow and
+                # get clipped by the canvas bounds. same pattern as the stitched
+                # view's _render().
+                if img_pil.width / img_pil.height > canvas_w / canvas_h:
                     new_width  = canvas_w
-                    new_height = int(canvas_w / aspect_ratio)
+                    new_height = int(canvas_w * img_pil.height / img_pil.width)
                 else:
                     new_height = canvas_h
-                    new_width  = int(canvas_h * aspect_ratio)
+                    new_width  = int(canvas_h * img_pil.width / img_pil.height)
 
                 new_width  = max(new_width, 1)
                 new_height = max(new_height, 1)
@@ -1765,6 +2049,13 @@ class MainApp(ctk.CTk):
                 # reference even if the stage moves before the next redraw.
                 self._image_tab_ref_x = float(self.x_pos)
                 self._image_tab_ref_y = float(self.y_pos)
+                # SmarAct samples: points are stored in the SmarAct's own coordinate
+                # frame (see _canvas_pixel_to_phys), not the gantry's, so the redraw
+                # path needs the SmarAct's live position at capture time too.
+                if self.use_smaract_stage and self._smaract_ensure_open():
+                    with self._smaract_lock:
+                        self._image_tab_ref_smaract_x = get_position(self._smaract_handle, CHANNEL_X) / 1_000_000
+                        self._image_tab_ref_smaract_y = get_position(self._smaract_handle, CHANNEL_Y) / 1_000_000
 
                 resized_img = img_pil.resize((new_width, new_height), Image.LANCZOS)
                 self._canvas_img_tk = ImageTk.PhotoImage(resized_img)
@@ -1776,10 +2067,34 @@ class MainApp(ctk.CTk):
                 # Redraw any custom measurement points that survived the canvas wipe
                 self._redraw_custom_points_image_tab(canvas, canvas_w, canvas_h)
 
+                # Reproject the ROI/Map-Surface grid box too, so it doesn't visually
+                # detach from the image after a resize (image geometry above may have
+                # just changed; the grid's stored canvas coords would otherwise be stale).
+                if self._roi_active_canvas is canvas and self.roi_phys_x_start is not None:
+                    if self.use_smaract_stage:
+                        _roi_ref_x = getattr(self, '_image_tab_ref_smaract_x', None)
+                        _roi_ref_y = getattr(self, '_image_tab_ref_smaract_y', None)
+                    else:
+                        _roi_ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
+                        _roi_ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
+                    if _roi_ref_x is not None and _roi_ref_y is not None:
+                        rx0, ry0 = self._phys_to_canvas_pixel(
+                            self.roi_phys_x_start, self.roi_phys_y_start,
+                            _roi_ref_x, _roi_ref_y, canvas_w, canvas_h)
+                        rx1, ry1 = self._phys_to_canvas_pixel(
+                            self.roi_phys_x_end, self.roi_phys_y_end,
+                            _roi_ref_x, _roi_ref_y, canvas_w, canvas_h)
+                        if rx0 is not None and rx1 is not None:
+                            self._roi_canvas_x0 = min(rx0, rx1)
+                            self._roi_canvas_y0 = min(ry0, ry1)
+                            self._roi_canvas_x1 = max(rx0, rx1)
+                            self._roi_canvas_y1 = max(ry0, ry1)
+                            self._roi_redraw_grid(canvas, self._roi_canvas_x0, self._roi_canvas_y0,
+                                                  self._roi_canvas_x1, self._roi_canvas_y1)
+
                 canvas.bind("<Double-Button-1>", lambda e: self.expand_image(image_path))
                 # <Button-1> dispatches to pan-drag (if inside ROI box) or click-to-move
-                canvas.bind("<Button-1>",        lambda e: self._roi_or_move_press(
-                    e, canvas, new_width, new_height, img_pil.width, img_pil.height))
+                canvas.bind("<Button-1>",        lambda e: self._roi_or_move_press(e, canvas))
                 canvas.bind("<B1-Motion>",        lambda e: self._roi_pan_motion(e, canvas))
                 canvas.bind("<ButtonRelease-1>",  lambda e: self._roi_pan_release(e, canvas))
                 canvas.bind("<Control-ButtonPress-1>",   lambda e: self._roi_press(e, canvas))
@@ -1827,8 +2142,36 @@ class MainApp(ctk.CTk):
         A11, A12 = -0.001479, 0.000044
         A21, A22 =  0.000018, 0.001459
 
-        phys_x = float(self.x_pos) + A11 * delta_i + A12 * delta_j
-        phys_y = float(self.y_pos) + A21 * delta_i + A22 * delta_j
+        delta_x = A11 * delta_i + A12 * delta_j
+        delta_y = A21 * delta_i + A22 * delta_j
+
+        if self.use_smaract_stage:
+            # Same camera/optics as the optical case, so the delta-mm math is
+            # reused as-is; only the position it's added to differs. Points
+            # produced here (ROI corners, measurement points) end up as
+            # absolute SmarAct-frame mm coordinates, self-consistent for the
+            # rest of the session since the SmarAct doesn't move again until
+            # a sequence explicitly commands it.
+            if not self._smaract_ensure_open():
+                return None, None
+            with self._smaract_lock:
+                curr_x_nm = get_position(self._smaract_handle, CHANNEL_X)
+                curr_y_nm = get_position(self._smaract_handle, CHANNEL_Y)
+            # SmarAct Y is mounted opposite the camera's Y axis, flip it
+            phys_x = curr_x_nm / 1_000_000 + delta_x
+            phys_y = curr_y_nm / 1_000_000 - delta_y
+            # No max(0.0, ...) clamp here, unlike the module-stage branch below:
+            # the SmarAct's travel range is symmetric (SMARACT_TRAVEL_MIN/MAX,
+            # negative values are legitimate), and the callers that actually
+            # dispatch a move already validate against that real range with a
+            # proper error dialog — clamping to 0 here would silently corrupt
+            # the coordinate instead (e.g. two ROI corners that are both
+            # genuinely negative would both clamp to 0.0, collapsing the
+            # dragged box to a zero-size region).
+            return phys_x, phys_y
+
+        phys_x = float(self.x_pos) + delta_x
+        phys_y = float(self.y_pos) + delta_y
 
         return max(0.0, phys_x), max(0.0, phys_y)
 
@@ -1858,7 +2201,7 @@ class MainApp(ctk.CTk):
         stitched_w/h     : pixel dimensions of the full-resolution stitched image
         grid_x, grid_y   : number of tile columns and rows (e.g. step_x=5, step_y=4)
         scan_origin_x/y  : absolute stage coordinates (mm) at the moment tile 0
-                           was captured — the stage position at scan start.
+                           was captured (the stage position at scan start).
                            NOTE: caller must capture self.x_pos / self.y_pos
                            before sending the scan command and pass them here.
 
@@ -1889,7 +2232,7 @@ class MainApp(ctk.CTk):
         # ── Step 2: Tile-0 centre in stitched image coordinates ──────────────
         # "Up & Right" → tile 0 is the physical bottom-left of the scan area.
         # In the stitched image (y=0 at top), the physically-lowest row (row 0)
-        # sits at the largest y values — its top edge is at (grid_y-1)*step_px_y.
+        # sits at the largest y values (its top edge is at (grid_y-1)*step_px_y).
         tile0_cx = tile_w / 2.0
         tile0_cy = (grid_y - 1) * step_px_y + tile_h / 2.0
 
@@ -1906,6 +2249,79 @@ class MainApp(ctk.CTk):
         target_y = max(0.0, scan_origin_y + delta_y)
 
         return target_x, target_y
+
+    def calculate_stitched_smaract_coords(
+        self,
+        px: float,
+        py: float,
+        stitched_w: int,
+        stitched_h: int,
+        grid_x: int,
+        grid_y: int,
+        smaract_grid: dict,
+    ) -> tuple:
+        """
+        Convert a pixel position on a SmarAct-produced stitched image to an
+        absolute SmarAct nanometer coordinate.
+
+        Unlike calculate_stitched_phys_coords, this doesn't use the camera's
+        empirical calibration matrix — the SmarAct's own recorded grid pitch
+        (nm per tile step) gives an exact nm-per-pixel scale instead, and the
+        click interpolates continuously against it, same as the optical case.
+        Snapping to the nearest tile center was the old (wrong) behavior here.
+
+        Same tile geometry/ordering as calculate_stitched_phys_coords (Fiji
+        "Grid: column-by-column, Up & Right", tile 0 = physical bottom-left).
+        """
+        tile0_cx, tile0_cy, nm_per_px_x, nm_per_px_y = self._smaract_stitched_tile_geometry(
+            stitched_w, stitched_h, grid_x, grid_y, smaract_grid)
+
+        d_px = px - tile0_cx
+        d_py = tile0_cy - py  # image y grows downward, visual position grows upward
+
+        # SmarAct Y is mounted opposite the camera's Y axis (same fact fixed for
+        # click-to-move and the scan route): ascending visual position means
+        # descending native Y, so this is a minus, not a plus.
+        x_nm = smaract_grid['start_x_nm'] + d_px * nm_per_px_x
+        y_nm = smaract_grid['start_y_nm'] - d_py * nm_per_px_y
+
+        return round(x_nm), round(y_nm)
+
+    def _smaract_stitched_tile_geometry(self, stitched_w, stitched_h, grid_x, grid_y, smaract_grid):
+        """Shared tile geometry + nm-per-pixel scale for a SmarAct-produced stitched
+        image (used by calculate_stitched_smaract_coords and the stitched-view ROI-drag
+        handlers, which need the same scale to convert a desired mm cell size back into
+        canvas pixels)."""
+        OVERLAP = 0.20
+        tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
+        tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
+        step_px_x = tile_w * (1.0 - OVERLAP)
+        step_px_y = tile_h * (1.0 - OVERLAP)
+
+        tile0_cx = tile_w / 2.0
+        tile0_cy = (grid_y - 1) * step_px_y + tile_h / 2.0
+
+        nm_per_px_x = smaract_grid['step_x_nm'] / step_px_x
+        nm_per_px_y = smaract_grid['step_y_nm'] / step_px_y
+
+        return tile0_cx, tile0_cy, nm_per_px_x, nm_per_px_y
+
+    def _stitched_pixel_to_phys(self, full_px, full_py, stitched_w, stitched_h,
+                                 grid_x, grid_y, scan_origin_x, scan_origin_y):
+        """Full-res stitched-image pixel -> physical mm. Routes through the SmarAct-aware
+        conversion when the active stitched image came from a SmarAct scan (matching the
+        point-placement and click-to-move handlers); otherwise the camera/module-stage path.
+        Returns (None, None) if a SmarAct image is active but its grid params aren't
+        available (shouldn't normally happen, but avoids a crash if it does)."""
+        if self._last_stitched_was_smaract:
+            grid_params = self._smaract_last_grid
+            if grid_params is None:
+                return None, None
+            x_nm, y_nm = self.calculate_stitched_smaract_coords(
+                full_px, full_py, stitched_w, stitched_h, grid_x, grid_y, grid_params)
+            return x_nm / 1_000_000, y_nm / 1_000_000
+        return self.calculate_stitched_phys_coords(
+            full_px, full_py, stitched_w, stitched_h, grid_x, grid_y, scan_origin_x, scan_origin_y)
 
     def calculate_phys_to_stitched_pixel_coords(
         self,
@@ -1973,12 +2389,12 @@ class MainApp(ctk.CTk):
         -------
         (canvas_px, canvas_py) : canvas pixel coordinates for the physical position.
                                  May lie outside [0, canvas_w] × [0, canvas_h] when
-                                 the position is outside the scanned area — no
-                                 boundary clamping is applied (edge-behaviour rule).
+                                 the position is outside the scanned area (no
+                                 boundary clamping is applied, edge-behaviour rule).
         """
         OVERLAP = 0.20
 
-        # ── Step 1: Tile geometry — identical to the forward function ─────────
+        # ── Step 1: Tile geometry (identical to the forward function) ─────────
         tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
         tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
         step_px_y = tile_h * (1.0 - OVERLAP)
@@ -2028,6 +2444,44 @@ class MainApp(ctk.CTk):
 
         return canvas_px, canvas_py
 
+    def calculate_smaract_phys_to_stitched_pixel_coords(
+        self, phys_x, phys_y, stitched_w, stitched_h, grid_x, grid_y,
+        smaract_grid, canvas_w, canvas_h,
+    ):
+        """Inverse of calculate_stitched_smaract_coords: SmarAct-frame mm -> canvas pixel
+        on the displayed stitched image. Same role as calculate_phys_to_stitched_pixel_coords
+        but using the SmarAct's own recorded grid pitch instead of the camera calibration
+        matrix, since SmarAct points live in a different coordinate frame (see
+        calculate_stitched_smaract_coords)."""
+        tile0_cx, tile0_cy, nm_per_px_x, nm_per_px_y = self._smaract_stitched_tile_geometry(
+            stitched_w, stitched_h, grid_x, grid_y, smaract_grid)
+
+        x_nm = phys_x * 1_000_000
+        y_nm = phys_y * 1_000_000
+        d_px = (x_nm - smaract_grid['start_x_nm']) / nm_per_px_x
+        d_py = (smaract_grid['start_y_nm'] - y_nm) / nm_per_px_y
+        full_px = tile0_cx + d_px
+        full_py = tile0_cy - d_py
+
+        # Canvas display layout (mirrors _render in display_stitched_inline; same
+        # simplification as calculate_phys_to_stitched_pixel_coords — assumes no
+        # zoom/pan, i.e. fit-to-canvas).
+        if stitched_w / stitched_h > canvas_w / canvas_h:
+            disp_w = canvas_w
+            disp_h = max(1, int(canvas_w * stitched_h / stitched_w))
+        else:
+            disp_h = canvas_h
+            disp_w = max(1, int(canvas_h * stitched_w / stitched_h))
+        ox = (canvas_w - disp_w) / 2.0
+        oy = (canvas_h - disp_h) / 2.0
+        sx = disp_w / stitched_w
+        sy = disp_h / stitched_h
+
+        canvas_px = ox + full_px * sx
+        canvas_py = oy + full_py * sy
+
+        return canvas_px, canvas_py
+
     def _safe_btn(self, attr_name, **kw):
         """Configure a CTk button widget only if it still exists in the widget tree.
         Prevents TclError when stitched-view buttons are configured after the frame
@@ -2040,7 +2494,7 @@ class MainApp(ctk.CTk):
             pass
 
     def _roi_press(self, event, canvas):
-        """Begin a new Ctrl+drag ROI — clears the previous grid."""
+        """Begin a new Ctrl+drag ROI (clears the previous grid)."""
         # Prevent overwriting ROI globals from the micro-view while macro-view is active
         if getattr(self, 'active_main_view', 'default') == 'stitched' and canvas is getattr(self, '_image_tab_canvas', None):
             messagebox.showwarning("Action Blocked", "Please click 'Finish' on the stitched image tab (Main) first before drawing regions on the Image tab.")
@@ -2144,42 +2598,57 @@ class MainApp(ctk.CTk):
         canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
                            fill="pink", outline="#00CFFF", width=1, tags="datum_pt")
 
+    def _resolve_point_canvas_xy(self, phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h):
+        """Canvas pixel position for a measurement point/datum on the (non-stitched)
+        Image tab. Always prefers the exact pixel position cached at click time
+        (_canvas_click_cache), so markers and labels never drift or vanish on redraw
+        even if the live stage position has changed since the points were placed —
+        this is what makes them stay put across a Display Heights/Indices toggle.
+        Only falls back to the physics-based inverse transform (which can be off if
+        the reference position has since moved) when no cache entry exists at all,
+        and always logs that fact so a genuine cache miss is never silent."""
+        cached = self._canvas_click_cache.get((phys_x, phys_y))
+        if cached is not None:
+            return cached
+        print(f"[canvas] WARNING: no cached click position for ({phys_x:.6f}, {phys_y:.6f}) mm "
+              f"— using computed fallback position (may be approximate)")
+        if ref_x is None or ref_y is None:
+            return None, None
+        return self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h)
+
     def _redraw_custom_points_image_tab(self, canvas, canvas_w, canvas_h):
         """Re-stamp all custom_measure_points and measured_data text on the Image
-        tab canvas after a canvas.delete('all').  Uses _image_tab_ref_x/y as the
-        stable camera-position anchor so the inverse transform is consistent."""
+        tab canvas after a canvas.delete('all'). Every marker/label is placed at its
+        exact click-time pixel position (see _resolve_point_canvas_xy), so nothing
+        drifts even though the live stage position may have changed since (e.g.
+        after a SmarAct measurement sequence parks somewhere else)."""
         if not self.custom_measure_points and not self.measured_data and self.datum_point is None:
             return
-        ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
-        ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
+        if self.use_smaract_stage:
+            ref_x = getattr(self, '_image_tab_ref_smaract_x', None)
+            ref_y = getattr(self, '_image_tab_ref_smaract_y', None)
+        else:
+            ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
+            ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
         # Re-draw datum marker if one was placed
         if self.datum_point is not None:
-            dcx, dcy = self._phys_to_canvas_pixel(
+            dcx, dcy = self._resolve_point_canvas_xy(
                 self.datum_point[0], self.datum_point[1], ref_x, ref_y, canvas_w, canvas_h)
             if dcx is not None:
                 self._draw_datum_pt_marker(canvas, dcx, dcy)
         for i, (phys_x, phys_y) in enumerate(self.custom_measure_points):
-            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y,
-                                                canvas_w, canvas_h)
+            cx, cy = self._resolve_point_canvas_xy(phys_x, phys_y, ref_x, ref_y,
+                                                    canvas_w, canvas_h)
             if cx is None:
                 continue
             self._draw_custom_pt_marker(canvas, cx, cy)
         # Re-draw height text for any completed measurements
         for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
-            cx, cy = self._canvas_click_cache.get((phys_x, phys_y), (None, None))
+            cx, cy = self._resolve_point_canvas_xy(phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h)
             if cx is None:
                 continue
             is_datum = (self.datum_point is not None and (phys_x, phys_y) == self.datum_point)
-            if math.isnan(height):
-                fill = "red"
-                label = "Out of Range"
-            elif is_datum:
-                fill = "magenta"
-                label = "0"
-            elif i in self.analysis_selected_indices:
-                fill, label = "#00FF44", str(i + 1)
-            else:
-                fill, label = "cyan", str(i + 1)
+            label, fill = self._measurement_label_fill(i, height, is_datum)
             canvas.create_text(cx, cy - 15, text=label,
                                fill=fill, font=("Arial", 12, "bold"),
                                tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
@@ -2196,24 +2665,43 @@ class MainApp(ctk.CTk):
         if not self.custom_measure_points and not self.measured_data and self.datum_point is None:
             return
 
-        # Tile-0 centre in full-res stitched pixels (same constants as _render)
-        OVERLAP = 0.20
-        _tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
-        _tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
-        _t0x = _tile_w / 2.0
-        _t0y = (grid_y - 1) * _tile_h * (1.0 - OVERLAP) + _tile_h / 2.0
-        _A11, _A12 = -0.001479,  0.000044
-        _A21, _A22 =  0.000018,  0.001459
-        _det_B = _A11 * _A22 - _A12 * _A21
+        if self._last_stitched_was_smaract:
+            # SmarAct points live in the SmarAct's own coordinate frame, not the
+            # camera/module-stage frame the calibration matrix below assumes (see
+            # calculate_stitched_smaract_coords) — use its recorded grid pitch instead.
+            grid_params = self._smaract_last_grid
+            if grid_params is None:
+                return
+            _t0x, _t0y, _nm_per_px_x, _nm_per_px_y = self._smaract_stitched_tile_geometry(
+                stitched_w, stitched_h, grid_x, grid_y, grid_params)
 
-        def _phys_to_canvas(phys_x, phys_y):
-            dx = phys_x - scan_origin_x
-            dy = phys_y - scan_origin_y
-            d_px = ((-_A22) * dx + _A12 * dy) / _det_B
-            d_py = ( _A21   * dx - _A11 * dy) / _det_B
-            fpx = _t0x + d_px
-            fpy = _t0y + d_py
-            return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
+            def _phys_to_canvas(phys_x, phys_y):
+                x_nm = phys_x * 1_000_000
+                y_nm = phys_y * 1_000_000
+                d_px = (x_nm - grid_params['start_x_nm']) / _nm_per_px_x
+                d_py = (grid_params['start_y_nm'] - y_nm) / _nm_per_px_y
+                fpx = _t0x + d_px
+                fpy = _t0y - d_py
+                return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
+        else:
+            # Tile-0 centre in full-res stitched pixels (same constants as _render)
+            OVERLAP = 0.20
+            _tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
+            _tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
+            _t0x = _tile_w / 2.0
+            _t0y = (grid_y - 1) * _tile_h * (1.0 - OVERLAP) + _tile_h / 2.0
+            _A11, _A12 = -0.001479,  0.000044
+            _A21, _A22 =  0.000018,  0.001459
+            _det_B = _A11 * _A22 - _A12 * _A21
+
+            def _phys_to_canvas(phys_x, phys_y):
+                dx = phys_x - scan_origin_x
+                dy = phys_y - scan_origin_y
+                d_px = ((-_A22) * dx + _A12 * dy) / _det_B
+                d_py = ( _A21   * dx - _A11 * dy) / _det_B
+                fpx = _t0x + d_px
+                fpy = _t0y + d_py
+                return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
 
         # Re-draw datum marker if one was placed
         if self.datum_point is not None:
@@ -2229,16 +2717,7 @@ class MainApp(ctk.CTk):
         for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
             cx, cy = _phys_to_canvas(phys_x, phys_y)
             is_datum = (self.datum_point is not None and (phys_x, phys_y) == self.datum_point)
-            if math.isnan(height):
-                fill = "red"
-                label = "Out of Range"
-            elif is_datum:
-                fill = "magenta"
-                label = "0"
-            elif i in self.analysis_selected_indices:
-                fill, label = "#00FF44", str(i + 1)
-            else:
-                fill, label = "cyan", str(i + 1)
+            label, fill = self._measurement_label_fill(i, height, is_datum)
             canvas.create_text(cx, cy - 15, text=label,
                                fill=fill, font=("Arial", 12, "bold"),
                                tags=("custom_pt", "measurement_text", f"meas_idx_{i}"))
@@ -2253,7 +2732,7 @@ class MainApp(ctk.CTk):
                 "Please click 'Finish' on the stitched image tab (Main) first "
                 "before taking measurements on the Image tab.")
             return
-        if event.state & 0x4:  # Ctrl held — this is a datum drop, handled separately
+        if event.state & 0x4:  # Ctrl held: this is a datum drop, handled separately
             return
         canvas_w = canvas.winfo_width()
         canvas_h = canvas.winfo_height()
@@ -2290,7 +2769,7 @@ class MainApp(ctk.CTk):
         right-click (no significant pan drag).  Converts canvas pixels → full
         stitched-image pixels → physical mm using the standard helper.
         """
-        # Ctrl+RClick is a datum drop — let _on_datum_point_stitched handle it
+        # Ctrl+RClick is a datum drop: let _on_datum_point_stitched handle it
         if event.state & 0x4:
             return
         # Ignore if the user was panning (drag threshold = 5 px).
@@ -2304,12 +2783,24 @@ class MainApp(ctk.CTk):
         # Canvas px → full-res stitched px → physical mm
         full_px = (event.x - _s['ox']) / _s['sx']
         full_py = (event.y - _s['oy']) / _s['sy']
-        phys_x, phys_y = self.calculate_stitched_phys_coords(
-            full_px, full_py,
-            stitched_w, stitched_h,
-            grid_x, grid_y,
-            scan_origin_x, scan_origin_y,
-        )
+        if self._last_stitched_was_smaract:
+            grid_params = self._smaract_last_grid
+            if grid_params is None:
+                return
+            x_nm, y_nm = self.calculate_stitched_smaract_coords(
+                full_px, full_py,
+                stitched_w, stitched_h,
+                grid_x, grid_y,
+                grid_params,
+            )
+            phys_x, phys_y = x_nm / 1_000_000, y_nm / 1_000_000
+        else:
+            phys_x, phys_y = self.calculate_stitched_phys_coords(
+                full_px, full_py,
+                stitched_w, stitched_h,
+                grid_x, grid_y,
+                scan_origin_x, scan_origin_y,
+            )
 
         self.custom_measure_points.append((phys_x, phys_y))
         self._roi_active_canvas = canvas
@@ -2385,12 +2876,24 @@ class MainApp(ctk.CTk):
             return
         full_px = (event.x - _s['ox']) / _s['sx']
         full_py = (event.y - _s['oy']) / _s['sy']
-        phys_x, phys_y = self.calculate_stitched_phys_coords(
-            full_px, full_py,
-            stitched_w, stitched_h,
-            grid_x, grid_y,
-            scan_origin_x, scan_origin_y,
-        )
+        if self._last_stitched_was_smaract:
+            grid_params = self._smaract_last_grid
+            if grid_params is None:
+                return
+            x_nm, y_nm = self.calculate_stitched_smaract_coords(
+                full_px, full_py,
+                stitched_w, stitched_h,
+                grid_x, grid_y,
+                grid_params,
+            )
+            phys_x, phys_y = x_nm / 1_000_000, y_nm / 1_000_000
+        else:
+            phys_x, phys_y = self.calculate_stitched_phys_coords(
+                full_px, full_py,
+                stitched_w, stitched_h,
+                grid_x, grid_y,
+                scan_origin_x, scan_origin_y,
+            )
         self.datum_point = (phys_x, phys_y)
         self._roi_active_canvas = canvas
         canvas.delete("datum_pt")
@@ -2408,6 +2911,9 @@ class MainApp(ctk.CTk):
         self.datum_point = None
         if hasattr(self, 'analysis_result_var'):
             self.analysis_result_var.set("Analysis: Select points...")
+        self._show_heights_mode = False
+        self._safe_btn('_display_heights_btn', text="Display Heights", state="disabled")
+        self._safe_btn('_stitch_display_heights_btn', text="Display Heights", state="disabled")
 
         # ── ROI grid state ────────────────────────────────────────────────────
         self.roi_phys_x_start = None
@@ -2449,9 +2955,9 @@ class MainApp(ctk.CTk):
 
     def load_csv_points(self):
         """Bulk-load measurement points from a CSV (Site, X_mm, Y_mm, ...).
-        Independent of any stitched scan — Site 0 becomes the datum point,
+        Independent of any stitched scan: Site 0 becomes the datum point,
         every other row is appended to custom_measure_points."""
-        # Placeholder stage travel limits — adjust STAGE_MAX_X/Y once the actual
+        # Placeholder stage travel limits. adjust STAGE_MAX_X/Y once the actual
         # hardware travel range is known. Only a lower bound (0 mm) is enforced
         # elsewhere in this file today; this is the first upper-bound check.
         STAGE_MIN_X, STAGE_MAX_X = 0.0, 150.0
@@ -2469,7 +2975,7 @@ class MainApp(ctk.CTk):
                 reader = csv.reader(f)
                 header = next(reader, None)
 
-                # Validate only the first three columns — extra trailing columns
+                # Validate only the first three columns. extra trailing columns
                 # (e.g. Z_mm, Height_mm) are accepted and simply ignored below.
                 if not header or len(header) < 3:
                     messagebox.showerror("Format Error", "CSV must have at least 3 columns: Site, X_mm, Y_mm")
@@ -2495,21 +3001,39 @@ class MainApp(ctk.CTk):
                         self._clear_custom_points()
                         return
 
-                    # Pre-flight bounds check: validate the actual motor destination
-                    # (point + confocal-sensor offset), not the raw CSV coordinate —
-                    # matches the offset applied everywhere else in this file.
-                    motor_dest_x = x_val + _CONFOCAL_DX
-                    motor_dest_y = y_val + _CONFOCAL_DY
-                    if not (STAGE_MIN_X <= motor_dest_x <= STAGE_MAX_X) or not (STAGE_MIN_Y <= motor_dest_y <= STAGE_MAX_Y):
-                        messagebox.showerror(
-                            "Hardware Safety Fault",
-                            f"CSV Import Aborted.\n\nSite {site} ({x_val}, {y_val}) will push the motors "
-                            f"out of bounds after applying the Confocal offset.\n"
-                            f"Target Motor X: {motor_dest_x:.2f}\nTarget Motor Y: {motor_dest_y:.2f}\n\n"
-                            f"Please correct the CSV and try again."
-                        )
-                        self._clear_custom_points()   # wipe any partially loaded points
-                        return
+                    # Pre-flight bounds check.
+                    # SmarAct: the CSV coordinate is already a SmarAct-frame point (no
+                    # confocal offset applied, same as everywhere else in this file),
+                    # checked against the SLC-1720's own symmetric travel range —
+                    # negative values are fine there, unlike the module stage.
+                    if self.use_smaract_stage:
+                        if not (SMARACT_TRAVEL_MIN <= x_val <= SMARACT_TRAVEL_MAX
+                                and SMARACT_TRAVEL_MIN <= y_val <= SMARACT_TRAVEL_MAX):
+                            messagebox.showerror(
+                                "Hardware Safety Fault",
+                                f"CSV Import Aborted.\n\nSite {site} ({x_val}, {y_val}) is outside "
+                                f"the SmarAct stage's {SMARACT_TRAVEL_MIN:.1f} to "
+                                f"{SMARACT_TRAVEL_MAX:.1f} mm travel range.\n\n"
+                                f"Please correct the CSV and try again."
+                            )
+                            self._clear_custom_points()   # wipe any partially loaded points
+                            return
+                    else:
+                        # validate the actual motor destination (point + confocal-sensor
+                        # offset), not the raw CSV coordinate, matching the offset applied
+                        # everywhere else in this file.
+                        motor_dest_x = x_val + _CONFOCAL_DX
+                        motor_dest_y = y_val + _CONFOCAL_DY
+                        if not (STAGE_MIN_X <= motor_dest_x <= STAGE_MAX_X) or not (STAGE_MIN_Y <= motor_dest_y <= STAGE_MAX_Y):
+                            messagebox.showerror(
+                                "Hardware Safety Fault",
+                                f"CSV Import Aborted.\n\nSite {site} ({x_val}, {y_val}) will push the motors "
+                                f"out of bounds after applying the Confocal offset.\n"
+                                f"Target Motor X: {motor_dest_x:.2f}\nTarget Motor Y: {motor_dest_y:.2f}\n\n"
+                                f"Please correct the CSV and try again."
+                            )
+                            self._clear_custom_points()   # wipe any partially loaded points
+                            return
 
                     if site == "0":
                         self.datum_point = (x_val, y_val)
@@ -2524,7 +3048,7 @@ class MainApp(ctk.CTk):
             self._safe_btn(btn_name, state="normal")
 
         # ── Make the loaded points visible immediately and give "Clear Points" a
-        # canvas to act on — without this, self._roi_active_canvas stays whatever
+        # canvas to act on. without this, self._roi_active_canvas stays whatever
         # it was before the import (often None), so Clear Points can't wipe the
         # on-screen markers until the user clicks the canvas at least once.
         if (getattr(self, 'active_main_view', 'default') == 'stitched'
@@ -2564,9 +3088,9 @@ class MainApp(ctk.CTk):
                 writer = csv.writer(outfile)
 
                 header = next(reader, None)
-                # Points export header: Site, X_mm, Y_mm, Z_mm, Height_mm (5 cols) —
+                # Points export header: Site, X_mm, Y_mm, Z_mm, Height_mm (5 cols):
                 # the measured height is Height_mm (index 4).
-                # Grid export header: Site, X_mm, Y_mm, Z_mm (4 cols) — the measured
+                # Grid export header: Site, X_mm, Y_mm, Z_mm (4 cols): the measured
                 # height is Z_mm itself (index 3). Both keep X/Y at indices 1/2.
                 is_points_format = header and len(header) >= 5
 
@@ -2586,6 +3110,42 @@ class MainApp(ctk.CTk):
             messagebox.showerror("Launch Error", "Could not find 'gwyddion' executable.\nPlease ensure Gwyddion is installed and added to your system PATH.")
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to prepare file for Gwyddion:\n{e}")
+
+    def _measurement_label_fill(self, i, height, is_datum):
+        """Shared label/fill logic for the three places that stamp measurement text
+        (Image tab, stitched view, and right after a sequence completes). Only the
+        label text depends on _show_heights_mode. the datum/out-of-range/selected
+        colouring is unchanged from before."""
+        if math.isnan(height):
+            return "Out of Range", "red"
+        if is_datum:
+            return "0", "magenta"
+        label = f"{height:.3f}" if self._show_heights_mode else str(i + 1)
+        fill = "#00FF44" if i in self.analysis_selected_indices else "cyan"
+        return label, fill
+
+    def _toggle_display_heights_mode(self):
+        """Flip between showing point indices and measured heights on the canvas
+        labels, then redraw whichever canvas is currently active."""
+        if not self.measured_data:
+            return
+        self._show_heights_mode = not self._show_heights_mode
+        new_text = "Display Indices" if self._show_heights_mode else "Display Heights"
+        self._safe_btn('_display_heights_btn', text=new_text)
+        self._safe_btn('_stitch_display_heights_btn', text=new_text)
+
+        if (getattr(self, 'active_main_view', 'default') == 'stitched'
+                and getattr(self, '_stitched_canvas', None) is not None
+                and self._stitched_canvas.winfo_exists()):
+            if getattr(self, '_schedule_render', None) is not None:
+                self._schedule_render()
+        elif (getattr(self, '_image_tab_canvas', None) is not None
+                and self._image_tab_canvas.winfo_exists()):
+            self._image_tab_canvas.delete("custom_pt", "measurement_text", "datum_pt")
+            self._redraw_custom_points_image_tab(
+                self._image_tab_canvas,
+                self._image_tab_canvas.winfo_width(),
+                self._image_tab_canvas.winfo_height())
 
     def _toggle_analysis_point(self, event):
         """Toggle selection of a measured point label; update the analysis readout."""
@@ -2655,6 +3215,7 @@ class MainApp(ctk.CTk):
         # Must be captured here, before the confocal offset shifts the targets.
         self._sequence_origin_x = float(self.x_pos)
         self._sequence_origin_y = float(self.y_pos)
+        self._sequence_origin_z = float(self.z_pos)
 
         # ── Nearest-neighbour path optimisation ───────────────────────────────
         current_x = float(self.x_pos)
@@ -2677,9 +3238,15 @@ class MainApp(ctk.CTk):
 
         # ── Apply confocal-camera offset to every target point ────────────────
         # The confocal sensor is offset from the camera by this fixed amount.
-        CONFOCAL_DX = -1.418137875
-        CONFOCAL_DY = -72.258765875
-        offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in optimized_route]
+        # SmarAct samples: skip this (the confocal offset is baked into the
+        # one-time confocal-over-SmarAct parking step instead of per point,
+        # since route points here are already SmarAct-frame coordinates).
+        if self.use_smaract_stage:
+            offset_route = optimized_route
+        else:
+            CONFOCAL_DX = -1.418137875
+            CONFOCAL_DY = -72.258765875
+            offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in optimized_route]
 
         print(f"[execute_custom_measurements] {len(offset_route)} point(s) — nearest-neighbour order (confocal offset applied):")
         for i, (x, y) in enumerate(offset_route, 1):
@@ -2688,16 +3255,31 @@ class MainApp(ctk.CTk):
         # ── Pre-flight: confirm all confocal targets are within stage bounds ──
         # Loop through every offset point; abort on the first violation so the
         # error message references a single concrete bad coordinate.
-        for target_x, target_y in offset_route:
-            if target_x < 0 or target_y < 0:
-                messagebox.showerror(
-                    "Cannot Reach Sample",
-                    f"Cannot Reach Sample: Point requires stage to move to "
-                    f"Y = {target_y:.2f} mm, which is past the module's limit (0 mm).\n\n"
-                    f"Please manually unmount and shift your sample at least "
-                    f"{abs(target_y) + 1.0:.2f} mm further away from the limit."
-                )
-                return
+        # SmarAct: points are SmarAct-frame coordinates on the SLC-1720 piezo stage,
+        # whose legitimate travel range is symmetric (SMARACT_TRAVEL_MIN/MAX, i.e.
+        # negative values are fine) — not the module stage's "must be >= 0" rule.
+        if self.use_smaract_stage:
+            for target_x, target_y in offset_route:
+                if not (SMARACT_TRAVEL_MIN <= target_x <= SMARACT_TRAVEL_MAX
+                        and SMARACT_TRAVEL_MIN <= target_y <= SMARACT_TRAVEL_MAX):
+                    messagebox.showerror(
+                        "Cannot Reach Sample",
+                        f"Cannot Reach Sample: point ({target_x:.4f} mm, {target_y:.4f} mm) "
+                        f"is outside the SmarAct stage's {SMARACT_TRAVEL_MIN:.1f} to "
+                        f"{SMARACT_TRAVEL_MAX:.1f} mm travel range."
+                    )
+                    return
+        else:
+            for target_x, target_y in offset_route:
+                if target_x < 0 or target_y < 0:
+                    messagebox.showerror(
+                        "Cannot Reach Sample",
+                        f"Cannot Reach Sample: Point requires stage to move to "
+                        f"({target_x:.2f} mm, {target_y:.2f} mm), which is past the module's limit (0 mm).\n\n"
+                        f"Please manually unmount and shift your sample at least "
+                        f"{max(abs(target_x), abs(target_y)) + 1.0:.2f} mm further away from the limit."
+                    )
+                    return
 
         # ── Open persistent Confocal socket; send R0 exactly once ────────────
         # Keeping the socket open for the whole sequence mirrors confocal_looped.py:
@@ -2734,6 +3316,82 @@ class MainApp(ctk.CTk):
         else:
             self._begin_autofocus_datum(offset_route)
 
+    def _update_scan_progress_dot(self, phys_x, phys_y):
+        """Move (or create) the live orange dot marking the grid node currently being
+        measured. Only active during a grid (Map Surface) scan, not individual custom
+        points. No-ops quietly if the canvas active when the grid was drawn isn't on
+        screen right now (e.g. user tabbed away) or a coordinate can't be resolved."""
+        if getattr(self, '_sequence_mode', 'custom') != "grid":
+            return
+
+        is_stitched = (self.active_main_view == "stitched")
+        canvas = getattr(self, '_stitched_canvas' if is_stitched else '_image_tab_canvas', None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        cw, ch = canvas.winfo_width(), canvas.winfo_height()
+
+        if is_stitched:
+            grid_x = getattr(self, 'scanning_grid_x', 1)
+            grid_y = getattr(self, 'scanning_grid_y', 1)
+            stitched_w = getattr(self, '_stitch_img_w', cw)
+            stitched_h = getattr(self, '_stitch_img_h', ch)
+            if self._last_stitched_was_smaract:
+                grid_params = self._smaract_last_grid
+                if grid_params is None:
+                    return
+                cx, cy = self.calculate_smaract_phys_to_stitched_pixel_coords(
+                    phys_x, phys_y, stitched_w, stitched_h, grid_x, grid_y, grid_params, cw, ch)
+            else:
+                step_x = self.scanning_data.get('step_x', 1.0)
+                step_y = self.scanning_data.get('step_y', 1.0)
+                scan_end_x = getattr(self, 'scan_end_x', 0.0)
+                scan_end_y = getattr(self, 'scan_end_y', 0.0)
+                scan_origin_x = scan_end_x - (grid_x - 1) * step_x
+                scan_origin_y = scan_end_y - (grid_y - 1) * step_y
+                cx, cy = self.calculate_phys_to_stitched_pixel_coords(
+                    phys_x, phys_y, stitched_w, stitched_h, grid_x, grid_y,
+                    scan_origin_x, scan_origin_y, cw, ch)
+        else:
+            if self.use_smaract_stage:
+                ref_x = getattr(self, '_image_tab_ref_smaract_x', None)
+                ref_y = getattr(self, '_image_tab_ref_smaract_y', None)
+            else:
+                ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
+                ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
+            if ref_x is None or ref_y is None:
+                return
+            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
+
+        if cx is None:
+            return
+
+        R = 5  # a bit bigger than the grid's own node dots (DOT_R=3)
+        if self._scan_progress_dot_id is not None and canvas is self._scan_progress_dot_canvas:
+            try:
+                canvas.coords(self._scan_progress_dot_id, cx - R, cy - R, cx + R, cy + R)
+                canvas.tag_raise(self._scan_progress_dot_id)
+                canvas.update_idletasks()
+                return
+            except tk.TclError:
+                # dot got wiped by an unrelated canvas.delete("all") redraw; fall through and recreate
+                self._scan_progress_dot_id = None
+
+        self._scan_progress_dot_id = canvas.create_oval(
+            cx - R, cy - R, cx + R, cy + R,
+            fill="#FF8C00", outline="#FFD580", width=1, tags="active_node_indicator")
+        self._scan_progress_dot_canvas = canvas
+        # force an immediate repaint so the dot visibly moves before the settling
+        # delay/measurement step, without blocking the mainloop or hardware timing
+        canvas.update_idletasks()
+
+    def _clear_scan_progress_dot(self):
+        # hide the active-node indicator once the scan finishes or aborts
+        canvas = self._scan_progress_dot_canvas
+        if canvas is not None and canvas.winfo_exists():
+            canvas.delete("active_node_indicator")
+        self._scan_progress_dot_id = None
+        self._scan_progress_dot_canvas = None
+
     def _sequence_measure_point(self, route, index, results):
         """Non-blocking dispatcher: move to route[index] when the stage is Idle,
         then hand off to the arrival-wait sub-sequence."""
@@ -2746,6 +3404,28 @@ class MainApp(ctk.CTk):
             return
 
         target_x, target_y = route[index]
+
+        if self.use_smaract_stage:
+            # route points are absolute SmarAct-frame mm coordinates (computed by
+            # _canvas_pixel_to_phys against the SmarAct's own live position at
+            # click/ROI-drag time). Z is never sent here, it stays fixed on the
+            # optical stage from the one-time datum/autofocus step.
+            x_nm = round(target_x * 1_000_000)
+            y_nm = round(target_y * 1_000_000)
+            print(f"[sequence] moving SmarAct to point {index + 1}/{len(route)}: ({x_nm} nm, {y_nm} nm)")
+
+            def _on_complete():
+                # X/Y move is done, about to settle then measure Z: move the active
+                # scan indicator to this node
+                self._update_scan_progress_dot(target_x, target_y)
+                self.after(_SETTLING_DELAY_MS, lambda: self._sequence_fire_sensor_read(route, index, results))
+
+            def _on_error():
+                self._close_confocal_socket()
+                self._sequence_unlock_buttons()
+
+            self._smaract_move_to(x_nm, y_nm, on_complete=_on_complete, on_error=_on_error)
+            return
 
         if target_x < 0 or target_y < 0 or float(self.z_pos) < 0:
             print(f"[sequence] ERROR: point {index + 1} ({target_x:.4f}, {target_y:.4f}) "
@@ -2773,6 +3453,11 @@ class MainApp(ctk.CTk):
             self.after(100, lambda: self._sequence_wait_then_measure(route, index, results))
             return
 
+        # X/Y move is done, about to settle then measure Z: move the active scan
+        # indicator to this node
+        target_x, target_y = route[index]
+        self._update_scan_progress_dot(target_x, target_y)
+
         # Insert a mandatory settling delay before measuring.  The motor controller
         # reports "Idle" when the servo encoder is within dead-band, but the physical
         # camera assembly continues to ring for hundreds of milliseconds afterward.
@@ -2793,7 +3478,7 @@ class MainApp(ctk.CTk):
 
     def _confocal_read_worker(self, result_holder):
         """Read one height from the persistent socket opened by execute_custom_measurements.
-        Runs in a daemon thread.  R0 is NOT re-sent here — the socket is already in
+        Runs in a daemon thread.  R0 is NOT re-sent here: the socket is already in
         measurement mode and the CL-Navigator's internal AGC/averaging state is stable.
 
         Two-phase MS read: flush one buffered sample (may have been captured at the
@@ -2851,25 +3536,30 @@ class MainApp(ctk.CTk):
     # Automatic pre-step, run once before the real measurement route starts:
     # drive to the datum (confocal-offset applied), read the sensor once, then
     # jog Z so the confocal reads ~0 mm there. Mirrors the _sequence_* .after()
-    # idiom above — never blocks the main thread; only the socket read runs in
-    # a background Thread (via the existing _confocal_read_worker).
+    # idiom above (never blocks the main thread; only the socket read runs in
+    # a background Thread, via the existing _confocal_read_worker).
 
     def _begin_autofocus_datum(self, route):
         """Entry point: called once the persistent confocal socket is already open
-        and action buttons are already disabled — a drop-in replacement for the
+        and action buttons are already disabled (a drop-in replacement for the
         final self._sequence_measure_point(route, 0, []) call in each launcher."""
-        datum_x = self.datum_point[0] + _CONFOCAL_DX
-        datum_y = self.datum_point[1] + _CONFOCAL_DY
-        if datum_x < 0 or datum_y < 0:
-            messagebox.showerror(
-                "Cannot Reach Datum",
-                f"Auto-focus aborted: the datum plus confocal offset requires the stage "
-                f"to move to ({datum_x:.4f}, {datum_y:.4f}) mm, which exceeds the "
-                f"hardware limit (0 mm)."
-            )
-            self._close_confocal_socket()
-            self._sequence_unlock_buttons()
-            return
+        if self.use_smaract_stage:
+            # SmarAct samples: the confocal parks over the fixed SmarAct puck
+            # location instead of a ROI-drawn datum point.
+            datum_x, datum_y = SMARACT_CONFOCAL_PARK_X, SMARACT_CONFOCAL_PARK_Y
+        else:
+            datum_x = self.datum_point[0] + _CONFOCAL_DX
+            datum_y = self.datum_point[1] + _CONFOCAL_DY
+            if datum_x < 0 or datum_y < 0:
+                messagebox.showerror(
+                    "Cannot Reach Datum",
+                    f"Auto-focus aborted: the datum plus confocal offset requires the stage "
+                    f"to move to ({datum_x:.4f}, {datum_y:.4f}) mm, which exceeds the "
+                    f"hardware limit (0 mm)."
+                )
+                self._close_confocal_socket()
+                self._sequence_unlock_buttons()
+                return
         print(f"[autofocus] datum target ({datum_x:.4f}, {datum_y:.4f}) mm — "
               f"starting auto-focus calibration")
         self._autofocus_raise_z(route, datum_x, datum_y)
@@ -2877,12 +3567,24 @@ class MainApp(ctk.CTk):
     def _autofocus_raise_z(self, route, datum_x, datum_y):
         """Hardware safety: raise Z to a clearance height at the CURRENT XY position
         before moving XY to the datum, so the assembly never crosses to a new XY
-        position while sitting at an arbitrary (possibly collision-risk) Z."""
+        position while sitting at an arbitrary (possibly collision-risk) Z.
+
+        SmarAct samples sit on a mount higher than the module stage, so their
+        clearance height is height-compensated around SMARACT_CONFOCAL_FOCUS_Z
+        (the confocal's own zero-height focus Z, not the camera's SMARACT_PARK_Z),
+        not the module stage's 90mm clearance — going to 90mm would overshoot
+        the mount.
+        """
         if self.module_status != "Idle":
             self.after(100, lambda: self._autofocus_raise_z(route, datum_x, datum_y))
             return
-        print(f"[autofocus] raising Z to {_SAFE_CLEARANCE_Z_MM:.1f} mm clearance before XY move")
-        self.send_goto_command(float(self.x_pos), float(self.y_pos), _SAFE_CLEARANCE_Z_MM, show_success=False)
+        if self.use_smaract_stage:
+            sample_height_mm = float(self.sample_data.get('initial_height', 0.0))
+            clearance_z = SMARACT_CONFOCAL_FOCUS_Z - sample_height_mm
+        else:
+            clearance_z = _SAFE_CLEARANCE_Z_MM
+        print(f"[autofocus] raising Z to {clearance_z:.1f} mm clearance before XY move")
+        self.send_goto_command(float(self.x_pos), float(self.y_pos), clearance_z, show_success=False)
         self.module_status = "Changing Position"
         self.status_lockout_time = time.time() + 2.0
         self.after(100, lambda: self._autofocus_wait_z_clear(route, datum_x, datum_y))
@@ -2907,33 +3609,78 @@ class MainApp(ctk.CTk):
             self.after(100, lambda: self._autofocus_wait_arrival(route, datum_x, datum_y))
             return
         print(f"[autofocus] at datum — waiting {_SETTLING_DELAY_MS} ms for mechanical settling")
-        self.after(_SETTLING_DELAY_MS, lambda: self._autofocus_fire_sensor_read(route, datum_x, datum_y))
+        base_z = float(self.z_pos)
+        offsets = self._autofocus_sweep_offsets(_AUTOFOCUS_SWEEP_RANGE_MM, _AUTOFOCUS_SWEEP_STEP_MM)
+        self.after(_SETTLING_DELAY_MS,
+                   lambda: self._autofocus_sweep_step(route, datum_x, datum_y, base_z, offsets, 0))
 
-    def _autofocus_fire_sensor_read(self, route, datum_x, datum_y):
-        result_holder = [None]
-        t = Thread(target=self._confocal_read_worker, args=(result_holder,), daemon=True)
-        t.start()
-        self.after(100, lambda: self._autofocus_poll_sensor_result(route, datum_x, datum_y, result_holder, t))
+    def _autofocus_sweep_offsets(self, range_mm, step_mm):
+        """Center-out Z offsets (0, +step, -step, +2*step, -2*step, ...) so a good initial
+        estimate resolves fast, while a worse one still gets covered within +/-range_mm."""
+        offsets = [0.0]
+        steps = int(round(range_mm / step_mm))
+        for i in range(1, steps + 1):
+            offsets.append(i * step_mm)
+            offsets.append(-i * step_mm)
+        return offsets
 
-    def _autofocus_poll_sensor_result(self, route, datum_x, datum_y, result_holder, thread):
-        if thread.is_alive():
-            self.after(100, lambda: self._autofocus_poll_sensor_result(
-                route, datum_x, datum_y, result_holder, thread))
-            return
-        reading = result_holder[0]
-        if reading is None or math.isnan(reading) or reading < -90.0:
-            print(f"[autofocus] ERROR: invalid confocal reading ({reading!r}) at datum — aborting")
+    def _autofocus_sweep_step(self, route, datum_x, datum_y, base_z, offsets, idx):
+        """Move Z to the next sweep offset and read the confocal there; advances to the
+        next offset on an out-of-range reading, or fails after the whole sweep is exhausted."""
+        if idx >= len(offsets):
+            print(f"[autofocus] ERROR: confocal sensor found no valid reading anywhere in a "
+                  f"+/-{_AUTOFOCUS_SWEEP_RANGE_MM:.1f} mm sweep around {base_z:.4f} mm — aborting")
             messagebox.showerror(
                 "Auto-Focus Failed",
-                "Auto-focus datum calibration failed: the confocal sensor returned an "
-                "invalid reading.\nCheck the CL-Navigator connection and datum position, "
-                "then try again."
+                f"Auto-focus datum calibration failed: the confocal sensor returned an "
+                f"invalid reading at every Z in a +/-{_AUTOFOCUS_SWEEP_RANGE_MM:.1f} mm sweep "
+                f"around {base_z:.4f} mm.\nCheck the CL-Navigator connection and datum position, "
+                f"then try again."
             )
             self._close_confocal_socket()
             self._sequence_unlock_buttons()
             return
 
-        new_z = float(self.z_pos) - reading
+        target_z = base_z + offsets[idx]
+        if target_z < 0:
+            self._autofocus_sweep_step(route, datum_x, datum_y, base_z, offsets, idx + 1)
+            return
+
+        self.send_goto_command(datum_x, datum_y, target_z, show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+        self.after(100, lambda: self._autofocus_sweep_wait_move(
+            route, datum_x, datum_y, base_z, offsets, idx, target_z))
+
+    def _autofocus_sweep_wait_move(self, route, datum_x, datum_y, base_z, offsets, idx, target_z):
+        if self.module_status != "Idle":
+            self.after(100, lambda: self._autofocus_sweep_wait_move(
+                route, datum_x, datum_y, base_z, offsets, idx, target_z))
+            return
+        self.after(_SETTLING_DELAY_MS, lambda: self._autofocus_sweep_fire_read(
+            route, datum_x, datum_y, base_z, offsets, idx, target_z))
+
+    def _autofocus_sweep_fire_read(self, route, datum_x, datum_y, base_z, offsets, idx, target_z):
+        result_holder = [None]
+        t = Thread(target=self._confocal_read_worker, args=(result_holder,), daemon=True)
+        t.start()
+        self.after(100, lambda: self._autofocus_sweep_poll_read(
+            route, datum_x, datum_y, base_z, offsets, idx, target_z, result_holder, t))
+
+    def _autofocus_sweep_poll_read(self, route, datum_x, datum_y, base_z, offsets, idx, target_z,
+                                    result_holder, thread):
+        if thread.is_alive():
+            self.after(100, lambda: self._autofocus_sweep_poll_read(
+                route, datum_x, datum_y, base_z, offsets, idx, target_z, result_holder, thread))
+            return
+        reading = result_holder[0]
+        if reading is None or math.isnan(reading) or reading < -90.0:
+            print(f"[autofocus] sweep {idx + 1}/{len(offsets)}: Z={target_z:.4f} mm — "
+                  f"out of range, trying next offset")
+            self._autofocus_sweep_step(route, datum_x, datum_y, base_z, offsets, idx + 1)
+            return
+
+        new_z = target_z - reading
         if new_z < 0:
             print(f"[autofocus] ERROR: computed Z jog ({new_z:.4f} mm) out of range — aborting")
             messagebox.showerror(
@@ -2945,7 +3692,7 @@ class MainApp(ctk.CTk):
             self._sequence_unlock_buttons()
             return
 
-        print(f"[autofocus] reading={reading:.4f} mm, current_z={float(self.z_pos):.4f} mm "
+        print(f"[autofocus] sweep {idx + 1}/{len(offsets)}: Z={target_z:.4f} mm, reading={reading:.4f} mm "
               f"-> new_z={new_z:.4f} mm")
         self.send_goto_command(datum_x, datum_y, new_z, show_success=False)
         self.module_status = "Changing Position"
@@ -2964,14 +3711,16 @@ class MainApp(ctk.CTk):
 
     def _phys_to_canvas_pixel(self, phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h):
         """Inverse of _canvas_pixel_to_phys: map physical mm coords back to canvas pixels.
-        ref_x/ref_y must be the camera assembly position when the image was displayed."""
+        ref_x/ref_y must be the camera assembly position (or, for a SmarAct sample, the
+        SmarAct's own live position) at the moment the image was displayed."""
         if self._canvas_disp_w == 0 or self._canvas_orig_w == 0:
             return None, None
         A11, A12 = -0.001479,  0.000044
         A21, A22 =  0.000018,  0.001459
         det = A11 * A22 - A12 * A21
         dp_x = phys_x - ref_x
-        dp_y = phys_y - ref_y
+        # SmarAct Y is mounted opposite the camera's Y axis (see _canvas_pixel_to_phys).
+        dp_y = (ref_y - phys_y) if self.use_smaract_stage else (phys_y - ref_y)
         delta_i = ( A22 * dp_x - A12 * dp_y) / det
         delta_j = (-A21 * dp_x + A11 * dp_y) / det
         sensor_x = self._canvas_orig_w / 2.0 - delta_i
@@ -2991,7 +3740,7 @@ class MainApp(ctk.CTk):
         ordered_points = getattr(self, '_optimized_route', self.custom_measure_points)
 
         # ── Persist measurement data for analysis mode ────────────────────────
-        # Subtract datum Z so every height is relative to the datum — applies to
+        # Subtract datum Z so every height is relative to the datum. applies to
         # both custom-points scans and grid scans (grid scans always have a valid
         # self.datum_point: the picked/default grid node, see start_surface_map).
         datum_z = 0.0
@@ -3024,7 +3773,7 @@ class MainApp(ctk.CTk):
             # standard Image tab, and pick the matching inverse-transform path.
             is_stitched = (self.active_main_view == "stitched")
 
-            # Skip per-point canvas labels for grid scans — thousands of labels
+            # Skip per-point canvas labels for grid scans. thousands of labels
             # would be unreadable and slow; data is captured in the CSV instead.
             if getattr(self, '_sequence_mode', 'custom') != "grid":
                 for i, (phys_x, phys_y, height) in enumerate(self.measured_data):
@@ -3033,38 +3782,52 @@ class MainApp(ctk.CTk):
                         # was already applied at click time; use stored scan geometry).
                         grid_x  = getattr(self, 'scanning_grid_x', 1)
                         grid_y  = getattr(self, 'scanning_grid_y', 1)
-                        step_x  = self.scanning_data.get('step_x', 1.0)
-                        step_y  = self.scanning_data.get('step_y', 1.0)
-                        scan_end_x   = getattr(self, 'scan_end_x', 0.0)
-                        scan_end_y   = getattr(self, 'scan_end_y', 0.0)
-                        scan_origin_x = scan_end_x - (grid_x - 1) * step_x
-                        scan_origin_y = scan_end_y - (grid_y - 1) * step_y
                         stitched_w = getattr(self, '_stitch_img_w', cw)
                         stitched_h = getattr(self, '_stitch_img_h', ch)
-                        cx, cy = self.calculate_phys_to_stitched_pixel_coords(
-                            phys_x, phys_y,
-                            stitched_w, stitched_h,
-                            grid_x, grid_y,
-                            scan_origin_x, scan_origin_y,
-                            cw, ch,
-                        )
+                        if self._last_stitched_was_smaract:
+                            grid_params = self._smaract_last_grid
+                            if grid_params is None:
+                                cx, cy = None, None
+                            else:
+                                cx, cy = self.calculate_smaract_phys_to_stitched_pixel_coords(
+                                    phys_x, phys_y,
+                                    stitched_w, stitched_h,
+                                    grid_x, grid_y,
+                                    grid_params,
+                                    cw, ch,
+                                )
+                        else:
+                            step_x  = self.scanning_data.get('step_x', 1.0)
+                            step_y  = self.scanning_data.get('step_y', 1.0)
+                            scan_end_x   = getattr(self, 'scan_end_x', 0.0)
+                            scan_end_y   = getattr(self, 'scan_end_y', 0.0)
+                            scan_origin_x = scan_end_x - (grid_x - 1) * step_x
+                            scan_origin_y = scan_end_y - (grid_y - 1) * step_y
+                            cx, cy = self.calculate_phys_to_stitched_pixel_coords(
+                                phys_x, phys_y,
+                                stitched_w, stitched_h,
+                                grid_x, grid_y,
+                                scan_origin_x, scan_origin_y,
+                                cw, ch,
+                            )
                     else:
-                        # Use the pixel coords recorded at click time — avoids
-                        # geometry recalculation drift that clusters labels together.
-                        cx, cy = self._canvas_click_cache.get((phys_x, phys_y), (None, None))
+                        # Use the pixel coords recorded at click time (avoids
+                        # geometry recalculation drift that clusters labels together).
+                        # Falls back to a computed position (and logs a warning) in
+                        # the rare case the click cache is missing an entry, so a
+                        # label is never silently dropped.
+                        if self.use_smaract_stage:
+                            _ref_x = getattr(self, '_image_tab_ref_smaract_x', None)
+                            _ref_y = getattr(self, '_image_tab_ref_smaract_y', None)
+                        else:
+                            _ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
+                            _ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
+                        cx, cy = self._resolve_point_canvas_xy(phys_x, phys_y, _ref_x, _ref_y, cw, ch)
 
                     if cx is not None:
                         is_datum = (self.datum_point is not None
                                     and (phys_x, phys_y) == self.datum_point)
-                        if math.isnan(height):
-                            label = "Out of Range"
-                            fill  = "red"
-                        elif is_datum:
-                            label = "0"
-                            fill  = "magenta"
-                        else:
-                            label = str(i + 1)
-                            fill  = "cyan"
+                        label, fill = self._measurement_label_fill(i, height, is_datum)
                         canvas.create_text(
                             cx, cy - 15,
                             text=label,
@@ -3073,6 +3836,11 @@ class MainApp(ctk.CTk):
 
                 # Bind left-click on text labels to toggle analysis selection
                 canvas.tag_bind("measurement_text", "<Button-1>", self._toggle_analysis_point)
+
+                # Point labels exist now: enable the Display Heights/Indices toggle
+                if self.measured_data:
+                    self._safe_btn('_display_heights_btn', state="normal")
+                    self._safe_btn('_stitch_display_heights_btn', state="normal")
 
         # ── CSV Export Logic ──────────────────────────────────────────────────
         export_base = os.path.join(os.path.expanduser('~'), 'optical_module', 'Data_Exports')
@@ -3083,8 +3851,8 @@ class MainApp(ctk.CTk):
 
         def show_custom_success_popup(file_path, is_grid=True):
             """Scan-complete confirmation. Gwyddion only makes sense for a dense
-            grid scan — a handful of sparse individual points can't be turned into
-            a surface, so that branch only ever gets a Close button."""
+            grid scan (a handful of sparse individual points can't be turned into
+            a surface, so that branch only ever gets a Close button)."""
             popup = ctk.CTkToplevel(self)
             popup.title("Scan Complete")
             popup.geometry("450x200")
@@ -3156,10 +3924,13 @@ class MainApp(ctk.CTk):
         self._close_confocal_socket()
 
         # ── Return Optical assembly to its pre-sequence position ──────────────
+        # Z must be restored too, not just X/Y: the confocal auto-focus/measurement
+        # steps leave Z parked at the confocal's focal height, not the camera's.
         origin_x = getattr(self, '_sequence_origin_x', float(self.x_pos))
         origin_y = getattr(self, '_sequence_origin_y', float(self.y_pos))
-        print(f"[sequence] returning to origin ({origin_x:.4f}, {origin_y:.4f}) mm")
-        self.send_goto_command(origin_x, origin_y, float(self.z_pos), show_success=False)
+        origin_z = getattr(self, '_sequence_origin_z', float(self.z_pos))
+        print(f"[sequence] returning to origin ({origin_x:.4f}, {origin_y:.4f}, {origin_z:.4f}) mm")
+        self.send_goto_command(origin_x, origin_y, origin_z, show_success=False)
         self.module_status = "Changing Position"
         self.status_lockout_time = time.time() + 2.0
 
@@ -3175,6 +3946,9 @@ class MainApp(ctk.CTk):
         # Safety-net: close socket in case any abort path didn't reach _process_measurement_results
         self._close_confocal_socket()
 
+        # scan is over (done or aborted): hide the active-node dot
+        self._clear_scan_progress_dot()
+
         print("[sequence] origin reached — unlocking action buttons")
         # Re-enable whichever tab's buttons are currently in the widget tree
         for btn_name in ('_measure_heights_btn', '_stitch_measure_heights_btn',
@@ -3186,7 +3960,7 @@ class MainApp(ctk.CTk):
                 self._safe_btn(ms_btn, state="normal")
 
     def confirm_map_measurements(self):
-        """Legacy shim — delegates to start_surface_map."""
+        """Legacy shim: delegates to start_surface_map."""
         self.start_surface_map()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -3247,7 +4021,7 @@ class MainApp(ctk.CTk):
                                     tags="roi_grid")
 
         # ── Corner handles (drawn last so they sit on top) ────────────────────
-        # A corner handle sits at the same position as a grid node — if that node
+        # A corner handle sits at the same position as a grid node. if that node
         # is the current datum, tint the handle pink instead of gold so the datum
         # stays visible (it would otherwise be hidden under the opaque handle).
         corner_ij = {(x0, y0): (0, 0), (x1, y0): (nx - 1, 0),
@@ -3262,7 +4036,7 @@ class MainApp(ctk.CTk):
 
     def _nearest_grid_node(self, mx, my, x0, y0, x1, y1, nx, ny):
         """Return the (i, j) screen-space grid node closest to canvas point (mx, my).
-        i = column (0=left), j = row (0=top) — same indexing _roi_redraw_grid uses."""
+        i = column (0=left), j = row (0=top): same indexing _roi_redraw_grid uses."""
         best_ij = (0, 0)
         best_dist = None
         for i in range(nx):
@@ -3303,16 +4077,19 @@ class MainApp(ctk.CTk):
         total  = nx * ny
         area_x = cell_x * (nx - 1)
         area_y = cell_y * (ny - 1)
-        est_s  = total * 4
+        # Rough calibration from bench timing: ~17 s fixed overhead (auto-focus
+        # datum + move to confocal) plus ~3.152 s per measurement point (measured
+        # at a 2 mm x/y step size).
+        est_s  = _GRID_SCAN_SETUP_S + total * _GRID_SCAN_PER_POINT_S
         self._roi_info_area.set(f"Total Area: {area_x:.3f} × {area_y:.3f} mm")
         self._roi_info_count.set(f"Total Points: {total}")
-        self._roi_info_time.set(f"Est. Duration: ~{est_s} s")
+        self._roi_info_time.set(f"Est. Duration: ~{est_s:.1f} s")
 
     # ──────────────────────────────────────────────────────────────────────────
     # ROI pan-drag (reposition box without Ctrl)
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _roi_or_move_press(self, event, canvas, img_disp_w, img_disp_h, orig_img_w, orig_img_h):
+    def _roi_or_move_press(self, event, canvas):
         """<Button-1> three-way dispatcher.
 
         Priority (checked in order):
@@ -3359,7 +4136,7 @@ class MainApp(ctk.CTk):
                     self._roi_drag_corner   = name
                     self._roi_resize_anchor = corners[opposite[name]]
                     self._roi_pan_active    = True
-                    canvas.configure(cursor="hand2")   # clenched — actively grabbing
+                    canvas.configure(cursor="hand2")   # clenched: actively grabbing
                     return
 
             # ── 2. Inside box → move mode ─────────────────────────────────────
@@ -3367,18 +4144,18 @@ class MainApp(ctk.CTk):
                 self._roi_mode       = "move"
                 self._roi_pan_active = True
                 self._roi_pan_start  = (event.x, event.y)
-                canvas.configure(cursor="fleur")       # 4-way — actively moving
+                canvas.configure(cursor="fleur")       # 4-way: actively moving
                 return
 
         # ── 3. Outside / no ROI → hardware click-to-move ─────────────────────
         self._roi_mode       = "none"
         self._roi_pan_active = False
-        self.click_to_move(event, img_disp_w, img_disp_h, orig_img_w, orig_img_h)
+        self.click_to_move(event)
 
     def _roi_pan_motion(self, event, canvas):
         """<B1-Motion>: translate (move mode) or snap-resize (resize mode) the grid.
 
-        Move mode:  Box translates rigidly — cell sizes and measurement counts
+        Move mode:  Box translates rigidly. cell sizes and measurement counts
                     stay unchanged.
 
         Resize mode: The fixed anchor corner is held in place.  The dragged
@@ -3410,16 +4187,21 @@ class MainApp(ctk.CTk):
         if self._roi_mode != "resize":
             return
         if self._roi_resize_anchor is None:
+            print("[roi_resize] aborted: no resize anchor set")
             return
         if self._canvas_disp_w == 0 or self._canvas_orig_w == 0:
+            print(f"[roi_resize] aborted: canvas geometry not ready "
+                  f"(disp_w={self._canvas_disp_w}, orig_w={self._canvas_orig_w})")
             return
 
         try:
             cell_x = float(self._roi_cell_x.get())
             cell_y = float(self._roi_cell_y.get())
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, tk.TclError) as e:
+            print(f"[roi_resize] aborted: could not read cell size entries — {e}")
             return
         if cell_x <= 0 or cell_y <= 0:
+            print(f"[roi_resize] aborted: non-positive cell size ({cell_x}, {cell_y})")
             return
 
         canvas.configure(cursor="hand2")   # keep clenched hand throughout resize drag
@@ -3437,9 +4219,23 @@ class MainApp(ctk.CTk):
         raw_px = abs(event.x - anchor_x)
         raw_py = abs(event.y - anchor_y)
 
-        # ── Step 3: discretise — snap to nearest whole-cell count ─────────────
+        # ── Step 3: discretise (snap to nearest whole-cell count) ─────────────
+        if px_per_cell_x <= 0 or px_per_cell_y <= 0:
+            print(f"[roi_resize] aborted: non-positive pixel pitch "
+                  f"(px_per_cell_x={px_per_cell_x}, px_per_cell_y={px_per_cell_y})")
+            return
         cols = max(1, round(raw_px / px_per_cell_x))
         rows = max(1, round(raw_py / px_per_cell_y))
+        # Sanity clamp: an unexpectedly tiny px_per_cell (e.g. canvas geometry not
+        # yet realized) would otherwise blow this up to thousands of cells and hang
+        # the UI redrawing them, which looks indistinguishable from "nothing happens".
+        MAX_CELLS = 200
+        if cols > MAX_CELLS or rows > MAX_CELLS:
+            print(f"[roi_resize] WARNING: computed {cols}x{rows} cells "
+                  f"(px_per_cell=({px_per_cell_x:.4f}, {px_per_cell_y:.4f})) — "
+                  f"clamping to {MAX_CELLS} to avoid hanging the redraw")
+            cols = min(cols, MAX_CELLS)
+            rows = min(rows, MAX_CELLS)
         nx   = cols + 1
         ny   = rows + 1
 
@@ -3473,7 +4269,7 @@ class MainApp(ctk.CTk):
     def _roi_pan_release(self, event, canvas):
         """<ButtonRelease-1>: finalise a move or resize drag.
 
-        Move mode:   Only the position changed — cell sizes are locked, so we
+        Move mode:   Only the position changed. cell sizes are locked, so we
                      simply update the physical origin/end without touching
                      the cell-size entries.
 
@@ -3571,7 +4367,7 @@ class MainApp(ctk.CTk):
                 canvas.delete("roi_grid_hover")
             return
 
-        canvas.delete("roi_grid_hover")   # Ctrl released — clear any hover preview
+        canvas.delete("roi_grid_hover")   # Ctrl released: clear any hover preview
 
         # No active ROI on this canvas → plain arrow
         if not has_roi:
@@ -3651,7 +4447,7 @@ class MainApp(ctk.CTk):
             self.roi_phys_y_end   = max(py0, py1)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Stitched-view ROI — coord math uses calculate_stitched_phys_coords
+    # Stitched-view ROI: coord math uses calculate_stitched_phys_coords
     # ──────────────────────────────────────────────────────────────────────────
 
     def _update_stitched_roi_info_labels(self):
@@ -3668,9 +4464,10 @@ class MainApp(ctk.CTk):
         total  = nx * ny
         area_x = cell_x * (nx - 1)
         area_y = cell_y * (ny - 1)
+        est_s  = _GRID_SCAN_SETUP_S + total * _GRID_SCAN_PER_POINT_S
         self._stitch_roi_info_area.set(f"Total Area: {area_x:.3f} × {area_y:.3f} mm")
         self._stitch_roi_info_count.set(f"Total Points: {total}")
-        self._stitch_roi_info_time.set(f"Est. Duration: ~{total * 4} s")
+        self._stitch_roi_info_time.set(f"Est. Duration: ~{est_s:.1f} s")
 
     def _roi_release_stitched(self, event, canvas, _s,
                                stitched_w, stitched_h,
@@ -3694,12 +4491,14 @@ class MainApp(ctk.CTk):
         def _c2p(cx, cy):
             fpx = (cx - _s['ox']) / _s['sx']
             fpy = (cy - _s['oy']) / _s['sy']
-            return self.calculate_stitched_phys_coords(
+            return self._stitched_pixel_to_phys(
                 fpx, fpy, stitched_w, stitched_h,
                 grid_x, grid_y, scan_origin_x, scan_origin_y)
 
         px0, py0 = _c2p(self._roi_canvas_x0, self._roi_canvas_y0)
         px1, py1 = _c2p(self._roi_canvas_x1, self._roi_canvas_y1)
+        if px0 is None or px1 is None:
+            return
 
         self.roi_phys_x_start = min(px0, px1)
         self.roi_phys_x_end   = max(px0, px1)
@@ -3776,7 +4575,7 @@ class MainApp(ctk.CTk):
         """<B1-Motion> for the stitched canvas: translate (move) or snap-resize.
 
         Move mode is coord-agnostic (pure canvas-pixel translation).
-        Resize snap uses _s['sx']/_s['sy'] — the live stitched-image scale.
+        Resize snap uses _s['sx']/_s['sy']: the live stitched-image scale.
         """
         if not self._roi_pan_active:
             return
@@ -3851,12 +4650,14 @@ class MainApp(ctk.CTk):
         def _c2p(cx, cy):
             fpx = (cx - _s['ox']) / _s['sx']
             fpy = (cy - _s['oy']) / _s['sy']
-            return self.calculate_stitched_phys_coords(
+            return self._stitched_pixel_to_phys(
                 fpx, fpy, stitched_w, stitched_h,
                 grid_x, grid_y, scan_origin_x, scan_origin_y)
 
         px0, py0 = _c2p(self._roi_canvas_x0, self._roi_canvas_y0)
         px1, py1 = _c2p(self._roi_canvas_x1, self._roi_canvas_y1)
+        if px0 is None or px1 is None:
+            return
 
         self.roi_phys_x_start = min(px0, px1)
         self.roi_phys_x_end   = max(px0, px1)
@@ -3898,9 +4699,18 @@ class MainApp(ctk.CTk):
             return
 
         self.map_grid_x = nx;  self.map_grid_y = ny
-        SCALE_X, SCALE_Y = 0.001479, 0.001459
-        dcx = cell_x * (nx - 1) * _s['sx'] / SCALE_X
-        dcy = cell_y * (ny - 1) * _s['sy'] / SCALE_Y
+        if self._last_stitched_was_smaract:
+            grid_params = self._smaract_last_grid
+            if grid_params is None:
+                return
+            _, _, nm_per_px_x, nm_per_px_y = self._smaract_stitched_tile_geometry(
+                stitched_w, stitched_h, grid_x, grid_y, grid_params)
+            dcx = cell_x * (nx - 1) * _s['sx'] * 1_000_000 / nm_per_px_x
+            dcy = cell_y * (ny - 1) * _s['sy'] * 1_000_000 / nm_per_px_y
+        else:
+            SCALE_X, SCALE_Y = 0.001479, 0.001459
+            dcx = cell_x * (nx - 1) * _s['sx'] / SCALE_X
+            dcy = cell_y * (ny - 1) * _s['sy'] / SCALE_Y
 
         self._roi_canvas_x1 = self._roi_canvas_x0 + dcx
         self._roi_canvas_y1 = self._roi_canvas_y0 + dcy
@@ -3910,25 +4720,27 @@ class MainApp(ctk.CTk):
         def _c2p(cx, cy):
             fpx = (cx - _s['ox']) / _s['sx']
             fpy = (cy - _s['oy']) / _s['sy']
-            return self.calculate_stitched_phys_coords(
+            return self._stitched_pixel_to_phys(
                 fpx, fpy, stitched_w, stitched_h,
                 grid_x, grid_y, scan_origin_x, scan_origin_y)
 
         px0, py0 = _c2p(self._roi_canvas_x0, self._roi_canvas_y0)
         px1, py1 = _c2p(self._roi_canvas_x1, self._roi_canvas_y1)
+        if px0 is None or px1 is None:
+            return
         self.roi_phys_x_start = min(px0, px1)
         self.roi_phys_x_end   = max(px0, px1)
         self.roi_phys_y_start = min(py0, py1)
         self.roi_phys_y_end   = max(py0, py1)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Map Surface — validate and (WIP) launch scan
+    # Map Surface: validate and (WIP) launch scan
     # ──────────────────────────────────────────────────────────────────────────
 
     def start_surface_map(self):
         """Validate all ROI / grid parameters and confirm the surface mapping job.
 
-        Hardware scan execution is WIP — a TODO comment marks where
+        Hardware scan execution is WIP: a TODO comment marks where
         run_topography_map() should be called in a background Thread.
         """
         # ── Validate grid counts ────────────────────────────────────────────
@@ -3980,7 +4792,7 @@ class MainApp(ctk.CTk):
 
         # ── Datum: convert the picked/default grid node (screen-space i,j) to a
         # physical point. Screen-row 0 is the visual top row (roi_phys_y_end),
-        # but snake_route's own j=0 is roi_phys_y_start (visual bottom) — flip.
+        # but snake_route's own j=0 is roi_phys_y_start (visual bottom): flip.
         gi, gj_screen = self._grid_datum_ij
         gi = min(max(gi, 0), nx - 1)
         gj_screen = min(max(gj_screen, 0), ny - 1)
@@ -3989,26 +4801,48 @@ class MainApp(ctk.CTk):
                              self.roi_phys_y_start + gj_route * dy)
 
         # ── Phase 2: Apply Confocal→Optical offset and bounds check ──────────
-        CONFOCAL_DX = -1.418137875
-        CONFOCAL_DY = -72.258765875
-        offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in snake_route]
+        # SmarAct samples: skip this (route points are already SmarAct-frame
+        # coordinates, and the confocal offset is baked into the one-time
+        # confocal-over-SmarAct parking step instead of per point).
+        if self.use_smaract_stage:
+            offset_route = snake_route
+        else:
+            CONFOCAL_DX = -1.418137875
+            CONFOCAL_DY = -72.258765875
+            offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in snake_route]
 
-        for target_x, target_y in offset_route:
-            if target_x < 0 or target_y < 0:
-                messagebox.showerror(
-                    "Hardware Limit Exceeded",
-                    f"Cannot execute grid scan: applying the Confocal sensor offset would require "
-                    f"the stage to move to ({target_x:.3f} mm, {target_y:.3f} mm), which exceeds "
-                    f"the hardware limit of 0 mm.\n\n"
-                    f"Please reposition the sample so the entire scan region is within stage bounds."
-                )
-                return
+        # SmarAct's legitimate travel range is symmetric (SMARACT_TRAVEL_MIN/MAX,
+        # negative values are fine) — not the module stage's "must be >= 0" rule.
+        if self.use_smaract_stage:
+            for target_x, target_y in offset_route:
+                if not (SMARACT_TRAVEL_MIN <= target_x <= SMARACT_TRAVEL_MAX
+                        and SMARACT_TRAVEL_MIN <= target_y <= SMARACT_TRAVEL_MAX):
+                    messagebox.showerror(
+                        "Hardware Limit Exceeded",
+                        f"Cannot execute grid scan: point ({target_x:.3f} mm, {target_y:.3f} mm) "
+                        f"is outside the SmarAct stage's {SMARACT_TRAVEL_MIN:.1f} to "
+                        f"{SMARACT_TRAVEL_MAX:.1f} mm travel range.\n\n"
+                        f"Please reposition the sample so the entire scan region is within stage bounds."
+                    )
+                    return
+        else:
+            for target_x, target_y in offset_route:
+                if target_x < 0 or target_y < 0:
+                    messagebox.showerror(
+                        "Hardware Limit Exceeded",
+                        f"Cannot execute grid scan: point requires moving to "
+                        f"({target_x:.3f} mm, {target_y:.3f} mm), which exceeds "
+                        f"the hardware limit of 0 mm.\n\n"
+                        f"Please reposition the sample so the entire scan region is within stage bounds."
+                    )
+                    return
 
         # ── Phase 3: Launch execution ─────────────────────────────────────────
         self._sequence_mode     = "grid"
         self._sequence_csv      = csv_name if csv_name.endswith('.csv') else f"{csv_name}.csv"
         self._sequence_origin_x = float(self.x_pos)
         self._sequence_origin_y = float(self.y_pos)
+        self._sequence_origin_z = float(self.z_pos)
 
         # Open persistent Confocal socket; send R0 exactly once before the sequence.
         try:
@@ -4082,7 +4916,7 @@ class MainApp(ctk.CTk):
 
         # ── Datum: convert the picked/default grid node (screen-space i,j) to a
         # physical point. Screen-row 0 is the visual top row (roi_phys_y_end),
-        # but snake_route's own j=0 is roi_phys_y_start (visual bottom) — flip.
+        # but snake_route's own j=0 is roi_phys_y_start (visual bottom): flip.
         gi, gj_screen = self._grid_datum_ij
         gi = min(max(gi, 0), nx - 1)
         gj_screen = min(max(gj_screen, 0), ny - 1)
@@ -4091,26 +4925,48 @@ class MainApp(ctk.CTk):
                              self.roi_phys_y_start + gj_route * dy)
 
         # ── Phase 2: Apply Confocal→Optical offset and bounds check ──────────
-        CONFOCAL_DX = -1.418137875
-        CONFOCAL_DY = -72.258765875
-        offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in snake_route]
+        # SmarAct samples: skip this (route points are already SmarAct-frame
+        # coordinates, and the confocal offset is baked into the one-time
+        # confocal-over-SmarAct parking step instead of per point).
+        if self.use_smaract_stage:
+            offset_route = snake_route
+        else:
+            CONFOCAL_DX = -1.418137875
+            CONFOCAL_DY = -72.258765875
+            offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in snake_route]
 
-        for target_x, target_y in offset_route:
-            if target_x < 0 or target_y < 0:
-                messagebox.showerror(
-                    "Hardware Limit Exceeded",
-                    f"Cannot execute grid scan: applying the Confocal sensor offset would require "
-                    f"the stage to move to ({target_x:.3f} mm, {target_y:.3f} mm), which exceeds "
-                    f"the hardware limit of 0 mm.\n\n"
-                    f"Please reposition the sample so the entire scan region is within stage bounds."
-                )
-                return
+        # SmarAct's legitimate travel range is symmetric (SMARACT_TRAVEL_MIN/MAX,
+        # negative values are fine) — not the module stage's "must be >= 0" rule.
+        if self.use_smaract_stage:
+            for target_x, target_y in offset_route:
+                if not (SMARACT_TRAVEL_MIN <= target_x <= SMARACT_TRAVEL_MAX
+                        and SMARACT_TRAVEL_MIN <= target_y <= SMARACT_TRAVEL_MAX):
+                    messagebox.showerror(
+                        "Hardware Limit Exceeded",
+                        f"Cannot execute grid scan: point ({target_x:.3f} mm, {target_y:.3f} mm) "
+                        f"is outside the SmarAct stage's {SMARACT_TRAVEL_MIN:.1f} to "
+                        f"{SMARACT_TRAVEL_MAX:.1f} mm travel range.\n\n"
+                        f"Please reposition the sample so the entire scan region is within stage bounds."
+                    )
+                    return
+        else:
+            for target_x, target_y in offset_route:
+                if target_x < 0 or target_y < 0:
+                    messagebox.showerror(
+                        "Hardware Limit Exceeded",
+                        f"Cannot execute grid scan: point requires moving to "
+                        f"({target_x:.3f} mm, {target_y:.3f} mm), which exceeds "
+                        f"the hardware limit of 0 mm.\n\n"
+                        f"Please reposition the sample so the entire scan region is within stage bounds."
+                    )
+                    return
 
         # ── Phase 3: Launch execution ─────────────────────────────────────────
         self._sequence_mode     = "grid"
         self._sequence_csv      = csv_name if csv_name.endswith('.csv') else f"{csv_name}.csv"
         self._sequence_origin_x = float(self.x_pos)
         self._sequence_origin_y = float(self.y_pos)
+        self._sequence_origin_z = float(self.z_pos)
 
         # Open persistent Confocal socket; send R0 exactly once before the sequence.
         try:
@@ -4275,10 +5131,11 @@ class MainApp(ctk.CTk):
         button_frame.pack(side='bottom', fill='x', pady=15)
 
         # Stop button (centered at bottom)
-        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red", 
-                                    command=lambda:[self.display_main_tab(), 
+        stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red",
+                                    command=lambda:[self.display_main_tab(),
                                                     self.send_simple_command("exe_stop", False),
-                                                    self.empty_folder_rpi()])
+                                                    self.empty_folder_rpi(),
+                                                    self._abort_smaract_scan_if_active()])
 
         stop_button.pack(side='bottom', pady=5)
     
@@ -4336,17 +5193,20 @@ class MainApp(ctk.CTk):
 
         #Finish button - creates new folder with time stamp, and transfers images from buffer to complete
         new_folder_path = f"{self.complete_stitching_folder}/{self.curr_sample_id}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-        finish_button = ctk.CTkButton(button_frame, text="Finish", 
-                                      command=lambda:[self.display_main_tab(), self.create_transfer_folder_pc(self.buffer_stitching_folder,new_folder_path)])
+        finish_button = ctk.CTkButton(button_frame, text="Finish",
+                                      command=lambda:[setattr(self, 'active_main_view', 'default'),
+                                                       self.display_main_tab(), self.create_transfer_folder_pc(self.buffer_stitching_folder,new_folder_path)])
         finish_button.pack(side=ctk.RIGHT, expand=True, padx=1, pady=1)
 
         #Stop button
         stop_button = ctk.CTkButton(button_frame, text="STOP", fg_color="red",
-                                    command=lambda:[self.display_main_tab(),
+                                    command=lambda:[setattr(self, 'active_main_view', 'default'),
+                                                    self.display_main_tab(),
                                                     self.send_simple_command("exe_stop", False),
                                                     setattr(self, 'scan_in_progress', False),
                                                     setattr(self, 'saw_scanning_status', False),
-                                                    setattr(self, 'scanning_state', 0)])
+                                                    setattr(self, 'scanning_state', 0),
+                                                    self._abort_smaract_scan_if_active()])
         stop_button.pack(side=ctk.RIGHT, expand=True, padx=5, pady=1)
 
         #Layout
@@ -4564,13 +5424,13 @@ class MainApp(ctk.CTk):
 
         # Wait until every tile in the grid is present before rendering.
         # Rendering a partial set produces a scrambled preview because the
-        # grid placeholders are filled positionally — a missing tile shifts
+        # grid placeholders are filled positionally: a missing tile shifts
         # every subsequent image into the wrong cell.
         if len(images) < self.expected_image_count:
             self.after(1000, self.poll_for_new_images)
             return
 
-        # Full set confirmed — sort numerically by integer prefix so the grid
+        # Full set confirmed. sort numerically by integer prefix so the grid
         # is assembled in capture order regardless of OS filesystem ordering.
         def extract_index(filename):
             match = re.match(r'^(\d+)', os.path.basename(filename))
@@ -4595,7 +5455,7 @@ class MainApp(ctk.CTk):
             except Exception as e:
                 print(f"Failed to load image {img_path}: {e}")
 
-        # All tiles loaded — unlock the stitched-image button
+        # All tiles loaded: unlock the stitched-image button
         self.complete_image_btn.configure(state="normal")
 
 
@@ -5056,7 +5916,7 @@ class MainApp(ctk.CTk):
             and self.module_status == "Idle"
             and self.saw_scanning_status):
 
-            # Module returned to Idle after a commanded scan — stage is at the
+            # Module returned to Idle after a commanded scan. stage is at the
             # last tile (top-right corner). Snapshot for click-to-move maths.
             self.saw_scanning_status = False
             self.scan_end_x = float(self.x_pos)
@@ -5074,6 +5934,7 @@ class MainApp(ctk.CTk):
         #When folders transfered, calculate x and y grid, empty folder on rpi, and start image stitching thread
         if self.scanning_state == 2 and not self.transfer_rpi_thread.is_alive() :
             self.scanning_grid_x , self.scanning_grid_y = self.extract_unique_positions(self.buffer_stitching_folder)
+            self._last_stitched_was_smaract = False
 
             # Remove any stitched file left by a previous run's Fiji thread that finished
             # after empty_folder_pc ran, so it cannot bleed into the new tile grid.
@@ -5087,7 +5948,7 @@ class MainApp(ctk.CTk):
             self.scanning_state = 3
         
         # Stitching thread has finished; file-ready polling is already running
-        # via .after() from start_stitching — only reset the state machine here.
+        # via .after() from start_stitching. only reset the state machine here.
         if self.scanning_state == 3 and not self.stitching_thread.is_alive():
             self.scanning_state = 0
             
@@ -5137,6 +5998,19 @@ class MainApp(ctk.CTk):
             self.sample_data['mode'] = "Manual"
             self.sample_data['mount_type'] = mount_type
             self.sample_data['sample_location'] = sample_location
+            self.use_smaract_stage = (sample_location == "SmarAct Stage")
+            # Image tab's Live Position readout: show the SmarAct's own live X/Y
+            # (already polled in Motion, see _smaract_poll_tick) instead of the
+            # optical assembly's when a SmarAct sample is active.
+            # hasattr alone isn't enough: a tab switch destroys the Image tab's
+            # widgets (clear_frame), which leaves a stale Python reference behind
+            # that still passes hasattr but throws on .configure().
+            if (hasattr(self, '_image_tab_x_pos_label')
+                    and self._image_tab_x_pos_label.winfo_exists()):
+                _pos_x_var = self.smaract_x_pos_var if self.use_smaract_stage else self.rpi_x_pos_var
+                _pos_y_var = self.smaract_y_pos_var if self.use_smaract_stage else self.rpi_y_pos_var
+                self._image_tab_x_pos_label.configure(textvariable=_pos_x_var)
+                self._image_tab_y_pos_label.configure(textvariable=_pos_y_var)
             self.sample_data['sample_id'] = sample_id
             self.sample_data['initial_height'] = initial_height
             self.sample_data['layer_height'] = layer_height
@@ -5179,6 +6053,452 @@ class MainApp(ctk.CTk):
             success_message = "Request sent."
             self.send_json_error_check(json_data, success_message, show_success=show_success)
 
+
+    def _start_scan(self, step_x, step_y, frame, compute_overlap=True):
+        """
+        Dispatches the "Scanning" OK action to the correct execution path:
+        the Pi-driven optical-stage scan (exe_scanning) for Module Stage
+        samples, or a PC-driven SmarAct MCS1 grid scan for SmarAct samples.
+        """
+        self._compute_overlap = compute_overlap
+        self.empty_folder_pc(self.buffer_stitching_folder)
+        if self.use_smaract_stage:
+            self.start_smaract_scan(step_x, step_y, frame)
+        else:
+            self.send_scanning_data(step_x, step_y)
+            self.display_loading_frame(frame)
+
+    def _abort_smaract_scan_if_active(self):
+        """Aborts an in-progress SmarAct-driven scan (called from STOP buttons)."""
+        if self.use_smaract_stage:
+            self._smaract_scan_abort = True
+            self._smaract_scan_cleanup()
+
+    # ------------------------- Shared SmarAct connection ------------------------- #
+    # Opened once at startup and held for the app's lifetime (_smaract_startup_active).
+    # Motion tab polling, scans, homing, and moves all reuse this same handle;
+    # _smaract_lock serializes every stage.py call against it.
+
+    def _smaract_ensure_open(self):
+        """Opens the shared SmarAct handle if not already open. Returns success bool."""
+        if self._smaract_handle is not None:
+            return True
+        with self._smaract_lock:
+            if self._smaract_handle is not None:
+                return True
+            try:
+                self._smaract_handle = open_smaract()
+            except Exception as e:
+                print(f"Warning: could not open SmarAct system — {e}")
+                return False
+        return True
+
+    def _smaract_startup_connect(self):
+        """Opens the shared handle once at launch. Runs on a background thread
+        so a slow/absent SmarAct never blocks the window from appearing."""
+        if not self._smaract_ensure_open():
+            print("Warning: SmarAct not connected at startup (hardware unplugged?)")
+
+    def close_smaract_on_exit(self):
+        """Force-closes the connection regardless of in-progress activity.
+        Only call this from the app's shutdown handler."""
+        self._smaract_startup_active = False
+        self._smaract_poll_active = False
+        self._smaract_scan_running = False
+        self._smaract_move_active = False
+        self._smaract_homing_active = False
+        self._smaract_maybe_close()
+
+    def _smaract_maybe_close(self):
+        """Closes the shared SmarAct handle if nothing still needs it."""
+        if (self._smaract_poll_active or self._smaract_scan_running
+                or self._smaract_move_active or self._smaract_homing_active
+                or self._smaract_startup_active):
+            return
+        if self._smaract_handle is None:
+            return
+        with self._smaract_lock:
+            if self._smaract_handle is None:
+                return
+            try:
+                close_smaract(self._smaract_handle)
+            except Exception as e:
+                print(f"Warning: error closing SmarAct system — {e}")
+            self._smaract_handle = None
+
+    def _smaract_move_to(self, x_nm, y_nm, on_complete=None, on_error=None):
+        """
+        Moves the SmarAct stage to an absolute (x_nm, y_nm) target: shared by
+        click-to-move, custom/grid measurement points, and stitched-image
+        click-to-move. Z is never touched here; it always stays on the optical
+        stage, and is handled separately (once, before any SmarAct point move)
+        by the datum/autofocus setup. Rejects targets outside the SLC-1720's
+        physical hard-stop travel range (SMARACT_TRAVEL_MIN/MAX) with an error
+        dialog and aborts the move, rather than clamping them (negative
+        coordinates themselves are fine, the stage just can't exceed ±6 mm).
+        """
+        if not (SMARACT_TRAVEL_MIN_NM <= x_nm <= SMARACT_TRAVEL_MAX_NM
+                and SMARACT_TRAVEL_MIN_NM <= y_nm <= SMARACT_TRAVEL_MAX_NM):
+            messagebox.showerror(
+                "SmarAct Error",
+                f"Cannot move SmarAct stage to ({x_nm / 1_000_000:.4f} mm, "
+                f"{y_nm / 1_000_000:.4f} mm) — outside the stage's "
+                f"{SMARACT_TRAVEL_MIN:.1f} to {SMARACT_TRAVEL_MAX:.1f} mm travel range. "
+                f"Move rejected."
+            )
+            if on_error:
+                on_error()
+            return
+
+        self._smaract_move_active = True
+        if not self._smaract_ensure_open():
+            messagebox.showerror("SmarAct Error", "Could not open SmarAct system.")
+            self._smaract_move_active = False
+            self._smaract_maybe_close()
+            if on_error:
+                on_error()
+            return
+
+        move_result = {}
+
+        def _move():
+            try:
+                with self._smaract_lock:
+                    move_to_absolute(self._smaract_handle, CHANNEL_X, CHANNEL_Y, x_nm, y_nm)
+            except Exception as e:
+                move_result['error'] = str(e)
+
+        move_thread = Thread(target=_move, daemon=True)
+        move_thread.start()
+        self._smaract_move_wait(move_thread, move_result, on_complete, on_error)
+
+    def _smaract_move_wait(self, move_thread, move_result, on_complete, on_error):
+        if move_thread.is_alive():
+            self.after(50, lambda: self._smaract_move_wait(move_thread, move_result, on_complete, on_error))
+            return
+
+        self._smaract_move_active = False
+        self._smaract_maybe_close()
+
+        if 'error' in move_result:
+            messagebox.showerror("SmarAct Error", f"Move failed: {move_result['error']}")
+            if on_error:
+                on_error()
+            return
+        if on_complete:
+            on_complete()
+
+    def _start_smaract_position_polling(self):
+        """Starts the live SmarAct X/Y position readout (smaract_x_pos_var/
+        smaract_y_pos_var). Runs for the whole app session, not just while the
+        Motion tab is open — the Image tab's Live Position reads from the same
+        vars when a SmarAct sample is active."""
+        self._smaract_poll_active = True
+        self._smaract_poll_tick()
+
+    def _smaract_poll_tick(self):
+        if not self._smaract_poll_active:
+            return
+
+        if not self._smaract_ensure_open():
+            self.smaract_enabled_var.set("No")
+            self.smaract_x_pos_var.set("--")
+            self.smaract_y_pos_var.set("--")
+            self.after(5000, self._smaract_poll_tick)
+            return
+
+        if self._smaract_lock.acquire(blocking=False):
+            try:
+                x_nm = get_position(self._smaract_handle, CHANNEL_X)
+                y_nm = get_position(self._smaract_handle, CHANNEL_Y)
+                self.smaract_enabled_var.set("Yes")
+                self.smaract_x_pos_var.set(f"{x_nm / 1_000_000:.6f}")
+                self.smaract_y_pos_var.set(f"{y_nm / 1_000_000:.6f}")
+            except Exception as e:
+                print(f"Warning: SmarAct position read failed — {e}")
+                self.smaract_enabled_var.set("No")
+                self.smaract_x_pos_var.set("--")
+                self.smaract_y_pos_var.set("--")
+                self._smaract_handle = None
+            finally:
+                self._smaract_lock.release()
+        # else: a scan move currently holds the lock. skip this tick's read and
+        # leave the last displayed values in place.
+
+        self.after(1000, self._smaract_poll_tick)
+
+    def start_smaract_scan(self, step_x, step_y, frame):
+        """
+        Entry point for a SmarAct-driven grid scan: parks the optical carriage
+        at the SmarAct focal position, then drives the real SmarAct MCS1 piezo
+        stage through a grid, triggering a Pi image capture at each point.
+        """
+        if self.module_status != "Idle":
+            messagebox.showerror("Status not in idle, wait to request scanning mode.")
+            return
+        if step_x <= 0 or step_y <= 0:
+            messagebox.showerror("Invalid input", "Step values must be positive numbers")
+            return
+
+        self._smaract_scan_abort = False
+        self._smaract_scan_running = True
+        self._smaract_manifest = []
+        self._smaract_step_x_mm = step_x
+        self._smaract_step_y_mm = step_y
+
+        self.display_loading_frame(frame)
+
+        self._smaract_scan_auto_home()
+
+    def _smaract_scan_auto_home(self):
+        # blocking call, needs its own thread. reuses the shared handle so it
+        # doesn't fight the persistent connection for the port (Resource Busy).
+        def _worker():
+            try:
+                if not self._smaract_ensure_open():
+                    print("[scan] ERROR: could not open SmarAct system for auto-home")
+                else:
+                    with self._smaract_lock:
+                        home_smaract(self._smaract_handle)
+            finally:
+                self.after(0, self._smaract_scan_after_home)
+
+        Thread(target=_worker, daemon=True).start()
+
+    def _smaract_scan_after_home(self):
+        if self._smaract_scan_abort:
+            self._smaract_scan_cleanup()
+            return
+
+        self.empty_folder_rpi()
+        # Each SmarAct scan captures its own 0..N-1 sequence, independent of
+        # whatever a prior scan/sampling run left the Pi's image counter at.
+        self.send_simple_command("exe_reset_image_count", checkIdle=False, show_success=False)
+
+        # Park the camera carriage at the SmarAct focal position and hold it there
+        # for the whole scan; only the SmarAct piezo stage moves point-to-point.
+        self.send_goto_command(req_x=SMARACT_PARK_X, req_y=SMARACT_PARK_Y, req_z=SMARACT_PARK_Z, show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+        self.after(500, self._smaract_scan_wait_park)
+
+    def _smaract_scan_wait_park(self):
+        if self._smaract_scan_abort:
+            return
+        if self.module_status != "Idle":
+            self.after(200, self._smaract_scan_wait_park)
+            return
+
+        if not self._smaract_ensure_open():
+            messagebox.showerror("SmarAct Error", "Could not open SmarAct system.")
+            self._smaract_scan_running = False
+            return
+
+        # camera's parked, now lock in Z before touching X/Y
+        self._smaract_scan_autofocus()
+
+    def _smaract_scan_autofocus(self):
+        if self._smaract_scan_abort:
+            self._smaract_scan_cleanup()
+            return
+
+        # taller sample sits closer to the lens, needs a lower Z. center the
+        # sweep on the sample's own height instead of a fixed window, same
+        # idea as the module stage's STAGEFOCUSHEIGHT - get_curr_height()
+        sample_height_mm = float(self.sample_data.get('initial_height', 0.0))
+        z_center = SMARACT_PARK_Z - sample_height_mm
+
+        autofocus_data = {
+            "command": "exe_smaract_autofocus",
+            "mode": self.mode,
+            "module_status": self.module_status,
+            "z_min": z_center - 1,
+            "z_max": z_center + 1,
+            "step_size": 0.05,
+        }
+        self.send_json_error_check(autofocus_data, "Autofocus request sent.", show_success=False)
+        self.module_status = "Changing Position"
+        self.status_lockout_time = time.time() + 2.0
+        self.after(200, self._smaract_scan_wait_autofocus)
+
+    def _smaract_scan_wait_autofocus(self):
+        if self._smaract_scan_abort:
+            self._smaract_scan_cleanup()
+            return
+        if self.module_status != "Idle":
+            self.after(200, self._smaract_scan_wait_autofocus)
+            return
+
+        # Z locked in, now build the X/Y grid. centered on wherever the SmarAct stage sits right now. since
+        # the scan auto-homes first, that's the post-home reference position,
+        # not necessarily wherever the sample actually is.
+        with self._smaract_lock:
+            center_x_nm = get_position(self._smaract_handle, CHANNEL_X)
+            center_y_nm = get_position(self._smaract_handle, CHANNEL_Y)
+
+        width_mm = float(self.sample_data.get('width', 0.0))
+        height_mm = float(self.sample_data.get('height', 0.0))
+        step_x_nm = round(self._smaract_step_x_mm * 1_000_000)
+        step_y_nm = round(self._smaract_step_y_mm * 1_000_000)
+
+        nx = max(int(width_mm // self._smaract_step_x_mm) + 1, 1)
+        ny = max(int(height_mm // self._smaract_step_y_mm) + 1, 1)
+
+        start_x_nm = center_x_nm - round((nx - 1) * step_x_nm / 2)
+        # SmarAct Y is mounted opposite the camera's Y axis (same fact fixed for
+        # click-to-move): ascending native Y = descending visual position. Start
+        # at the high native-Y extreme so ascending row still means ascending
+        # visual position, matching what Fiji expects from "order=[Up & Right]".
+        start_y_nm = center_y_nm + round((ny - 1) * step_y_nm / 2)
+
+        # Column-by-column, bottom-to-top within a column, then left-to-right:
+        # matches the Fiji stitching macro's "type=[Grid: column-by-column]
+        # order=[Up & Right]" tile-ordering assumption (StitchingMacro.ijm).
+        route = []
+        for col in range(nx):
+            x_nm = start_x_nm + col * step_x_nm
+            for row in range(ny):
+                y_nm = start_y_nm - row * step_y_nm
+                route.append((x_nm, y_nm))
+
+        self._smaract_route = route
+        self._smaract_nx = nx
+        self._smaract_ny = ny
+        self._smaract_index = 0
+        # Recorded so a stitched-image click-to-move can map a tile-pixel click
+        # directly back to the exact SmarAct nm coordinate that produced it.
+        self._smaract_last_grid = {
+            'start_x_nm': start_x_nm, 'start_y_nm': start_y_nm,
+            'step_x_nm': step_x_nm, 'step_y_nm': step_y_nm,
+            'nx': nx, 'ny': ny,
+        }
+
+        self._smaract_scan_next_point()
+
+    def _smaract_scan_next_point(self):
+        if self._smaract_scan_abort:
+            self._smaract_scan_cleanup()
+            return
+        if self._smaract_index >= len(self._smaract_route):
+            self._smaract_scan_finish()
+            return
+
+        x_nm, y_nm = self._smaract_route[self._smaract_index]
+        move_result = {}
+
+        def _move():
+            try:
+                with self._smaract_lock:
+                    move_to_absolute(self._smaract_handle, CHANNEL_X, CHANNEL_Y, x_nm, y_nm)
+            except Exception as e:
+                move_result['error'] = str(e)
+
+        move_thread = Thread(target=_move, daemon=True)
+        move_thread.start()
+        self.after(50, lambda: self._smaract_scan_wait_move(move_thread, move_result))
+
+    def _smaract_scan_wait_move(self, move_thread, move_result):
+        if self._smaract_scan_abort:
+            self._smaract_scan_cleanup()
+            return
+        if move_thread.is_alive():
+            self.after(50, lambda: self._smaract_scan_wait_move(move_thread, move_result))
+            return
+        if 'error' in move_result:
+            messagebox.showerror("SmarAct Error", f"Move failed: {move_result['error']}")
+            self._smaract_scan_cleanup()
+            return
+
+        self.after(SMARACT_SETTLING_DELAY_MS, self._smaract_scan_fire_capture)
+
+    def _smaract_scan_fire_capture(self):
+        if self._smaract_scan_abort:
+            self._smaract_scan_cleanup()
+            return
+
+        x_nm, y_nm = self._smaract_route[self._smaract_index]
+        self._smaract_manifest.append((self._smaract_index, x_nm, y_nm))
+
+        self.send_simple_command("exe_scan_capture", checkIdle=False, show_success=False)
+        self.module_status = "Capturing Image"
+        self.status_lockout_time = time.time() + 0.5
+        self.after(100, self._smaract_scan_wait_capture)
+
+    def _smaract_scan_wait_capture(self):
+        if self._smaract_scan_abort:
+            self._smaract_scan_cleanup()
+            return
+        if self.module_status != "Idle":
+            self.after(100, self._smaract_scan_wait_capture)
+            return
+
+        self._smaract_index += 1
+        self._smaract_scan_next_point()
+
+    def _smaract_scan_finish(self):
+        self._smaract_scan_running = False
+        self._smaract_maybe_close()
+
+        self.transfer_rpi_thread = Thread(
+            target=self.transfer_folder_rpi,
+            kwargs={"destination_path": self.buffer_stitching_folder, "new_filename": True},
+            daemon=True)
+        self.transfer_rpi_thread.start()
+        self.after(200, self._smaract_scan_wait_transfer)
+
+    def _smaract_scan_wait_transfer(self):
+        if self.transfer_rpi_thread.is_alive():
+            self.after(200, self._smaract_scan_wait_transfer)
+            return
+
+        # The Pi-embedded image position metadata is meaningless here (the carriage
+        # never moved), so use the grid shape computed from the SmarAct route instead
+        # of extract_unique_positions.
+        self.scanning_grid_x, self.scanning_grid_y = self._smaract_nx, self._smaract_ny
+
+        stale_stitched = os.path.join(self.buffer_stitching_folder, f"stitched_{self.curr_sample_id}.jpg")
+        if os.path.exists(stale_stitched):
+            os.remove(stale_stitched)
+
+        self._last_stitched_was_smaract = True
+
+        self.start_stitching(self.scanning_grid_x, self.scanning_grid_y, self.buffer_stitching_folder, self.buffer_stitching_folder, self.curr_sample_id)
+
+        # Recorded regardless of the current tab so display_main_tab can restore
+        # the grid view (with the "Image Stitching..." button) when the user
+        # comes back to Main, even if that happens after this scan's after()-chain
+        # has already finished.
+        self.active_main_view = "scanning"
+
+        if self.current_tab != "Main":
+            # main_right_frame dies on every tab switch (clear_frame nukes it),
+            # so painting into it here would crash. stitching still runs fine in
+            # the background either way; display_main_tab restores the grid view
+            # (via active_main_view == "scanning") when the user comes back.
+            return
+
+        self.display_scanning_layout(self.scanning_grid_x, self.scanning_grid_y, self.main_right_frame)
+
+        # optical scans get repainted for free by the ~1s Pi status heartbeat
+        # (update_gui_elements), which keeps firing long after the scan itself
+        # is done. SmarAct's after()-chain just ends here, no heartbeat, so one
+        # update_idletasks() call isn't reliably enough for CTk to finish
+        # blitting the new layout — fake that heartbeat for under a second.
+        self._smaract_force_repaint(6)
+
+    def _smaract_force_repaint(self, ticks_left):
+        if ticks_left <= 0 or self.current_tab != "Main":
+            return
+        try:
+            self.main_right_frame.update_idletasks()
+        except Exception:
+            return
+        self.after(150, lambda: self._smaract_force_repaint(ticks_left - 1))
+
+    def _smaract_scan_cleanup(self):
+        """Called on abort (STOP) or a fatal error to release the scan's hold on the SmarAct handle."""
+        self._smaract_scan_running = False
+        self._smaract_maybe_close()
 
     def send_sampling_data(self, num_images):
         """Store and send random sampling data to Raspberry Pi.
@@ -5316,18 +6636,16 @@ class MainApp(ctk.CTk):
 
 
     def send_smaract_stage_command(self):
-        # Step 1: Move Z to safe height first, holding X and Y at their current positions.
+        # raise Z first, holding X/Y, so the head clears before it swings over
         self.send_goto_command(
             req_x=float(self.x_pos),
             req_y=float(self.y_pos),
-            req_z=70.0,
+            req_z=SMARACT_PARK_Z,
             show_success=False
         )
-        # Lock status locally so the Pi's delayed acknowledgement doesn't overwrite it
-        # before the move has actually started (same pattern as click-to-move).
+        # local lock so a delayed Pi ack doesn't overwrite this before the move starts
         self.module_status = "Changing Position"
         self.status_lockout_time = time.time() + 2.0
-        # Step 2: Poll until Z move completes, then transit X and Y.
         self.after(500, self._smaract_wait_then_xy)
 
     def _smaract_wait_then_xy(self):
@@ -5335,9 +6653,9 @@ class MainApp(ctk.CTk):
             self.after(500, self._smaract_wait_then_xy)
             return
         self.send_goto_command(
-            req_x=0.437369625,
-            req_y=203.456397375,
-            req_z=70.0
+            req_x=SMARACT_PARK_X,
+            req_y=SMARACT_PARK_Y,
+            req_z=SMARACT_PARK_Z
         )
 
     def toggle_interferometer_camera(self):
@@ -5358,12 +6676,18 @@ class MainApp(ctk.CTk):
             return
         if target_x < 0 or target_y < 0 or target_z < 0:
             print(f"Warning: toggle move rejected — target ({target_x:.6f}, {target_y:.6f}, {target_z:.6f}) contains a negative value.")
+            messagebox.showerror(
+                "Cannot Toggle",
+                f"Toggle move rejected: target ({target_x:.4f}, {target_y:.4f}, {target_z:.4f}) mm "
+                f"contains a negative value, which is past the stage's limit (0 mm)."
+            )
             return
 
         try:
             self.send_goto_command(target_x, target_y, target_z, show_success=False)
         except Exception as e:
             print(f"Warning: toggle move failed — {e}")
+            messagebox.showerror("Error", f"Toggle move failed: {e}")
             return
 
         self.is_at_confocal = not self.is_at_confocal
@@ -5374,6 +6698,13 @@ class MainApp(ctk.CTk):
         Launch home_smaract() on a daemon Thread so the GUI stays responsive
         while the stage physically drives to its reference marks.
 
+        Reuses the shared persistent SmarAct connection (the same one used by
+        the Motion tab's live position polling and scans) instead of opening a
+        second connection to the device. opening two connections to the same
+        USB controller fails with SA_OpenSystem code 3 ("Resource Busy") if
+        the shared handle is already open (e.g. Motion tab visible, or a scan
+        in progress).
+
         The button is disabled and relabelled for the duration of the sequence,
         then restored on the main thread via after() once the thread finishes.
         A try/except guards against the button having been destroyed if the
@@ -5382,17 +6713,26 @@ class MainApp(ctk.CTk):
         self.smaract_home_btn.configure(state="disabled", text="Homing...")
 
         def _worker():
-            home_smaract()
-            # Restore the button on the Tk main thread
+            self._smaract_homing_active = True
             try:
-                self.after(
-                    0,
-                    lambda: self.smaract_home_btn.configure(
-                        state="normal", text="Homing"
-                    ),
-                )
-            except Exception:
-                pass  # Button was destroyed when the tab was switched
+                if not self._smaract_ensure_open():
+                    print("[homing] ERROR: could not open SmarAct system")
+                    return
+                with self._smaract_lock:
+                    home_smaract(self._smaract_handle)
+            finally:
+                self._smaract_homing_active = False
+                self._smaract_maybe_close()
+                # Restore the button on the Tk main thread
+                try:
+                    self.after(
+                        0,
+                        lambda: self.smaract_home_btn.configure(
+                            state="normal", text="Homing"
+                        ),
+                    )
+                except Exception:
+                    pass  # Button was destroyed when the tab was switched
 
         Thread(target=_worker, daemon=True).start()
 
@@ -5483,7 +6823,7 @@ class MainApp(ctk.CTk):
     def check_stitched_file_ready(self, filepath, retries=120, generation=0):
         """
         Non-blocking poll for the stitched output JPEG. Always called from the
-        Tkinter main thread via .after() — never from the stitching thread.
+        Tkinter main thread via .after(): never from the stitching thread.
 
         The generation parameter matches self.stitching_generation at spawn time.
         If a newer scan has started, the generation will differ and this stale
@@ -5495,10 +6835,13 @@ class MainApp(ctk.CTk):
             generation (int): Scan generation at the time this poller was created.
         """
         if generation != self.stitching_generation:
-            return  # stale poller from a previous scan — discard
+            return  # stale poller from a previous scan: discard
         if os.path.exists(filepath):
             self.is_stitching = False
-            self.complete_image_btn.configure(text="Open Completed Image", state="normal")
+            try:
+                self.complete_image_btn.configure(text="Open Completed Image", state="normal")
+            except Exception:
+                pass  # button's gone if the user tabbed away mid-scan, nothing to update
         elif retries > 0:
             self.after(500, lambda: self.check_stitched_file_ready(filepath, retries - 1, generation))
         else:
@@ -5530,8 +6873,9 @@ class MainApp(ctk.CTk):
         self.is_stitching = True
         self.after(500, lambda: self.check_stitched_file_ready(stitched_path, generation=gen))
 
+        compute_overlap = getattr(self, '_compute_overlap', True)
         self.stitching_thread = Thread(
-            target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id),
+            target=lambda: self.stitcher.run_stitching(grid_x, grid_y, input_dir, output_dir, sample_id, compute_overlap),
             daemon=True
         )
         self.stitching_thread.start()

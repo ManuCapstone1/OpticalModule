@@ -9,18 +9,18 @@ import os
 import random
 import json
 
-# Constants
-STEPDISTXY = 0.212058/16 # linear distance moved in x and y each motor step (using 1/16 microstepping)
-STEPDISTZ = 0.01/4 # linear distance moved in z each motor step (using 1/4 microstepping)
+STEPDISTXY = 0.212058/16 # mm per step, x/y, 1/16 microstepping
+STEPDISTZ = 0.01/4 # mm per step, z, 1/4 microstepping
 PULSEWIDTH = 100 / 1000000.0 # microseconds
 BTWNSTEPS = 1000 / 1000000.0
-STAGEFOCUSHEIGHT = 36860*STEPDISTZ # z height at which the stage is in focus (this may change with calibration)
-STAGECENTRE = (8281, 7005) # Stage centre location in steps
+STAGEFOCUSHEIGHT = 36860*STEPDISTZ # focus height, drifts with recalibration
+STAGECENTRE = (8281, 7005) # steps
+SMARACT_CENTRE_X = 6.401500875   # SmarAct stage centre X (mm)
+SMARACT_CENTRE_Y = 201.070744875 # SmarAct stage centre Y (mm)
+SMARACT_FOCUS_Z = 70.0           # SmarAct stage focal plane Z (mm)
 
 class OpticalModule:
     """
-        This class is a digital representation of the physical system.
-        It includes fields for the system parameters and methods for operating the system.
         Attributes:
             board: Pyfirmata Arduino board object
             enPin: Arduino pin used to enable and disable motors
@@ -108,7 +108,7 @@ class OpticalModule:
         self.isHomed = threading.Event()
         self.motorsEnabled = threading.Event()
 
-    def add_sample(self, mountType, sampleID, initialHeight, mmPerLayer, width, height):
+    def add_sample(self, mountType, sampleID, initialHeight, mmPerLayer, width, height, useSmaractStage=False):
         """
         Instantiates new sample and holds it as self.currSample
         Parameters:
@@ -118,8 +118,9 @@ class OpticalModule:
             mmPerLayer: Sample height reduction in each polishing step (in mm)
             width: Bounding box width in mm (x-direction)
             height Bounding box height in mm (y-direction)
+            useSmaractStage: True if the sample is mounted on the SmarAct stage rather than the optical module stage
         """
-        self.currSample = Sample(mountType, sampleID, initialHeight, mmPerLayer, width, height)
+        self.currSample = Sample(mountType, sampleID, initialHeight, mmPerLayer, width, height, useSmaractStage)
 
     def disable_motors(self):
         """
@@ -488,12 +489,12 @@ class OpticalModule:
             with open(filepath, "w") as file:
                 json.dump(self.currImageMetadata, file, indent=4)
 
-    def update_image(self):
+    def update_image(self, discard_stale=False):
         """
         Captures image and saves image and metadata file to buffer directory
         """
         # Capture image
-        image = self.cam.update_curr_image(self.currSample)
+        image = self.cam.update_curr_image(self.currSample, discard_stale=discard_stale)
         filename = f"{self.cam.currImageName}.jpg"
         file_path = os.path.join(self.bufferDir, filename)
 
@@ -505,6 +506,28 @@ class OpticalModule:
         self.update_image_metadata(True)
 
         return image
+
+    def reset_image_count(self):
+        """Resets the image counter to 0 (start of a new externally-driven capture sequence)."""
+        with self.imageCountLock:
+            self.cam.imageCount = 0
+
+    def capture_scan_image(self):
+        """
+        Captures an image at the current position and advances the image counter.
+        For externally-driven (e.g. SmarAct) scans where the Pi's own motors don't
+        move between points, so update_image()'s normal capture-only behavior would
+        otherwise overwrite the same filename every call.
+
+        discard_stale=True here: SmarAct moves settle much faster than the optical
+        carriage, so consecutive captures can be only ~100ms apart. Picamera2 can
+        hand back an already-queued frame from before the last stop()/start() cycle
+        at that cadence, showing content from a previous point. One throwaway
+        capture_array() flushes that queued frame before the real one is grabbed.
+        """
+        self.update_image(discard_stale=True)
+        with self.imageCountLock:
+            self.cam.imageCount = self.cam.imageCount + 1
 
 
     def random_sampling(self, numImages, saveImages: bool):
@@ -530,8 +553,12 @@ class OpticalModule:
             self.home_all()
 
         # Move carriage to stage center and complete autofocus operation on sample
-        self.go_to(x=STAGECENTRE[0]*STEPDISTXY, y=STAGECENTRE[1]*STEPDISTXY)
-        self.auto_focus()
+        if self.currSample.useSmaractStage:
+            self.go_to(x=SMARACT_CENTRE_X, y=SMARACT_CENTRE_Y, z=SMARACT_FOCUS_Z)
+            self.auto_focus(zMin=SMARACT_FOCUS_Z - 1, zMax=SMARACT_FOCUS_Z + 1, stepSize=0.05)
+        else:
+            self.go_to(x=STAGECENTRE[0]*STEPDISTXY, y=STAGECENTRE[1]*STEPDISTXY)
+            self.auto_focus()
 
         # If the sample is not in position it will have a low focus score
         # (this may need to be changed in the future as clean samples also have a low focus score)
@@ -614,7 +641,8 @@ class OpticalModule:
         if not self.isHomed.is_set() or self.stop.is_set():
             self.home_all()
 
-        # Move carriage to stage center and complete autofocus operation on sample
+        # SmarAct samples never reach exe_scanning (gui.py routes them through
+        # the PC-driven start_smaract_scan instead), so this is module-stage only
         self.go_to(x=STAGECENTRE[0]*STEPDISTXY, y=STAGECENTRE[1]*STEPDISTXY)
         self.auto_focus()
 
@@ -968,12 +996,12 @@ class Camera:
         # Apply the controls to the camera.
         self.picam.set_controls(controls)
 
-    def update_curr_image(self, sample):
+    def update_curr_image(self, sample, discard_stale=False):
         """
         Updates the currImageName and currImage fields of the Camera object
         """
         self.update_image_name(sample)
-        return self.get_image_array(True)
+        return self.get_image_array(True, discard_stale=discard_stale)
 
     def calculate_focus_score(self, imageArray=None, blur=5):
         """
@@ -1001,12 +1029,16 @@ class Camera:
         #print(laplacian.var())
         return laplacian.var()
 
-    def get_image_array(self, updateImage=False) -> any:
+    def get_image_array(self, updateImage=False, discard_stale=False) -> any:
         """
         Captures image from Raspberry Pi camera.
 
         Parameters:
             updateImage: Updates captured image to Camera object currImage field if True
+            discard_stale: throws away one capture_array() read right after start()
+                before taking the real one. Picamera2 can hand back a frame still
+                queued from before the last stop()/start() cycle when captures are
+                fired in quick succession; the throwaway read flushes it.
 
         Returns:
             Captured image as an array
@@ -1015,6 +1047,8 @@ class Camera:
         array = None
         try:
             self.picam.start()
+            if discard_stale:
+                self.picam.capture_array("main")
             array = self.picam.capture_array("main")
 
             if updateImage:
@@ -1179,13 +1213,14 @@ class Sample:
         boundingIsSet: True if bounding box is set for the sample
         currLayer (int): The current layer of the sample (how many polishing steps have been completed)
     """
-    def __init__(self, mountType, sampleID, initialHeight, mmPerLayer, width, height):
+    def __init__(self, mountType, sampleID, initialHeight, mmPerLayer, width, height, useSmaractStage=False):
         self.mountType = mountType
         self.sampleID = sampleID
         self.mmPerLayer = mmPerLayer
         self.sampleHeight = initialHeight
         self.boundingBox = [(0,0), (0,0), (0,0), (0,0)]
         self.boundingIsSet = False
+        self.useSmaractStage = useSmaractStage
         self.set_bounding_box(width, height)
         self.currLayer = 0
 
@@ -1200,9 +1235,13 @@ class Sample:
             List of tuples representing the (x, y) coordinates of the bounding box corners.
             Order: [bottom left, bottom right, top right, top left]
         """
-        # Convert center from steps to mm.
-        center_x_mm = STAGECENTRE[0] * STEPDISTXY
-        center_y_mm = STAGECENTRE[1] * STEPDISTXY
+        # Convert center from steps to mm, or use the SmarAct stage centre.
+        if self.useSmaractStage:
+            center_x_mm = SMARACT_CENTRE_X
+            center_y_mm = SMARACT_CENTRE_Y
+        else:
+            center_x_mm = STAGECENTRE[0] * STEPDISTXY
+            center_y_mm = STAGECENTRE[1] * STEPDISTXY
 
         half_width = width / 2.0
         half_height = height / 2.0

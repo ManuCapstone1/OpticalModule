@@ -22,7 +22,7 @@ class ImageStitcher:
         self.macro_path = macro_path or os.path.join(os.path.expanduser('~'), "Fiji", "macros", "StitchingMacro.ijm")
     
 
-    def run_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id):
+    def run_stitching(self, grid_x, grid_y, input_dir, output_dir, sample_id, compute_overlap=True):
         """
         Run the image stitching macro in Fiji/ImageJ via xvfb-run.
 
@@ -32,9 +32,11 @@ class ImageStitcher:
             input_dir (str): Path to the folder containing input images.
             output_dir (str): Path to the folder where stitched images will be saved.
             sample_id (str): Unique identifier for the current sample (used in naming outputs).
+            compute_overlap (bool): True blends tiles for a seamless look; False keeps
+                exact mechanical grid coordinates (needed for precision click-to-move).
         """
 
-        macro_args = f'{grid_x},{grid_y},{input_dir},{output_dir},{sample_id}'
+        macro_args = f'{grid_x},{grid_y},{input_dir},{output_dir},{sample_id},{int(compute_overlap)}'
 
         print("=" * 60)
         print("FIJI SUBPROCESS LAUNCH")
