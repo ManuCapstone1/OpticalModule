@@ -7,6 +7,13 @@ grid_size_y = parseInt(splitArgs[1]);
 directory = splitArgs[2];
 output_directory = splitArgs[3];
 sample_id = splitArgs[4];
+compute_overlap = parseInt(splitArgs[5]);
+
+// ImageJ checkbox params are a bare keyword when checked, omitted when not
+overlap_flag = "";
+if (compute_overlap == 1) {
+  overlap_flag = "compute_overlap ";
+}
 
 // Setup the Flight Recorder Log
 log_path = output_directory + File.separator + "fiji_log.txt";
@@ -26,7 +33,7 @@ run("Grid/Collection stitching",
   "regression_threshold=0.30 " +
   "max/avg_displacement_threshold=2.50 " +
   "absolute_displacement_threshold=3.50 " +
-  "compute_overlap subpixel_accuracy " +
+  overlap_flag + "subpixel_accuracy " +
   "computation_parameters=[Save computation time (but use more RAM)] " +
   "image_output=[Fuse and display]");
 
