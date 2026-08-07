@@ -13,6 +13,7 @@ import socket
 import math
 from threading import Thread, Lock
 from stage import home_smaract, open_smaract, close_smaract, get_position, move_to_absolute, CHANNEL_X, CHANNEL_Y
+from plane_math import calculate_best_fit_plane, get_corrected_height, compare_planes
 
 # Confocal sensor network settings 
 _CONFOCAL_IP           = "169.254.0.20"
@@ -60,11 +61,12 @@ _SAFE_CLEARANCE_Z_MM = 90.0
 # be smaller than the ~2.6mm-wide valid window so at least one step always lands inside it.
 _AUTOFOCUS_SWEEP_RANGE_MM = 2.0
 _AUTOFOCUS_SWEEP_STEP_MM = 0.5
-# Rough estimates for grid-scan "Est. Duration" readout:
-# ~17 s fixed overhead (auto-focus datum calibration + move to the confocal),
-# then ~3.152 s per measurement point (for a 2 mm x/y step size). Actual time varies with step size.
-_GRID_SCAN_SETUP_S     = 17.0
-_GRID_SCAN_PER_POINT_S = 3.152
+# Bench-measured estimates for grid-scan "Est. Duration" readout:
+# ~21 s fixed overhead to move to the SmarAct and home, common to both stages,
+# then a per-point rate that differs by stage (SmarAct is much faster per point).
+_GRID_SCAN_SETUP_S              = 21.0
+_GRID_SCAN_PER_POINT_S_SMARACT  = 0.4356
+_GRID_SCAN_PER_POINT_S_MODULE   = 3.152
 
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -211,6 +213,23 @@ class MainApp(ctk.CTk):
         self.analysis_selected_indices = []  # indices into measured_data currently highlighted
         self._show_heights_mode = False   # False: labels show point index, True: show measured height
         self.datum_point = None           # (phys_x, phys_y) of Ctrl+RClick datum, or None
+        self._sequence_active = False     # True for the whole duration of a measurement/grid sequence
+
+        # Material Removal tracking: every session (Reference + each Set) collects
+        # its own points and fits its own best-fit plane; consecutive sessions'
+        # plane-corrected points are then compared for material removed.
+        self.material_sessions = {"Reference": []}    # session name -> [(x,y,z), ...] not-yet-baked points
+        self.material_session_names = ["Reference"]   # ordered, grows via "New"
+        self.material_active_session = "Reference"
+        self.material_planes = {"Reference": None}    # session name -> (A,B,C,D) once calculated
+        self.removal_data = {}                        # session name -> [(x,y,corrected_z), ...] from its own plane
+        self._material_drawer_collapsed = True     # closed until the user clicks the arrow to open it
+        self._material_capture_armed = False      # True while "Collect Points" is active
+        self._material_drawer_frame = None
+        self._material_drawer_anchor = None
+        self._material_drawer_grid_column = None
+        self._material_compare_a = None    # session names picked in the "Compare" dropdowns
+        self._material_compare_b = None
 
         # ROI bounding box in canvas pixels (normalized: x0<x1, y0<y1)
         self._roi_canvas_x0 = 0.0
@@ -449,6 +468,12 @@ class MainApp(ctk.CTk):
         # ── Persist state so tab navigation can restore this view ────────────
         self.active_main_view = "stitched"
         self.current_stitched_img_path = img_path
+
+        # This can be entered directly (e.g. the "Image Stitching..." button)
+        # without content_frame having been cleared first, so tear down any
+        # drawer left over from a previous render before rebuilding one below.
+        if self._material_drawer_frame is not None and self._material_drawer_frame.winfo_exists():
+            self._material_drawer_frame.destroy()
 
         grid_x = getattr(self, 'scanning_grid_x', 1)
         grid_y = getattr(self, 'scanning_grid_y', 1)
@@ -764,20 +789,36 @@ class MainApp(ctk.CTk):
             # Reproject ROI grid using the fresh _s transform (zoom / pan safe)
             if (self._roi_active_canvas is canvas
                     and self.roi_phys_x_start is not None):
-                _OVL = 0.20
-                _tw  = stitched_w / (1.0 + (grid_x - 1) * (1.0 - _OVL))
-                _th  = stitched_h / (1.0 + (grid_y - 1) * (1.0 - _OVL))
-                _t0x = _tw / 2.0
-                _t0y = (grid_y - 1) * _th * (1.0 - _OVL) + _th / 2.0
-                _A11, _A12 = -0.001479, 0.000044
-                _A21, _A22 =  0.000018, 0.001459
-                _det = _A11 * _A22 - _A12 * _A21
+                if self._last_stitched_was_smaract and self._smaract_last_grid is not None:
+                    # smaract points live in the smaract's own coordinate frame,
+                    # not the camera/module-stage frame the matrix below assumes
+                    _sg = self._smaract_last_grid
+                    _t0x, _t0y, _nm_per_px_x, _nm_per_px_y = self._smaract_stitched_tile_geometry(
+                        stitched_w, stitched_h, grid_x, grid_y, _sg)
 
-                def _p2c(pm_x, pm_y):
-                    dx = pm_x - scan_origin_x;  dy = pm_y - scan_origin_y
-                    fpx = _t0x + ((-_A22) * dx + _A12 * dy) / _det
-                    fpy = _t0y + ( _A21   * dx - _A11 * dy) / _det
-                    return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
+                    def _p2c(pm_x, pm_y):
+                        x_nm = pm_x * 1_000_000
+                        y_nm = pm_y * 1_000_000
+                        d_px = (x_nm - _sg['start_x_nm']) / _nm_per_px_x
+                        d_py = (_sg['start_y_nm'] - y_nm) / _nm_per_px_y
+                        fpx = _t0x + d_px
+                        fpy = _t0y - d_py
+                        return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
+                else:
+                    _OVL = 0.20
+                    _tw  = stitched_w / (1.0 + (grid_x - 1) * (1.0 - _OVL))
+                    _th  = stitched_h / (1.0 + (grid_y - 1) * (1.0 - _OVL))
+                    _t0x = _tw / 2.0
+                    _t0y = (grid_y - 1) * _th * (1.0 - _OVL) + _th / 2.0
+                    _A11, _A12 = -0.001479, 0.000044
+                    _A21, _A22 =  0.000018, 0.001459
+                    _det = _A11 * _A22 - _A12 * _A21
+
+                    def _p2c(pm_x, pm_y):
+                        dx = pm_x - scan_origin_x;  dy = pm_y - scan_origin_y
+                        fpx = _t0x + ((-_A22) * dx + _A12 * dy) / _det
+                        fpy = _t0y + ( _A21   * dx - _A11 * dy) / _det
+                        return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
 
                 cx0, cy0 = _p2c(self.roi_phys_x_start, self.roi_phys_y_start)
                 cx1, cy1 = _p2c(self.roi_phys_x_end,   self.roi_phys_y_end)
@@ -817,6 +858,8 @@ class MainApp(ctk.CTk):
 
         def _on_click(event):
             if self.module_status != "Idle":
+                return
+            if getattr(self, '_sequence_active', False):
                 return
 
             full_px = (event.x - _s['ox']) / _s['sx']
@@ -998,6 +1041,9 @@ class MainApp(ctk.CTk):
             else:
                 _render()
         _wait_for_geometry()
+
+        # Material Removal drawer: left of the stitched canvas, right of left_frame
+        self._build_material_drawer(self.content_frame, before_widget=self.main_right_frame)
 
     #------------------------------- Pop-up Windows ------------------------------------------#
 
@@ -1557,11 +1603,15 @@ class MainApp(ctk.CTk):
         param_frame = ctk.CTkFrame(self.content_frame, width=300, height=400)
         param_frame.grid(row=0, column=0, sticky="ns", padx=10, pady=10)
 
+        # Material Removal drawer occupies column 1, between the camera params
+        # and the image canvas.
+        self._build_material_drawer(self.content_frame, grid_column=1)
+
         right_frame = ctk.CTkFrame(self.content_frame)
-        right_frame.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        right_frame.grid(row=0, column=2, sticky="nsew", padx=10, pady=10)
 
         # Make the right column expand with the window resizing
-        self.content_frame.grid_columnconfigure(1, weight=1, minsize=200)  # Right column (column 1)
+        self.content_frame.grid_columnconfigure(2, weight=1, minsize=200)  # Image column (column 2)
         self.content_frame.grid_rowconfigure(0, weight=1, minsize=400)  # Row 0 (the row containing the frames)
 
         # Left panel: Camera Parameters
@@ -1669,6 +1719,14 @@ class MainApp(ctk.CTk):
         def _schedule_image_tab_render(e):
             # keep the placeholder text centered even before an image is ever loaded
             self._image_tab_canvas.coords("placeholder_text", e.width / 2, e.height / 2)
+            # A real size change (e.g. the Material Removal drawer opening/closing)
+            # moves where the image itself gets drawn, so cached exact-pixel marker
+            # positions go stale. Drop them so the redraw falls back to the
+            # physics-based transform, which tracks the new canvas size correctly.
+            last_wh = getattr(self, '_image_tab_canvas_last_wh', None)
+            if last_wh != (e.width, e.height):
+                self._image_tab_canvas_last_wh = (e.width, e.height)
+                self._canvas_click_cache.clear()
             if self._canvas_img_path is None:
                 return
             if not self._image_tab_render_pending:
@@ -1780,7 +1838,7 @@ class MainApp(ctk.CTk):
         _analysis_frame = ctk.CTkFrame(row2, fg_color="transparent")
         _analysis_frame.pack(side="left", padx=(8, 5))
 
-        self.analysis_result_var = ctk.StringVar(value="Analysis: Select points...")
+        self.analysis_result_var = ctk.StringVar(value="Analysis:")
         ctk.CTkLabel(_analysis_frame, textvariable=self.analysis_result_var,
                      font=("Arial", 12, "bold"), text_color="#00CFFF",
                      width=260).pack(side="top", pady=(0, 2))
@@ -1898,6 +1956,8 @@ class MainApp(ctk.CTk):
             return
         if self.module_status != "Idle":
             return
+        if getattr(self, '_sequence_active', False):
+            return
 
         # Read the current display geometry directly (same source of truth as
         # _canvas_pixel_to_phys) instead of a value captured once at image-load
@@ -2012,6 +2072,13 @@ class MainApp(ctk.CTk):
                 return
 
             image_path = os.path.normpath(os.path.join(image_folder, image_files[0]))
+            # Only a genuinely new photo means the stage was actually at "now"
+            # when the pixels were captured. A redraw of the SAME image (e.g.
+            # the Material Removal drawer toggling and resizing this canvas)
+            # must NOT re-stamp the physical reference position, or the ROI/
+            # grid box (which is re-projected from that reference on every
+            # redraw) visually drifts away from the still-unchanged image.
+            is_new_image = (image_path != getattr(self, '_canvas_img_path', None))
             self._canvas_img_path = image_path
             img_pil = Image.open(image_path)
 
@@ -2046,16 +2113,20 @@ class MainApp(ctk.CTk):
                 self._canvas_orig_w = img_pil.width
                 self._canvas_orig_h = img_pil.height
                 # Capture hardware position so _phys_to_canvas_pixel has a stable
-                # reference even if the stage moves before the next redraw.
-                self._image_tab_ref_x = float(self.x_pos)
-                self._image_tab_ref_y = float(self.y_pos)
-                # SmarAct samples: points are stored in the SmarAct's own coordinate
-                # frame (see _canvas_pixel_to_phys), not the gantry's, so the redraw
-                # path needs the SmarAct's live position at capture time too.
-                if self.use_smaract_stage and self._smaract_ensure_open():
-                    with self._smaract_lock:
-                        self._image_tab_ref_smaract_x = get_position(self._smaract_handle, CHANNEL_X) / 1_000_000
-                        self._image_tab_ref_smaract_y = get_position(self._smaract_handle, CHANNEL_Y) / 1_000_000
+                # reference even if the stage moves before the next redraw. Only
+                # do this for a genuinely new photo (see is_new_image above) —
+                # re-stamping it on every redraw of the same image is what let
+                # the ROI/grid box drift after the stage moved mid-scan.
+                if is_new_image or not hasattr(self, '_image_tab_ref_x'):
+                    self._image_tab_ref_x = float(self.x_pos)
+                    self._image_tab_ref_y = float(self.y_pos)
+                    # SmarAct samples: points are stored in the SmarAct's own coordinate
+                    # frame (see _canvas_pixel_to_phys), not the gantry's, so the redraw
+                    # path needs the SmarAct's live position at capture time too.
+                    if self.use_smaract_stage and self._smaract_ensure_open():
+                        with self._smaract_lock:
+                            self._image_tab_ref_smaract_x = get_position(self._smaract_handle, CHANNEL_X) / 1_000_000
+                            self._image_tab_ref_smaract_y = get_position(self._smaract_handle, CHANNEL_Y) / 1_000_000
 
                 resized_img = img_pil.resize((new_width, new_height), Image.LANCZOS)
                 self._canvas_img_tk = ImageTk.PhotoImage(resized_img)
@@ -2759,6 +2830,17 @@ class MainApp(ctk.CTk):
         print(f"[custom_pt] point {len(self.custom_measure_points)}: "
               f"({phys_x:.4f} mm, {phys_y:.4f} mm)")
 
+    def _smaract_point_out_of_bounds(self, phys_x, phys_y):
+        """True (and shows the error) if (phys_x, phys_y) falls outside the
+        SmarAct's [-6, 6] mm travel box — only meaningful for a SmarAct-sourced
+        stitched image, where that box is what's actually drawn on screen."""
+        if not (SMARACT_TRAVEL_MIN <= phys_x <= SMARACT_TRAVEL_MAX
+                and SMARACT_TRAVEL_MIN <= phys_y <= SMARACT_TRAVEL_MAX):
+            messagebox.showerror("Out of Bounds",
+                "Height measurements must be taken within the SmarAct's boundary.")
+            return True
+        return False
+
     def _on_stitched_right_click_point(self, event, canvas, _s,
                                        stitched_w, stitched_h,
                                        grid_x, grid_y,
@@ -2794,6 +2876,8 @@ class MainApp(ctk.CTk):
                 grid_params,
             )
             phys_x, phys_y = x_nm / 1_000_000, y_nm / 1_000_000
+            if self._smaract_point_out_of_bounds(phys_x, phys_y):
+                return
         else:
             phys_x, phys_y = self.calculate_stitched_phys_coords(
                 full_px, full_py,
@@ -2887,6 +2971,8 @@ class MainApp(ctk.CTk):
                 grid_params,
             )
             phys_x, phys_y = x_nm / 1_000_000, y_nm / 1_000_000
+            if self._smaract_point_out_of_bounds(phys_x, phys_y):
+                return
         else:
             phys_x, phys_y = self.calculate_stitched_phys_coords(
                 full_px, full_py,
@@ -2910,7 +2996,7 @@ class MainApp(ctk.CTk):
         self.analysis_selected_indices.clear()
         self.datum_point = None
         if hasattr(self, 'analysis_result_var'):
-            self.analysis_result_var.set("Analysis: Select points...")
+            self.analysis_result_var.set("Analysis:")
         self._show_heights_mode = False
         self._safe_btn('_display_heights_btn', text="Display Heights", state="disabled")
         self._safe_btn('_stitch_display_heights_btn', text="Display Heights", state="disabled")
@@ -2952,6 +3038,488 @@ class MainApp(ctk.CTk):
             self._safe_btn(btn_name, state="disabled")
 
         print("[clear] measurement points and ROI grid cleared")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Material Removal drawer: fiducial/session capture plumbing
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _material_clear_pending_clicks(self):
+        """Drop not-yet-measured canvas clicks without touching datum_point/ROI
+        state (unlike _clear_custom_points, which resets the whole tab)."""
+        self.custom_measure_points.clear()
+        self._canvas_click_cache.clear()
+        if self._roi_active_canvas is not None and self._roi_active_canvas.winfo_exists():
+            self._roi_active_canvas.delete("custom_pt")
+
+    def _fire_material_session_callback(self, raw_points):
+        """Called once ANY measurement sequence finishes — a single-point
+        Measure Heights run or a full grid Map Surface scan. If 'Collect
+        Points' is armed, route the raw heights into the active session
+        either way; the drawer doesn't care which UI action produced them."""
+        if self._material_capture_armed:
+            self._on_material_points_measured(raw_points)
+
+    def _material_start_collect(self):
+        """Arm capture mode: right-click points as usual, then click the tab's
+        own Measure Heights button (bottom bar) to add them to the active
+        session — no separate capture button. Only the button itself (not
+        Escape) turns this back off."""
+        self._material_capture_armed = True
+        self._refresh_material_drawer()
+
+    def _material_cancel_collect(self, event=None):
+        """'Stop Collecting' button: discard pending clicks, leave already-saved
+        session points untouched."""
+        self._material_clear_pending_clicks()
+        self._material_capture_armed = False
+        self._refresh_material_drawer()
+
+    def _on_material_points_measured(self, measured_points):
+        """Fired when Measure Heights completes while 'Collect Points' is
+        armed: route this run's raw heights into the active session. Leaves
+        custom_measure_points/canvas markers alone — Measure Heights is a
+        shared button and its normal post-measurement view must stay intact."""
+        session = self.material_active_session
+        valid_pts = [(x, y, z) for (x, y, z) in measured_points if not math.isnan(z)]
+        if len(valid_pts) < len(measured_points):
+            messagebox.showwarning("Sensor Error",
+                "One or more points returned no reading (NaN) and were skipped.")
+        self.material_sessions.setdefault(session, []).extend(valid_pts)
+
+        self._material_capture_armed = False
+        self._refresh_material_drawer()
+        print(f"[material] {len(valid_pts)} point(s) added to session '{session}' via Measure Heights")
+
+    def _material_add_new_set(self):
+        """Append the next 'Set N' session (N = number of sets so far, 1-indexed;
+        'Reference' doesn't count as a set)."""
+        set_num = len(self.material_session_names)
+        name = f"Set {set_num}"
+        self.material_session_names.append(name)
+        self.material_sessions[name] = []
+        self.material_active_session = name
+        self._refresh_material_drawer()
+
+    def _material_delete_set(self):
+        """Delete the active session (not 'Reference'): drops its collected
+        points and any grid map, then falls back to whichever session precedes
+        it. Remaining sets keep their original names/order — no renumbering."""
+        session = self.material_active_session
+        if session == "Reference":
+            return
+        if not messagebox.askyesno("Delete Set",
+                "Are you sure you want to delete the current set?"):
+            return
+        idx = self.material_session_names.index(session)
+        self.material_session_names.pop(idx)
+        self.material_sessions.pop(session, None)
+        self.material_planes.pop(session, None)
+        self.removal_data.pop(session, None)
+        self.material_active_session = self.material_session_names[max(0, idx - 1)]
+        self._refresh_material_drawer()
+
+    def _material_reset_reference(self):
+        """Clear all collected Reference points and any calculated plane.
+        Every Set's stored heights were measured from the current Reference
+        plane as their datum, so they go stale the moment it's cleared."""
+        if not messagebox.askyesno("Reset Reference",
+                "Clear all reference points and reset the reference plane? "
+                "Any sets already calculated were measured from the current plane "
+                "and won't match the new plane."):
+            return
+        self.material_sessions["Reference"] = []
+        self.material_planes["Reference"] = None
+        self.removal_data.pop("Reference", None)
+        self._refresh_material_drawer()
+
+    def _material_reset_points(self):
+        """'Reset Points': clear just the active session's not-yet-calculated
+        points. Leaves any plane already calculated from a prior round alone."""
+        session = self.material_active_session
+        self.material_sessions[session] = []
+        self._refresh_material_drawer()
+
+    def _material_on_session_selected(self, value):
+        self.material_active_session = value
+        self._refresh_material_drawer()
+
+    def _material_calculate_plane(self):
+        """Fit a best-fit plane from the active session's currently collected
+        points (same mechanism for Reference and every Set — more points, e.g.
+        via a grid scan rather than a few single clicks, means a more accurate
+        fit). Reference is the true flat datum (the sample holder's edges);
+        every Set's points are measured FROM that datum plane, not leveled
+        against a plane fit from the set's own points. The points stay in the
+        list afterward (so Re-calculate keeps refitting from everything
+        collected so far) — only "Reset Points" clears them."""
+        session = self.material_active_session
+        is_reference = (session == "Reference")
+        label = "Reference Plane" if is_reference else "Plane"
+
+        if not is_reference and self.material_planes.get("Reference") is None:
+            messagebox.showerror("No Reference Plane",
+                "Calculate the Reference plane before calculating a set's plane.")
+            return
+
+        pts = self.material_sessions.get(session, [])
+        if len(pts) < 3:
+            messagebox.showerror(label, f"{label} needs at least three points")
+            return
+        try:
+            plane = calculate_best_fit_plane(pts)
+        except ValueError as e:
+            messagebox.showerror("Plane Error", str(e))
+            return
+        self.material_planes[session] = plane
+
+        if is_reference:
+            # Reference IS the datum — nothing to measure its own points against.
+            self.removal_data[session] = list(pts)
+        else:
+            # Measure this Set's points from the reference plane as their datum.
+            reference_plane = self.material_planes["Reference"]
+            corrected = []
+            for (x, y, z) in pts:
+                if math.isnan(z):
+                    corrected.append((x, y, float('nan')))
+                    continue
+                corrected.append((x, y, get_corrected_height(x, y, z, reference_plane)))
+            self.removal_data[session] = corrected
+
+        if is_reference:
+            messagebox.showinfo("Reference Plane",
+                "Reference plane formed from selected points. "
+                "Each Set measures its heights from this plane as a datum.")
+        else:
+            messagebox.showinfo("Plane", f"Plane formed for '{session}' from the selected points.")
+        self._refresh_material_drawer()
+
+    def _material_planed_sessions(self):
+        """Sessions (in collection order) that have a calculated plane."""
+        return [name for name in self.material_session_names
+                if self.material_planes.get(name) is not None]
+
+    def _material_compare(self, name_a, name_b):
+        """Compare two sessions' own fitted planes (not their raw stored
+        points -- Reference's own points aren't on the same Z convention as a
+        Set's corrected points, so this is the only comparison that works for
+        ANY pair). Returns (x, y, z_a, z_b, delta) rows, or None if either
+        session has no plane yet or there are no nodes to evaluate at."""
+        plane_a = self.material_planes.get(name_a)
+        plane_b = self.material_planes.get(name_b)
+        if plane_a is None or plane_b is None:
+            return None
+        nodes = self.removal_data.get(name_b) or self.removal_data.get(name_a)
+        if not nodes:
+            return None
+        rows = compare_planes(plane_a, plane_b, nodes)
+        return rows or None
+
+    def _material_set_compare_a(self, value):
+        self._material_compare_a = value
+        self._refresh_material_drawer()
+
+    def _material_set_compare_b(self, value):
+        self._material_compare_b = value
+        self._refresh_material_drawer()
+
+    def _material_write_comparison_csv(self, writer, name_a, name_b, rows):
+        """Shared block writer: plane coefficients for both sides + per-node
+        delta rows. Used by both the single-pair and bulk exports."""
+        for name in (name_a, name_b):
+            a, b, c, d = self.material_planes[name]
+            writer.writerow([f'# {name} Plane Coefficients A,B,C,D',
+                              f"{a:.6f}", f"{b:.6f}", f"{c:.6f}", f"{d:.6f}"])
+        writer.writerow(['Node_X', 'Node_Y', f'{name_a}_Plane_Z', f'{name_b}_Plane_Z',
+                          'Material_Removed_Delta_Z'])
+        for (x, y, za, zb, delta) in rows:
+            writer.writerow([f"{x:.4f}", f"{y:.4f}", f"{za:.4f}", f"{zb:.4f}", f"{delta:.4f}"])
+
+    def _material_export_comparison_csv(self):
+        """Export just the currently-picked Compare pair (any two calculated
+        planes, not just adjacent sessions)."""
+        name_a, name_b = self._material_compare_a, self._material_compare_b
+        rows = self._material_compare(name_a, name_b) if (name_a and name_b) else None
+        if not rows:
+            messagebox.showwarning("Not Ready",
+                "Pick two sessions with a calculated plane to export.")
+            return
+
+        default_name = f"MaterialRemoval_{name_a}_vs_{name_b}_{self.curr_sample_id}.csv".replace(" ", "_")
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv", initialfile=default_name,
+            filetypes=[("CSV files", "*.csv")])
+        if not file_path:
+            return
+        try:
+            with open(file_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['# Material Removal Report'])
+                writer.writerow(['# Sample', self.curr_sample_id])
+                writer.writerow(['# Comparing', name_a, 'vs', name_b])
+                self._material_write_comparison_csv(writer, name_a, name_b, rows)
+            print(f"[material] exported {len(rows)} row(s) to {file_path}")
+            messagebox.showinfo("Export Complete", f"Comparison data saved to:\n{file_path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
+
+    def _material_export_plane_csv(self):
+        """Standalone export of just the active session's own plane
+        coefficients and points -- no comparison involved."""
+        session = self.material_active_session
+        plane = self.material_planes.get(session)
+        if plane is None:
+            messagebox.showwarning("No Plane", "This session doesn't have a calculated plane yet.")
+            return
+
+        default_name = f"Plane_{session}_{self.curr_sample_id}.csv".replace(" ", "_")
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv", initialfile=default_name,
+            filetypes=[("CSV files", "*.csv")])
+        if not file_path:
+            return
+        try:
+            with open(file_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['# Plane Export'])
+                writer.writerow(['# Sample', self.curr_sample_id])
+                writer.writerow(['# Session', session])
+                a, b, c, d = plane
+                writer.writerow(['# Plane Coefficients A,B,C,D',
+                                  f"{a:.6f}", f"{b:.6f}", f"{c:.6f}", f"{d:.6f}"])
+                writer.writerow([])
+                z_label = 'Raw_Z' if session == 'Reference' else 'Corrected_Z'
+                writer.writerow(['Node_X', 'Node_Y', z_label])
+                for (x, y, z) in self.removal_data.get(session, []):
+                    z_str = f"{z:.4f}" if not math.isnan(z) else "NaN"
+                    writer.writerow([f"{x:.4f}", f"{y:.4f}", z_str])
+            messagebox.showinfo("Export Complete", f"Plane data saved to:\n{file_path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
+
+    def _material_export_all_csv(self):
+        """Bulk export: Total Material Removed (Reference vs the most recent
+        Set) plus every consecutive session-to-session comparison, all in one
+        CSV, one click."""
+        planed = self._material_planed_sessions()
+        if len(planed) < 2:
+            messagebox.showwarning("Not Ready", "Need at least two calculated planes to export.")
+            return
+
+        default_name = f"MaterialRemoval_All_{self.curr_sample_id}.csv".replace(" ", "_")
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv", initialfile=default_name,
+            filetypes=[("CSV files", "*.csv")])
+        if not file_path:
+            return
+        try:
+            with open(file_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['# Material Removal Report -- All Comparisons'])
+                writer.writerow(['# Sample', self.curr_sample_id])
+                writer.writerow([])
+
+                set_names = [n for n in planed if n != "Reference"]
+                if "Reference" in planed and set_names:
+                    latest = set_names[-1]
+                    total_rows = self._material_compare("Reference", latest)
+                    if total_rows:
+                        avg = sum(r[4] for r in total_rows) / len(total_rows)
+                        writer.writerow([f'# Total Material Removed (Reference vs {latest})'])
+                        writer.writerow(['# Average Delta Z (mm)', f"{avg:.4f}"])
+                        writer.writerow([])
+
+                for name_a, name_b in zip(planed, planed[1:]):
+                    rows = self._material_compare(name_a, name_b)
+                    if not rows:
+                        continue
+                    writer.writerow([f'# {name_a} vs {name_b}'])
+                    self._material_write_comparison_csv(writer, name_a, name_b, rows)
+                    writer.writerow([])
+            messagebox.showinfo("Export Complete", f"All comparisons saved to:\n{file_path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
+
+    def _material_toggle_drawer(self):
+        self._material_drawer_collapsed = not self._material_drawer_collapsed
+        self._refresh_material_drawer()
+
+    def _build_material_drawer(self, parent, before_widget=None, grid_column=None):
+        """Left-side collapsible 'Material Removal' drawer, shared by the Main
+        (stitched) and Image tabs. Pass before_widget for a pack()-managed parent
+        (Main tab) or grid_column for a grid()-managed parent (Image tab)."""
+        self._material_drawer_anchor = before_widget
+        self._material_drawer_grid_column = grid_column
+
+        width = 26 if self._material_drawer_collapsed else 220
+        outer = ctk.CTkFrame(parent, width=width)
+        if grid_column is not None:
+            outer.grid(row=0, column=grid_column, sticky="ns", padx=(0, 5), pady=10)
+            outer.grid_propagate(False)
+        else:
+            pack_kw = dict(side=ctk.LEFT, fill='y', padx=(0, 5))
+            if before_widget is not None:
+                outer.pack(before=before_widget, **pack_kw)
+            else:
+                outer.pack(**pack_kw)
+            outer.pack_propagate(False)
+        self._material_drawer_frame = outer
+
+        header = ctk.CTkFrame(outer, fg_color="transparent")
+        header.pack(side=ctk.TOP, fill='x', pady=(5, 0), padx=3)
+        toggle_txt = "»" if self._material_drawer_collapsed else "«"
+        ctk.CTkButton(header, text=toggle_txt, width=24,
+                      command=self._material_toggle_drawer).pack(side=ctk.RIGHT)
+        if not self._material_drawer_collapsed:
+            ctk.CTkLabel(header, text="Material Removal",
+                         font=("Arial", 13, "bold")).pack(side=ctk.LEFT, padx=(2, 0))
+
+        if self._material_drawer_collapsed:
+            return outer   # body hidden; only the toggle strip shows
+
+        body = ctk.CTkFrame(outer, fg_color="transparent")
+        body.pack(side=ctk.TOP, fill='both', expand=True, padx=5, pady=5)
+
+        # Session selector, all in one line: "Set X", "New", "Delete"/"Reset"
+        sess_row = ctk.CTkFrame(body, fg_color="transparent")
+        sess_row.pack(side=ctk.TOP, fill='x', pady=(0, 5))
+        session_menu = ctk.CTkOptionMenu(
+            sess_row, values=list(self.material_session_names),
+            command=self._material_on_session_selected, width=85)
+        session_menu.set(self.material_active_session)
+        session_menu.pack(side=ctk.LEFT)
+        ctk.CTkButton(sess_row, text="New", fg_color="#2E8B57", width=45,
+                      command=self._material_add_new_set).pack(side=ctk.LEFT, padx=(4, 0))
+        if self.material_active_session == "Reference":
+            ctk.CTkButton(sess_row, text="Reset", fg_color="#8B2E2E", width=55,
+                          command=self._material_reset_reference).pack(side=ctk.LEFT, padx=(4, 0))
+        else:
+            ctk.CTkButton(sess_row, text="Delete", fg_color="#8B2E2E", width=55,
+                          command=self._material_delete_set).pack(side=ctk.LEFT, padx=(4, 0))
+
+        # Collect / cancel toggle
+        collect_btn = ctk.CTkButton(
+            body,
+            text="Stop Collecting" if self._material_capture_armed else "Collect Points",
+            fg_color="#B33A3A" if self._material_capture_armed else "#1f6aa5",
+            command=(self._material_cancel_collect if self._material_capture_armed
+                     else self._material_start_collect))
+        collect_btn.pack(side=ctk.TOP, fill='x', pady=(0, 8))
+
+        # Collected points for the active session
+        ctk.CTkLabel(body, text="Points:",
+                     font=("Arial", 11, "bold")).pack(side=ctk.TOP, anchor="w")
+        list_wrap = ctk.CTkFrame(body, fg_color="#2b2b2b", corner_radius=8)
+        list_wrap.pack(side=ctk.TOP, fill='both', expand=True, pady=(2, 8))
+        listbox = tk.Listbox(list_wrap, bg="#2b2b2b", fg="white",
+                              highlightthickness=0, borderwidth=0, font=("Arial", 10))
+        # Inset from list_wrap's edges so its rounded corners stay visible
+        # instead of being covered by the listbox's own square corners.
+        listbox.pack(fill='both', expand=True, padx=3, pady=3)
+        for i, (x, y, z) in enumerate(self.material_sessions.get(self.material_active_session, [])):
+            listbox.insert("end", f"{i}. ({x:.4f}, {y:.4f}, {z:.4f})")
+
+        # Analysis: always-open sub-section (Total Material Removed / Compare /
+        # Export All) -- no toggle, can't be collapsed. The card is grey,
+        # matching the Points listbox background.
+        analysis_card = ctk.CTkFrame(body, fg_color="#2f2f2f", corner_radius=6)
+        analysis_card.pack(side=ctk.TOP, fill='x', pady=(0, 8))
+
+        analysis_header = ctk.CTkFrame(analysis_card, fg_color="transparent")
+        analysis_header.pack(side=ctk.TOP, fill='x', pady=(5, 0), padx=3)
+        ctk.CTkLabel(analysis_header, text="Analysis",
+                     font=("Arial", 13, "bold")).pack(side=ctk.LEFT, padx=(2, 0))
+
+        analysis_body = ctk.CTkFrame(analysis_card, fg_color="transparent")
+        analysis_body.pack(side=ctk.TOP, fill='x', padx=8, pady=(6, 8))
+
+        planed = self._material_planed_sessions()
+
+        if len(planed) < 2:
+            ctk.CTkLabel(analysis_body, text="Measure at least two planes before analysis.",
+                         font=("Arial", 11, "italic"), text_color="gray",
+                         wraplength=190, justify="left").pack(side=ctk.TOP, anchor="w")
+
+        # Compare: pick any two calculated planes, not just adjacent sessions
+        if len(planed) >= 2:
+            if self._material_compare_a not in planed:
+                self._material_compare_a = planed[0]
+            if self._material_compare_b not in planed:
+                self._material_compare_b = planed[-1]
+
+            cmp_row = ctk.CTkFrame(analysis_body, fg_color="transparent")
+            cmp_row.pack(side=ctk.TOP, fill='x', pady=(0, 4))
+            a_menu = ctk.CTkOptionMenu(cmp_row, values=planed, width=80,
+                                       command=self._material_set_compare_a)
+            a_menu.set(self._material_compare_a)
+            a_menu.pack(side=ctk.LEFT)
+            ctk.CTkLabel(cmp_row, text="vs").pack(side=ctk.LEFT, padx=4)
+            b_menu = ctk.CTkOptionMenu(cmp_row, values=planed, width=80,
+                                       command=self._material_set_compare_b)
+            b_menu.set(self._material_compare_b)
+            b_menu.pack(side=ctk.LEFT)
+
+            rows = self._material_compare(self._material_compare_a, self._material_compare_b)
+            if rows:
+                delta_zs = [r[4] for r in rows]
+                ctk.CTkLabel(analysis_body, text=f"Max Removed: {max(delta_zs):.4f} mm",
+                             font=("Arial", 11, "bold"), text_color="white").pack(side=ctk.TOP, anchor="w")
+                ctk.CTkLabel(analysis_body, text=f"Avg Removed: {sum(delta_zs) / len(delta_zs):.4f} mm",
+                             font=("Arial", 11, "bold"), text_color="white").pack(side=ctk.TOP, anchor="w")
+
+                # Total Removed: headline stat, Reference vs whichever Set was
+                # calculated most recently. Same top padding as Avg Removed's
+                # (none) had above Max Removed, so the gaps read as identical.
+                set_names = [n for n in planed if n != "Reference"]
+                if "Reference" in planed and set_names:
+                    latest = set_names[-1]
+                    total_rows = self._material_compare("Reference", latest)
+                    if total_rows:
+                        total_avg = sum(r[4] for r in total_rows) / len(total_rows)
+                        ctk.CTkLabel(analysis_body, text=f"Total Removed: {total_avg:.4f} mm",
+                                     font=("Arial", 11, "bold"), text_color="white").pack(
+                                     side=ctk.TOP, anchor="w")
+
+                ctk.CTkButton(analysis_body, text="Export Comparison", fg_color="#555555",
+                              command=self._material_export_comparison_csv).pack(side=ctk.TOP, fill='x', pady=(4, 8))
+
+            ctk.CTkButton(analysis_body, text="Export All", fg_color="#1f6aa5",
+                          command=self._material_export_all_csv).pack(side=ctk.TOP, fill='x')
+
+        # Plane calculation: same mechanism for Reference and every Set. No
+        # count gate on the button itself: clicking with < 3 points is how the
+        # "needs at least three points" error (and points reset) gets triggered.
+        is_reference = (self.material_active_session == "Reference")
+        plane_exists = self.material_planes.get(self.material_active_session) is not None
+        if is_reference:
+            calc_text = "Re-calculate Reference Plane" if plane_exists else "Calculate Reference Plane"
+        else:
+            calc_text = "Re-calculate Plane" if plane_exists else "Calculate Plane"
+        ctk.CTkButton(
+            body, text=calc_text, fg_color="#7B2FBE",
+            command=self._material_calculate_plane).pack(side=ctk.TOP, fill='x')
+
+        if plane_exists:
+            ctk.CTkLabel(body, text="Plane Created", text_color="#00FF88").pack(side=ctk.TOP, pady=(4, 0))
+            ctk.CTkButton(body, text="Export Plane CSV", fg_color="#555555",
+                          command=self._material_export_plane_csv).pack(side=ctk.TOP, fill='x', pady=(2, 0))
+
+        ctk.CTkButton(body, text="Reset Points", fg_color="#555555",
+                      command=self._material_reset_points).pack(side=ctk.TOP, fill='x', pady=(4, 0))
+
+        return outer
+
+    def _refresh_material_drawer(self):
+        """Rebuild the drawer in place, preserving whichever tab/position it's
+        currently mounted at."""
+        frame = self._material_drawer_frame
+        if frame is None or not frame.winfo_exists():
+            return
+        parent = frame.master
+        before = self._material_drawer_anchor
+        grid_col = self._material_drawer_grid_column
+        frame.destroy()
+        self._build_material_drawer(parent, before_widget=before, grid_column=grid_col)
 
     def load_csv_points(self):
         """Bulk-load measurement points from a CSV (Site, X_mm, Y_mm, ...).
@@ -3178,7 +3746,7 @@ class MainApp(ctk.CTk):
         sel = self.analysis_selected_indices
         n_sel = len(sel)
         if n_sel == 0:
-            text = "Analysis: Select points..."
+            text = "Analysis:"
         elif n_sel == 1:
             h = self.measured_data[sel[0]][2]
             text = f"Height: {h:.4f} mm"
@@ -3306,6 +3874,9 @@ class MainApp(ctk.CTk):
                      '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
                      '_stitch_map_surface_btn'):
             self._safe_btn(_btn, state="disabled")
+        # Click-to-move must stay off for the whole sequence, not just while the
+        # RPi reports non-Idle (it can go Idle mid-sequence between move/read steps)
+        self._sequence_active = True
 
         # Preserve optimised order so _process_measurement_results can pair
         # each height with the correct physical coordinate.
@@ -3316,11 +3887,21 @@ class MainApp(ctk.CTk):
         else:
             self._begin_autofocus_datum(offset_route)
 
-    def _update_scan_progress_dot(self, phys_x, phys_y):
+    def _update_scan_progress_dot(self, index):
         """Move (or create) the live orange dot marking the grid node currently being
         measured. Only active during a grid (Map Surface) scan, not individual custom
-        points. No-ops quietly if the canvas active when the grid was drawn isn't on
-        screen right now (e.g. user tabbed away) or a coordinate can't be resolved."""
+        points.
+
+        Deliberately does NOT run its own phys->pixel transform (that's what the
+        earlier version did, and it could land a few px off the actual node due to
+        independent rounding vs _roi_redraw_grid's own pixel math). Instead this
+        reuses _roi_redraw_grid's exact interpolation formula and the exact same
+        self._roi_canvas_x0/y0/x1/y1 + map_grid_x/y it draws the nodes from, so the
+        dot is mathematically guaranteed to land exactly on the node's center.
+
+        index is the point's position in the grid scan's route (see
+        start_surface_map's snake_route). No-ops quietly if the canvas active when
+        the grid was drawn isn't on screen right now (e.g. user tabbed away)."""
         if getattr(self, '_sequence_mode', 'custom') != "grid":
             return
 
@@ -3328,42 +3909,19 @@ class MainApp(ctk.CTk):
         canvas = getattr(self, '_stitched_canvas' if is_stitched else '_image_tab_canvas', None)
         if canvas is None or not canvas.winfo_exists():
             return
-        cw, ch = canvas.winfo_width(), canvas.winfo_height()
-
-        if is_stitched:
-            grid_x = getattr(self, 'scanning_grid_x', 1)
-            grid_y = getattr(self, 'scanning_grid_y', 1)
-            stitched_w = getattr(self, '_stitch_img_w', cw)
-            stitched_h = getattr(self, '_stitch_img_h', ch)
-            if self._last_stitched_was_smaract:
-                grid_params = self._smaract_last_grid
-                if grid_params is None:
-                    return
-                cx, cy = self.calculate_smaract_phys_to_stitched_pixel_coords(
-                    phys_x, phys_y, stitched_w, stitched_h, grid_x, grid_y, grid_params, cw, ch)
-            else:
-                step_x = self.scanning_data.get('step_x', 1.0)
-                step_y = self.scanning_data.get('step_y', 1.0)
-                scan_end_x = getattr(self, 'scan_end_x', 0.0)
-                scan_end_y = getattr(self, 'scan_end_y', 0.0)
-                scan_origin_x = scan_end_x - (grid_x - 1) * step_x
-                scan_origin_y = scan_end_y - (grid_y - 1) * step_y
-                cx, cy = self.calculate_phys_to_stitched_pixel_coords(
-                    phys_x, phys_y, stitched_w, stitched_h, grid_x, grid_y,
-                    scan_origin_x, scan_origin_y, cw, ch)
-        else:
-            if self.use_smaract_stage:
-                ref_x = getattr(self, '_image_tab_ref_smaract_x', None)
-                ref_y = getattr(self, '_image_tab_ref_smaract_y', None)
-            else:
-                ref_x = getattr(self, '_image_tab_ref_x', float(self.x_pos))
-                ref_y = getattr(self, '_image_tab_ref_y', float(self.y_pos))
-            if ref_x is None or ref_y is None:
-                return
-            cx, cy = self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, cw, ch)
-
-        if cx is None:
+        if not (self._roi_active_canvas is canvas and self.roi_phys_x_start is not None):
             return
+
+        nx = max(2, self.map_grid_x)
+        ny = max(2, self.map_grid_y)
+        row, pos_in_row = divmod(index, nx)
+        # odd rows were swept in reverse (snake/boustrophedon route order)
+        col = pos_in_row if row % 2 == 0 else (nx - 1 - pos_in_row)
+
+        x0, y0 = self._roi_canvas_x0, self._roi_canvas_y0
+        x1, y1 = self._roi_canvas_x1, self._roi_canvas_y1
+        cx = x0 + col * (x1 - x0) / (nx - 1)
+        cy = y0 + row * (y1 - y0) / (ny - 1)
 
         R = 5  # a bit bigger than the grid's own node dots (DOT_R=3)
         if self._scan_progress_dot_id is not None and canvas is self._scan_progress_dot_canvas:
@@ -3417,7 +3975,7 @@ class MainApp(ctk.CTk):
             def _on_complete():
                 # X/Y move is done, about to settle then measure Z: move the active
                 # scan indicator to this node
-                self._update_scan_progress_dot(target_x, target_y)
+                self._update_scan_progress_dot(index)
                 self.after(_SETTLING_DELAY_MS, lambda: self._sequence_fire_sensor_read(route, index, results))
 
             def _on_error():
@@ -3455,8 +4013,7 @@ class MainApp(ctk.CTk):
 
         # X/Y move is done, about to settle then measure Z: move the active scan
         # indicator to this node
-        target_x, target_y = route[index]
-        self._update_scan_progress_dot(target_x, target_y)
+        self._update_scan_progress_dot(index)
 
         # Insert a mandatory settling delay before measuring.  The motor controller
         # reports "Idle" when the servo encoder is within dead-band, but the physical
@@ -3544,22 +4101,42 @@ class MainApp(ctk.CTk):
         and action buttons are already disabled (a drop-in replacement for the
         final self._sequence_measure_point(route, 0, []) call in each launcher."""
         if self.use_smaract_stage:
-            # SmarAct samples: the confocal parks over the fixed SmarAct puck
-            # location instead of a ROI-drawn datum point.
-            datum_x, datum_y = SMARACT_CONFOCAL_PARK_X, SMARACT_CONFOCAL_PARK_Y
-        else:
-            datum_x = self.datum_point[0] + _CONFOCAL_DX
-            datum_y = self.datum_point[1] + _CONFOCAL_DY
-            if datum_x < 0 or datum_y < 0:
-                messagebox.showerror(
-                    "Cannot Reach Datum",
-                    f"Auto-focus aborted: the datum plus confocal offset requires the stage "
-                    f"to move to ({datum_x:.4f}, {datum_y:.4f}) mm, which exceeds the "
-                    f"hardware limit (0 mm)."
-                )
+            # SmarAct samples: the confocal is fixed at the puck's park position —
+            # it's the SAMPLE that has to move (via the SmarAct stage) so the
+            # user-picked datum point ends up underneath it, before the module
+            # carriage parks there and the Z-sweep calibrates against it. Without
+            # this move the sweep runs wherever the SmarAct last happened to be
+            # sitting, which is very likely not over any sample surface at all.
+            datum_x_nm = round(self.datum_point[0] * 1_000_000)
+            datum_y_nm = round(self.datum_point[1] * 1_000_000)
+
+            def _on_smaract_datum_error():
                 self._close_confocal_socket()
                 self._sequence_unlock_buttons()
-                return
+
+            def _on_smaract_at_datum():
+                print(f"[autofocus] SmarAct at datum ({self.datum_point[0]:.4f}, "
+                      f"{self.datum_point[1]:.4f}) mm — parking confocal carriage")
+                self._autofocus_raise_z(route, SMARACT_CONFOCAL_PARK_X, SMARACT_CONFOCAL_PARK_Y)
+
+            print(f"[autofocus] moving SmarAct to datum ({self.datum_point[0]:.4f}, "
+                  f"{self.datum_point[1]:.4f}) mm before confocal calibration")
+            self._smaract_move_to(datum_x_nm, datum_y_nm,
+                                   on_complete=_on_smaract_at_datum, on_error=_on_smaract_datum_error)
+            return
+
+        datum_x = self.datum_point[0] + _CONFOCAL_DX
+        datum_y = self.datum_point[1] + _CONFOCAL_DY
+        if datum_x < 0 or datum_y < 0:
+            messagebox.showerror(
+                "Cannot Reach Datum",
+                f"Auto-focus aborted: the datum plus confocal offset requires the stage "
+                f"to move to ({datum_x:.4f}, {datum_y:.4f}) mm, which exceeds the "
+                f"hardware limit (0 mm)."
+            )
+            self._close_confocal_socket()
+            self._sequence_unlock_buttons()
+            return
         print(f"[autofocus] datum target ({datum_x:.4f}, {datum_y:.4f}) mm — "
               f"starting auto-focus calibration")
         self._autofocus_raise_z(route, datum_x, datum_y)
@@ -3739,6 +4316,18 @@ class MainApp(ctk.CTk):
         # each height is paired with the correct physical coordinate.
         ordered_points = getattr(self, '_optimized_route', self.custom_measure_points)
 
+        # Raw (absolute) heights, kept separate from the datum-relative
+        # measured_data below: the datum node moves between runs (a fresh grid
+        # pick, or none at all for custom points), so material-plane fitting/
+        # correction needs the same absolute Z frame across every session, not
+        # whatever local datum happened to be active for a given run.
+        raw_points_all = []
+        for (px, py), h in zip(ordered_points, results):
+            if h < -90.0 or math.isnan(h) or abs(h) < 0.000001:
+                raw_points_all.append((px, py, float('nan')))
+            else:
+                raw_points_all.append((px, py, h))
+
         # ── Persist measurement data for analysis mode ────────────────────────
         # Subtract datum Z so every height is relative to the datum. applies to
         # both custom-points scans and grid scans (grid scans always have a valid
@@ -3761,7 +4350,7 @@ class MainApp(ctk.CTk):
                 self.measured_data.append((px, py, h - datum_z))
         self.analysis_selected_indices = []
         if hasattr(self, 'analysis_result_var'):
-            self.analysis_result_var.set("Analysis: Select points...")
+            self.analysis_result_var.set("Analysis:")
 
         # ── Draw height values directly above each marker on the canvas ───────
         canvas = self._roi_active_canvas
@@ -3855,7 +4444,10 @@ class MainApp(ctk.CTk):
             a surface, so that branch only ever gets a Close button)."""
             popup = ctk.CTkToplevel(self)
             popup.title("Scan Complete")
-            popup.geometry("450x200")
+            # Grid scans get a second (Gwyddion) button on the same row, but the
+            # window height doesn't depend on that -- the individual-points case
+            # was reusing the grid size and left empty space at the bottom.
+            popup.geometry("450x200" if is_grid else "450x150")
             popup.attributes("-topmost", True)
             popup.grab_set()   # focus lock
 
@@ -3934,6 +4526,9 @@ class MainApp(ctk.CTk):
         self.module_status = "Changing Position"
         self.status_lockout_time = time.time() + 2.0
 
+        # Material Removal drawer hook: deliver heights if a session capture is pending
+        self._fire_material_session_callback(raw_points_all)
+
         self.after(100, self._sequence_unlock_buttons)
 
     def _sequence_unlock_buttons(self):
@@ -3948,6 +4543,9 @@ class MainApp(ctk.CTk):
 
         # scan is over (done or aborted): hide the active-node dot
         self._clear_scan_progress_dot()
+
+        # Sequence is fully done: click-to-move is safe again
+        self._sequence_active = False
 
         print("[sequence] origin reached — unlocking action buttons")
         # Re-enable whichever tab's buttons are currently in the widget tree
@@ -4077,10 +4675,10 @@ class MainApp(ctk.CTk):
         total  = nx * ny
         area_x = cell_x * (nx - 1)
         area_y = cell_y * (ny - 1)
-        # Rough calibration from bench timing: ~17 s fixed overhead (auto-focus
-        # datum + move to confocal) plus ~3.152 s per measurement point (measured
-        # at a 2 mm x/y step size).
-        est_s  = _GRID_SCAN_SETUP_S + total * _GRID_SCAN_PER_POINT_S
+        # Bench calibration: ~21 s fixed overhead (move to the SmarAct + home)
+        # plus a per-point rate that differs by stage (see constants above).
+        per_point_s = _GRID_SCAN_PER_POINT_S_SMARACT if self.use_smaract_stage else _GRID_SCAN_PER_POINT_S_MODULE
+        est_s  = _GRID_SCAN_SETUP_S + total * per_point_s
         self._roi_info_area.set(f"Total Area: {area_x:.3f} × {area_y:.3f} mm")
         self._roi_info_count.set(f"Total Points: {total}")
         self._roi_info_time.set(f"Est. Duration: ~{est_s:.1f} s")
@@ -4165,6 +4763,11 @@ class MainApp(ctk.CTk):
         """
         if not self._roi_pan_active:
             return
+
+        # Moving/resizing the grid invalidates any index/height labels drawn
+        # from a previous scan at the grid's old position — drop them rather
+        # than leave them stuck pointing at nodes that no longer exist there.
+        canvas.delete("measurement_text")
 
         # ── MOVE ─────────────────────────────────────────────────────────────
         if self._roi_mode == "move":
@@ -4464,7 +5067,8 @@ class MainApp(ctk.CTk):
         total  = nx * ny
         area_x = cell_x * (nx - 1)
         area_y = cell_y * (ny - 1)
-        est_s  = _GRID_SCAN_SETUP_S + total * _GRID_SCAN_PER_POINT_S
+        per_point_s = _GRID_SCAN_PER_POINT_S_SMARACT if self.use_smaract_stage else _GRID_SCAN_PER_POINT_S_MODULE
+        est_s  = _GRID_SCAN_SETUP_S + total * per_point_s
         self._stitch_roi_info_area.set(f"Total Area: {area_x:.3f} × {area_y:.3f} mm")
         self._stitch_roi_info_count.set(f"Total Points: {total}")
         self._stitch_roi_info_time.set(f"Est. Duration: ~{est_s:.1f} s")
@@ -4579,6 +5183,10 @@ class MainApp(ctk.CTk):
         """
         if not self._roi_pan_active:
             return
+
+        # Moving/resizing the grid invalidates any index/height labels drawn
+        # from a previous scan at the grid's old position.
+        canvas.delete("measurement_text")
 
         if self._roi_mode == "move":
             if self._roi_pan_start is None:
@@ -4865,6 +5473,7 @@ class MainApp(ctk.CTk):
                      '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
                      '_stitch_map_surface_btn'):
             self._safe_btn(_btn, state="disabled")
+        self._sequence_active = True
 
         print(f"[surface_map] Grid {nx}×{ny} = {len(offset_route)} pts  "
               f"origin ({self._sequence_origin_x:.4f}, {self._sequence_origin_y:.4f}) mm  "
@@ -4989,6 +5598,7 @@ class MainApp(ctk.CTk):
                      '_stitch_measure_heights_btn', '_stitch_clear_points_btn',
                      '_stitch_map_surface_btn'):
             self._safe_btn(_btn, state="disabled")
+        self._sequence_active = True
 
         print(f"[surface_map_stitched] Grid {nx}×{ny} = {len(offset_route)} pts  "
               f"origin ({self._sequence_origin_x:.4f}, {self._sequence_origin_y:.4f}) mm  "
@@ -5186,9 +5796,17 @@ class MainApp(ctk.CTk):
 
         #Display sititched image
         stitched_img_path = f"{self.buffer_stitching_folder}/stitched_{self.curr_sample_id}.jpg"
-        self.complete_image_btn = ctk.CTkButton(button_frame, text="Image Stitching...", fg_color="green", width=150, height=30,
-                                                state="disabled",
-                                                command=lambda: self.after(10, lambda: self.display_stitched_inline(stitched_img_path)))
+        # Stitching may have already finished while the user was on another
+        # tab (this layout gets rebuilt fresh every time Main is revisited) --
+        # reflect that immediately instead of always starting back at
+        # "Image Stitching..." / disabled regardless of true progress.
+        _stitched_ready = os.path.exists(stitched_img_path)
+        self.complete_image_btn = ctk.CTkButton(
+            button_frame,
+            text="Open Completed Image" if _stitched_ready else "Image Stitching...",
+            fg_color="green", width=150, height=30,
+            state="normal" if _stitched_ready else "disabled",
+            command=lambda: self.after(10, lambda: self.display_stitched_inline(stitched_img_path)))
         self.complete_image_btn.pack(side=ctk.LEFT, expand=True, padx=5, pady=1)
 
         #Finish button - creates new folder with time stamp, and transfers images from buffer to complete
@@ -5455,8 +6073,10 @@ class MainApp(ctk.CTk):
             except Exception as e:
                 print(f"Failed to load image {img_path}: {e}")
 
-        # All tiles loaded: unlock the stitched-image button
-        self.complete_image_btn.configure(state="normal")
+        # All tiles loaded: unlock the stitched-image button. Guarded: this
+        # keeps firing on its .after() schedule even if the user has since
+        # navigated off the Main tab and this button no longer exists.
+        self._safe_btn('complete_image_btn', state="normal")
 
 
     # --------------------------- Appearance Functions --------------------------- #
@@ -5943,7 +6563,18 @@ class MainApp(ctk.CTk):
                 os.remove(_stale_stitched)
 
             self.start_stitching(self.scanning_grid_x, self.scanning_grid_y, self.buffer_stitching_folder, self.buffer_stitching_folder, self.curr_sample_id)
-            self.display_scanning_layout(self.scanning_grid_x, self.scanning_grid_y, self.main_right_frame)
+
+            # Only rebuild the live scanning-layout UI if Main's "scanning" view
+            # is actually the one on screen right now. This runs on every status
+            # poll regardless of which tab the user is looking at, and
+            # main_right_frame gets destroyed the moment they switch away from
+            # Main -- rebuilding against a destroyed frame raised here, which
+            # left scanning_state stuck at 2 forever (re-spawning a new
+            # start_stitching() thread on every subsequent poll) until the user
+            # revisited Main tab and happened to provide a fresh frame.
+            _mrf = getattr(self, 'main_right_frame', None)
+            if self.active_main_view == "scanning" and _mrf is not None and _mrf.winfo_exists():
+                self.display_scanning_layout(self.scanning_grid_x, self.scanning_grid_y, _mrf)
 
             self.scanning_state = 3
         
