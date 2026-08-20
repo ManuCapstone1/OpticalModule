@@ -11,6 +11,7 @@ import csv
 import shutil
 import socket
 import math
+import io
 from threading import Thread, Lock
 from stage import home_smaract, open_smaract, close_smaract, get_position, move_to_absolute, CHANNEL_X, CHANNEL_Y
 from plane_math import calculate_best_fit_plane, get_corrected_height, compare_planes
@@ -20,15 +21,18 @@ _CONFOCAL_IP           = "169.254.0.20"
 _CONFOCAL_PORT         = 24685
 _CONFOCAL_TIMEOUT      = 2.0
 
-# SmarAct stage: fixed position for the optical to park above the SmarAct 
-SMARACT_PARK_X = 6.401500875
-SMARACT_PARK_Y = 201.070744875
-SMARACT_PARK_Z = 70.0
+# SmarAct stage: fixed position for the optical to park above the SmarAct
+# Updated to the SmarAct's new focus location; the confocal focus Z below is
+# re-derived from the same fixed 3.0278mm camera-to-confocal offset so the
+# delta between them (and everything else computed from these) is unchanged.
+SMARACT_PARK_X = 2.0
+SMARACT_PARK_Y = 200.779165125
+SMARACT_PARK_Z = 48.0
 # confocal's own ideal Z for a zero-height SmarAct sample, derived empirically:
-# 70.0 (SMARACT_PARK_Z) - 3.0278 (confocal reading, bare stage, no sample) = 66.9722
+# 48.0 (SMARACT_PARK_Z) - 3.0278 (confocal reading, bare stage, no sample) = 44.9722
 # distinct from SMARACT_PARK_Z, which is calibrated for the camera's focus, not
 # the confocal's ~15mm standoff -- the two sensors sit at different heights on the assembly
-SMARACT_CONFOCAL_FOCUS_Z = 66.9722
+SMARACT_CONFOCAL_FOCUS_Z = 44.9722
 # Settling delay: time (ms) to wait after the motor controller reports "Idle" before triggering a measurement.
 _SETTLING_DELAY_MS     = 275
 # piezo stage still rings briefly after the controller reports target-reached.
@@ -1704,6 +1708,12 @@ class MainApp(ctk.CTk):
                                             command=lambda: [self.empty_folder_rpi()])
         empty_buffer_rpi_btn.pack(side="left", padx=10, fill='x', expand=True)
 
+        # Save exactly what's rendered on the canvas right now (image + any
+        # overlays -- markers, ROI grid, labels), not the full-res source photo
+        download_canvas_btn = ctk.CTkButton(button_frame, text="Download Canvas Image", font=("Arial", 16), fg_color="#555555",
+                                            command=self.save_canvas_image)
+        download_canvas_btn.pack(side="left", padx=10, fill='x', expand=True)
+
         # Image canvas (replaces CTkLabel to support Region of Interest rectangle overlay
         self._image_tab_canvas = tk.Canvas(right_frame, bg="#2b2b2b", highlightthickness=0, cursor="arrow")
         self._image_tab_canvas.pack(expand=True, fill='both', pady=(20, 5))
@@ -1738,7 +1748,14 @@ class MainApp(ctk.CTk):
         coord_strip = ctk.CTkFrame(right_frame, fg_color="transparent", height=20)
         coord_strip.pack(fill='x', padx=15, pady=(0, 5))
 
-        ctk.CTkLabel(coord_strip, text="Live Position: ", font=("Arial", 12, "bold")).pack(side="left")
+        # Which stage the X/Y readout below is actually showing -- otherwise
+        # there's no way to tell SmarAct coordinates from Module ones at a
+        # glance. Kept updated in send_sample_data when the stage selection
+        # changes without a full Image tab rebuild.
+        self._image_tab_stage_var = ctk.StringVar(
+            value="SmarAct: " if self.use_smaract_stage else "Module: ")
+        ctk.CTkLabel(coord_strip, textvariable=self._image_tab_stage_var,
+                     font=("Arial", 12, "bold")).pack(side="left")
         ctk.CTkLabel(coord_strip, text="X:").pack(side="left", padx=(10, 2))
         # X/Y textvariable swaps to the SmarAct's own live position when a SmarAct
         # sample is active (see send_sample_data); Z always stays the optical
@@ -3522,9 +3539,15 @@ class MainApp(ctk.CTk):
         self._build_material_drawer(parent, before_widget=before, grid_column=grid_col)
 
     def load_csv_points(self):
-        """Bulk-load measurement points from a CSV (Site, X_mm, Y_mm, ...).
+        """Bulk-load measurement points from a CSV (M|S, X_mm, Y_mm, ...).
         Independent of any stitched scan: Site 0 becomes the datum point,
-        every other row is appended to custom_measure_points."""
+        every other row is appended to custom_measure_points.
+
+        The header's first cell (formerly just the label "Site") is now the
+        stage selector for the WHOLE file: 'M' = Module (optical) stage, 'S' =
+        SmarAct. Nothing in this app can switch stages mid-sequence, so it's
+        a single file-level choice, not a per-row one. Anything other than
+        'M' or 'S' there defaults to the Module stage."""
         # Placeholder stage travel limits. adjust STAGE_MAX_X/Y once the actual
         # hardware travel range is known. Only a lower bound (0 mm) is enforced
         # elsewhere in this file today; this is the first upper-bound check.
@@ -3543,16 +3566,32 @@ class MainApp(ctk.CTk):
                 reader = csv.reader(f)
                 header = next(reader, None)
 
-                # Validate only the first three columns. extra trailing columns
-                # (e.g. Z_mm, Height_mm) are accepted and simply ignored below.
+                # Validate only the last two of the first three columns. the
+                # first cell used to have to say "Site" -- now it's the stage
+                # selector instead (see below), so it isn't checked for text.
                 if not header or len(header) < 3:
-                    messagebox.showerror("Format Error", "CSV must have at least 3 columns: Site, X_mm, Y_mm")
+                    messagebox.showerror("Format Error", "CSV must have at least 3 columns: M/S, X_mm, Y_mm")
                     return
 
-                h_site, h_x, h_y = header[0].lower(), header[1].lower(), header[2].lower()
-                if 'site' not in h_site or 'x' not in h_x or 'y' not in h_y:
-                    messagebox.showerror("Format Error", f"The first three columns must be Site, X, Y.\nFound: {header[0]}, {header[1]}, {header[2]}")
+                h_x, h_y = header[1].lower(), header[2].lower()
+                if 'x' not in h_x or 'y' not in h_y:
+                    messagebox.showerror("Format Error", f"Columns 2 and 3 must be X, Y.\nFound: {header[1]}, {header[2]}")
                     return
+
+                # Header's first cell selects the stage for this whole import.
+                self.use_smaract_stage = (header[0].strip().upper() == 'S')
+
+                # Keep the Image tab's "SmarAct:"/"Module:" readout label (and
+                # its live X/Y source) in sync with the stage this import just
+                # selected, same as the dynamic swap in send_sample_data.
+                if (hasattr(self, '_image_tab_x_pos_label')
+                        and self._image_tab_x_pos_label.winfo_exists()):
+                    _pos_x_var = self.smaract_x_pos_var if self.use_smaract_stage else self.rpi_x_pos_var
+                    _pos_y_var = self.smaract_y_pos_var if self.use_smaract_stage else self.rpi_y_pos_var
+                    self._image_tab_x_pos_label.configure(textvariable=_pos_x_var)
+                    self._image_tab_y_pos_label.configure(textvariable=_pos_y_var)
+                    if hasattr(self, '_image_tab_stage_var'):
+                        self._image_tab_stage_var.set("SmarAct: " if self.use_smaract_stage else "Module: ")
 
                 self._clear_custom_points()
 
@@ -4479,7 +4518,9 @@ class MainApp(ctk.CTk):
             try:
                 with open(csv_path, 'w', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow(['Site', 'X_mm', 'Y_mm', 'Z_mm'])
+                    # First cell says which stage this scan was taken on --
+                    # load_csv_points reads it back the same way.
+                    writer.writerow(['S' if self.use_smaract_stage else 'M', 'X_mm', 'Y_mm', 'Z_mm'])
                     for i, (px, py, h) in enumerate(self.measured_data):
                         is_datum = (self.datum_point is not None and (px, py) == self.datum_point)
                         site_label = "0" if is_datum else str(i + 1)
@@ -4499,7 +4540,9 @@ class MainApp(ctk.CTk):
             try:
                 with open(csv_path, 'w', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow(['Site', 'X_mm', 'Y_mm', 'Z_mm', 'Height_mm'])
+                    # First cell says which stage this scan was taken on --
+                    # load_csv_points reads it back the same way.
+                    writer.writerow(['S' if self.use_smaract_stage else 'M', 'X_mm', 'Y_mm', 'Z_mm', 'Height_mm'])
                     current_z = self.z_pos
                     for i, (px, py, h) in enumerate(self.measured_data):
                         is_datum = (self.datum_point is not None and (px, py) == self.datum_point)
@@ -6079,6 +6122,47 @@ class MainApp(ctk.CTk):
         self._safe_btn('complete_image_btn', state="normal")
 
 
+    def save_canvas_image(self):
+        """Save exactly what's currently drawn on the Image tab canvas -- the
+        displayed (possibly downscaled) image plus any overlays: markers, ROI
+        grid, datum marker, height/index labels -- not the full-resolution
+        source photo, which is a separate file already saved elsewhere.
+
+        Pulled from the canvas's own drawing data (every create_image/
+        create_line/create_oval/create_text item on it) via Canvas.postscript,
+        NOT a screenshot -- unaffected by anything covering the window or by
+        display scaling. Requires Ghostscript to be installed for Pillow to
+        rasterize the PostScript into a PNG."""
+        canvas = self._image_tab_canvas
+        if not canvas.winfo_exists():
+            messagebox.showerror("Error", "No canvas to capture.")
+            return
+
+        canvas.update_idletasks()
+        default_name = f"canvas_{self.curr_sample_id}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
+        file_path = filedialog.asksaveasfilename(
+            title="Save Canvas Image",
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png")],
+            initialfile=default_name)
+        if not file_path:
+            return
+
+        try:
+            ps_data = canvas.postscript(colormode='color',
+                                         width=canvas.winfo_width(), height=canvas.winfo_height())
+            img = Image.open(io.BytesIO(ps_data.encode('utf-8')))
+            img.load()   # rasterize now (via Ghostscript) while ps_data is still in scope
+            img = img.convert("RGB")
+            img.save(file_path)
+            messagebox.showinfo("Saved", f"Canvas image saved to:\n{file_path}")
+        except Exception as e:
+            messagebox.showerror(
+                "Save Error",
+                f"Failed to save canvas image:\n{e}\n\n"
+                "This reads the canvas's own drawing data (not a screenshot) and "
+                "needs Ghostscript installed to rasterize it into a PNG.")
+
     # --------------------------- Appearance Functions --------------------------- #
 
     def expand_image(self, img_path):
@@ -6556,6 +6640,14 @@ class MainApp(ctk.CTk):
             self.scanning_grid_x , self.scanning_grid_y = self.extract_unique_positions(self.buffer_stitching_folder)
             self._last_stitched_was_smaract = False
 
+            # Recorded (like the SmarAct path already does) so display_main_tab
+            # can restore the grid view with the "Image Stitching..." button
+            # when the user comes back to Main, even if that happens after this
+            # scan's polling has already moved on. Without this, the Module
+            # path never left display_loading_frame's grey Idle/STOP screen,
+            # even after the scan and stitch genuinely finished.
+            self.active_main_view = "scanning"
+
             # Remove any stitched file left by a previous run's Fiji thread that finished
             # after empty_folder_pc ran, so it cannot bleed into the new tile grid.
             _stale_stitched = os.path.join(self.buffer_stitching_folder, f"stitched_{self.curr_sample_id}.jpg")
@@ -6642,6 +6734,8 @@ class MainApp(ctk.CTk):
                 _pos_y_var = self.smaract_y_pos_var if self.use_smaract_stage else self.rpi_y_pos_var
                 self._image_tab_x_pos_label.configure(textvariable=_pos_x_var)
                 self._image_tab_y_pos_label.configure(textvariable=_pos_y_var)
+                if hasattr(self, '_image_tab_stage_var'):
+                    self._image_tab_stage_var.set("SmarAct: " if self.use_smaract_stage else "Module: ")
             self.sample_data['sample_id'] = sample_id
             self.sample_data['initial_height'] = initial_height
             self.sample_data['layer_height'] = layer_height
