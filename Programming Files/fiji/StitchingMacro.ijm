@@ -39,10 +39,26 @@ run("Grid/Collection stitching",
 
 File.append("2. Stitching plugin finished without crashing.\n", log_path);
 
-// FIX: Convert the 32-bit blended result to RGB before saving as JPEG.
-// Linear Blending produces a 32-bit float image; JPEG requires 8-bit RGB.
-// Skipping this step causes saveAs to silently abort with no error.
-run("RGB Color");
+// Convert the blended result to RGB before saving as JPEG (JPEG requires
+// 8-bit RGB; skipping this entirely causes saveAs to silently abort with no
+// error). With COLOR tile inputs, Grid/Collection Stitching's Linear
+// Blending fusion typically outputs each of R/G/B as a separate slice in a
+// multi-channel stack, not a single merged color image. "RGB Color" only
+// converts whichever ONE slice is currently active into R=G=B -- a real
+// channel, but colorized as grey -- which is why the saved JPEG was
+// technically RGB but looked black-and-white. "Stack to RGB" is the command
+// that actually merges the 3 channel slices into true color; fall back to
+// "RGB Color" only if this run's fused result isn't a stack at all.
+// Logged so a still-grey result can be diagnosed from fiji_log.txt alone
+// (was it a stack that got merged, or did it fall to the single-slice path?)
+File.append("2b. nSlices after fusion = " + nSlices + "\n", log_path);
+if (nSlices > 1) {
+  run("Stack to RGB");
+  File.append("2c. Took Stack to RGB path.\n", log_path);
+} else {
+  run("RGB Color");
+  File.append("2c. Took RGB Color (single-slice) path.\n", log_path);
+}
 File.append("3. Image successfully converted to RGB.\n", log_path);
 
 save_path = output_directory + File.separator + "stitched_" + sample_id + ".jpg";

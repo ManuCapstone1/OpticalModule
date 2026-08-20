@@ -15,9 +15,9 @@ PULSEWIDTH = 100 / 1000000.0 # microseconds
 BTWNSTEPS = 1000 / 1000000.0
 STAGEFOCUSHEIGHT = 36860*STEPDISTZ # focus height, drifts with recalibration
 STAGECENTRE = (8281, 7005) # steps
-SMARACT_CENTRE_X = 6.401500875   # SmarAct stage centre X (mm)
-SMARACT_CENTRE_Y = 201.070744875 # SmarAct stage centre Y (mm)
-SMARACT_FOCUS_Z = 70.0           # SmarAct stage focal plane Z (mm)
+SMARACT_CENTRE_X = 2.0             # SmarAct stage centre X (mm)
+SMARACT_CENTRE_Y = 200.779165125   # SmarAct stage centre Y (mm)
+SMARACT_FOCUS_Z = 48.0             # SmarAct stage focal plane Z (mm)
 
 class OpticalModule:
     """
@@ -346,6 +346,12 @@ class OpticalModule:
                 print('limit reset failed')
                 with self.alarmLock:
                     self.alarmStatus = "Limit Switch Failed"
+
+        # Safety clearance: if X is too close to its home side (< 30 mm),
+        # move it out to X = 30 mm first, before homing Y sweeps the carriage
+        # across the full Y travel.
+        if self.get_curr_pos_mm("x") < 30:
+            self.go_to(x=30)
 
         # Home Y axis
         print("Y")
