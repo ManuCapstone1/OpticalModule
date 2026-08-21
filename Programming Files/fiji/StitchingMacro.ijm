@@ -20,6 +20,12 @@ log_path = output_directory + File.separator + "fiji_log.txt";
 File.saveString("--- FIJI STITCHING LOG ---\n", log_path);
 File.append("1. Arguments received successfully.\n", log_path);
 
+// tile_overlap=20 below is ALSO defined independently as _TILE_OVERLAP_FRAC
+// (= 0.20) in pc_files/gui.py, used there for the stitched-image coordinate
+// math (tile pixel geometry, FOV/point placement). A macro can't import that
+// Python constant, so if the physical scan overlap is ever recalibrated,
+// update both values together or the on-screen coordinates will silently
+// disagree with what this plugin actually stitched.
 run("Grid/Collection stitching",
   "type=[Grid: column-by-column] " +
   "order=[Up & Right] " +

@@ -193,7 +193,7 @@ def run_topography_map(
             scan_data.append((abs_x, abs_y, mock_z))
 
     print(
-        f"\n[done] Scan complete — {len(scan_data)} of {total_points} points collected."
+        f"\n[done] Scan complete - {len(scan_data)} of {total_points} points collected."
     )
     return scan_data
 
@@ -312,7 +312,7 @@ def home_smaract(mcs_handle=None):
                     break
                 time.sleep(0.1)
 
-            print(f"[homing] {axis_name} axis homed — position = 0 nm.")
+            print(f"[homing] {axis_name} axis homed - position = 0 nm.")
 
         print("[homing] Stage successfully homed. True absolute zero established.")
 
