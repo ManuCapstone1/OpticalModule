@@ -15,6 +15,11 @@ PULSEWIDTH = 100 / 1000000.0 # microseconds
 BTWNSTEPS = 1000 / 1000000.0
 STAGEFOCUSHEIGHT = 36860*STEPDISTZ # focus height, drifts with recalibration
 STAGECENTRE = (8281, 7005) # steps
+# ALSO defined independently in pc_files/gui.py as SMARACT_PARK_X/
+# SMARACT_PARK_Y/SMARACT_PARK_Z (same three physical values, different
+# names, no shared import across the PC/RPi process boundary) -- if this
+# location is ever recalibrated again, update BOTH files together, or the
+# PC and RPi sides will silently disagree.
 SMARACT_CENTRE_X = 2.0             # SmarAct stage centre X (mm)
 SMARACT_CENTRE_Y = 200.779165125   # SmarAct stage centre Y (mm)
 SMARACT_FOCUS_Z = 48.0             # SmarAct stage focal plane Z (mm)

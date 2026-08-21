@@ -24,7 +24,7 @@ import os
 import ctypes as ct
 
 # ---------------------------------------------------------------------------
-# Bug fix — Linux 64-bit pointer-size correction
+# Bug fix - Linux 64-bit pointer-size correction
 #
 # On Windows (LLP64):  unsigned long == 4 bytes  →  ct.c_ulong was correct.
 # On Linux 64-bit (LP64): unsigned long == 8 bytes, but every SA_STATUS,
@@ -38,7 +38,7 @@ import ctypes as ct
 # but the declarations below and the SA_packet struct must be 4-byte clean.
 # ---------------------------------------------------------------------------
 
-#define standard SA_types — ct.c_uint matches the C header (unsigned int, 32-bit)
+#define standard SA_types - ct.c_uint matches the C header (unsigned int, 32-bit)
 SA_STATUS      = ct.c_uint()
 SA_INDEX       = ct.c_uint()
 SA_PACKET_TYPE = ct.c_uint()
@@ -61,10 +61,10 @@ MCS_lib = ct.cdll.LoadLibrary(_so_path)
 # into 32-bit register slots on Linux x86-64, silently corrupting the ABI.
 #
 # SA_OpenSystem(SA_INDEX *systemIndex, const char *locator, const char *options)
-#   systemIndex — output: SA_INDEX* (pointer to unsigned int, 32-bit)
-#   locator     — input:  const char* (null-terminated C string)
-#   options     — input:  const char* (null-terminated C string)
-#   return      — SA_STATUS (unsigned int, 32-bit)
+#   systemIndex - output: SA_INDEX* (pointer to unsigned int, 32-bit)
+#   locator     - input:  const char* (null-terminated C string)
+#   options     - input:  const char* (null-terminated C string)
+#   return      - SA_STATUS (unsigned int, 32-bit)
 # ---------------------------------------------------------------------------
 MCS_lib.SA_OpenSystem.restype  = ct.c_uint
 MCS_lib.SA_OpenSystem.argtypes = [
@@ -74,7 +74,7 @@ MCS_lib.SA_OpenSystem.argtypes = [
 ]
 
 # // defines a data packet for the asynchronous mode
-# Bug fix — all fields are 'unsigned int' / 'signed int' (4 bytes) in the C
+# Bug fix - all fields are 'unsigned int' / 'signed int' (4 bytes) in the C
 # header.  ct.c_ulong is 8 bytes on Linux 64-bit and would produce a struct
 # twice as large as the real one, corrupting every field offset.
 class SA_packet(ct.Structure):
@@ -411,7 +411,7 @@ def SA_GetStatusInfo(status, info):
 
 #MCSCONTROL_API
 # SA_STATUS MCSCONTROL_CC SA_OpenSystem(SA_INDEX *systemIndex,const char *locator,const char *options);
-# Bug fix — 'locator' and 'options' are const char* in C.  ctypes requires
+# Bug fix - 'locator' and 'options' are const char* in C.  ctypes requires
 # bytes objects for char* parameters; plain Python 3 str would be silently
 # passed as a Unicode pointer, corrupting the call on Linux.
 def SA_OpenSystem(systemIndex,locator,options):
@@ -430,9 +430,9 @@ def SA_CloseSystem(systemIndex):
 
 # #MCSCONTROL_API
 # SA_STATUS MCSCONTROL_CC SA_FindSystems(const char *options,char *outBuffer,unsigned int *ioBufferSize);
-# Bug fix 1 — String encoding: bytes(options,'utf-8') raises TypeError when
+# Bug fix 1 - String encoding: bytes(options,'utf-8') raises TypeError when
 #   options is already bytes (e.g. b'').  Accept both str and bytes safely.
-# Bug fix 2 — Buffer size: the original 17-byte recommendation was sized for
+# Bug fix 2 - Buffer size: the original 17-byte recommendation was sized for
 #   the Windows USB locator format ('usb:id:1778011641', 17 chars + null).
 #   On Linux the locator can be longer.  Use a 256-byte buffer to be safe:
 #     outBuffer = ct.create_string_buffer(256), ioBufferSize = ct.c_uint(256)

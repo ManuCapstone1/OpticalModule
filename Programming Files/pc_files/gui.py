@@ -21,28 +21,41 @@ _CONFOCAL_IP           = "169.254.0.20"
 _CONFOCAL_PORT         = 24685
 _CONFOCAL_TIMEOUT      = 2.0
 
-# SmarAct stage: fixed position for the optical to park above the SmarAct
-# Updated to the SmarAct's new focus location; the confocal focus Z below is
-# re-derived from the same fixed 3.0278mm camera-to-confocal offset so the
-# delta between them (and everything else computed from these) is unchanged.
+# SmarAct stage: fixed position for the optical to park above the SmarAct.
+# Also defined independently in module_program/opticalmodule.py as
+# SMARACT_CENTRE_X/SMARACT_CENTRE_Y/SMARACT_FOCUS_Z (same three physical
+# values, different names, no shared import)
+# if this location is ever recalibrated again, update both files together
+
 SMARACT_PARK_X = 2.0
 SMARACT_PARK_Y = 200.779165125
 SMARACT_PARK_Z = 48.0
-# confocal's own ideal Z for a zero-height SmarAct sample, derived empirically:
+# confocal's Z for a zero-height SmarAct sample
 # 48.0 (SMARACT_PARK_Z) - 3.0278 (confocal reading, bare stage, no sample) = 44.9722
 # distinct from SMARACT_PARK_Z, which is calibrated for the camera's focus, not
-# the confocal's ~15mm standoff -- the two sensors sit at different heights on the assembly
+# the confocal's ~15mm standoff - the two sensors sit at different heights on the assembly
 SMARACT_CONFOCAL_FOCUS_Z = 44.9722
 # Settling delay: time (ms) to wait after the motor controller reports "Idle" before triggering a measurement.
 _SETTLING_DELAY_MS     = 275
 # piezo stage still rings briefly after the controller reports target-reached.
-# 100ms wasn't enough margin — blur kept showing up late in a 9-point run
+# 100ms wasn't enough margin as blur kept showing up late in a 9-point run
 # (points 8-9), suggesting some creep/ringing outlasts the exposure window too
 # (default exposure is itself ~100ms). bumped up, still needs real tuning.
 SMARACT_SETTLING_DELAY_MS = 300
 # Confocal XY offset from the optical
 _CONFOCAL_DX = -1.418137875
 _CONFOCAL_DY = -72.258765875
+# Camera pixel -> stage mm calibration matrix: delta_x/delta_y (stage mm) =
+# A . (delta_i/delta_j) (sensor px). Shared by click-to-move, the stitched
+# view's FOV/point placement, and ROI grid math.
+# See calculate_phys_to_stitched_pixel_coords for the full derivation and
+# the inverse-matrix math.
+_MATRIX_A11 = -0.001479   # mm per sensor px, X row (dominant term)
+_MATRIX_A12 =  0.000044   # mm per sensor px, X row (cross term, ~3% of A11)
+_MATRIX_A21 =  0.000018   # mm per sensor px, Y row (cross term, ~1% of A22)
+_MATRIX_A22 =  0.001459   # mm per sensor px, Y row (dominant term)
+_MATRIX_SCALE_X = -_MATRIX_A11   # == 0.001479: |A11| as a plain mm/px magnitude
+_MATRIX_SCALE_Y =  _MATRIX_A22   # == 0.001459: |A22| as a plain mm/px magnitude
 # Where the confocal needs to be to sit over the SmarAct
 SMARACT_CONFOCAL_PARK_X = SMARACT_PARK_X + _CONFOCAL_DX
 SMARACT_CONFOCAL_PARK_Y = SMARACT_PARK_Y + _CONFOCAL_DY
@@ -52,6 +65,10 @@ SMARACT_TRAVEL_MAX = 6.0
 SMARACT_TRAVEL_MIN_NM = round(SMARACT_TRAVEL_MIN * 1_000_000)
 SMARACT_TRAVEL_MAX_NM = round(SMARACT_TRAVEL_MAX * 1_000_000)
 # center of travel + full bounds box size (12mm x 12mm)
+# NOTE: this is the SmarAct's own travel-range midpoint, not the same thing
+# as opticalmodule.py's identically-named SMARACT_CENTRE_X/Y (which is the
+# optical carriage's park position over the SmarAct, in the module stage's
+# frame) - same name, different file, different meaning.
 SMARACT_CENTRE_X = (SMARACT_TRAVEL_MIN + SMARACT_TRAVEL_MAX) / 2.0
 SMARACT_CENTRE_Y = (SMARACT_TRAVEL_MIN + SMARACT_TRAVEL_MAX) / 2.0
 SMARACT_BOUNDS_W_MM = SMARACT_TRAVEL_MAX - SMARACT_TRAVEL_MIN
@@ -71,6 +88,14 @@ _AUTOFOCUS_SWEEP_STEP_MM = 0.5
 _GRID_SCAN_SETUP_S              = 21.0
 _GRID_SCAN_PER_POINT_S_SMARACT  = 0.4356
 _GRID_SCAN_PER_POINT_S_MODULE   = 3.152
+# Expected tile overlap fraction: used here (Python side) purely for the
+# stitched-image coordinate math (tile pixel geometry, FOV/point placement).
+# The actual overlap Fiji's Grid/Collection Stitching plugin uses when
+# stitching is a separate hardcoded value, "tile_overlap=20", in
+# fiji/StitchingMacro.ijm - an .ijm macro can't import this constant, so
+# that value has to be kept in sync with this one by hand. If the physical
+# scan overlap is ever recalibrated, update both.
+_TILE_OVERLAP_FRAC = 0.20
 
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -466,7 +491,7 @@ class MainApp(ctk.CTk):
             img_path (str): Absolute path to the stitched JPEG.
         """
         if not os.path.exists(img_path):
-            print(f"display_stitched_inline: file not found — {img_path}")
+            print(f"display_stitched_inline: file not found - {img_path}")
             return
 
         # ── Persist state so tab navigation can restore this view ────────────
@@ -520,7 +545,7 @@ class MainApp(ctk.CTk):
         # Persisted so _process_measurement_results can reconstruct canvas coords
         self._stitch_img_w = stitched_w
         self._stitch_img_h = stitched_h
-        OVERLAP = 0.20
+        OVERLAP = _TILE_OVERLAP_FRAC
 
         tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
         tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
@@ -542,8 +567,8 @@ class MainApp(ctk.CTk):
         # defined once here so they are accessible to the _render() closure.
         FOV_W_MM  = 5.60    # camera FOV width  in mm
         FOV_H_MM  = 4.20    # camera FOV height in mm
-        SCALE_X   = 0.001479  # mm per pixel  |A11|
-        SCALE_Y   = 0.001459  # mm per pixel  |A22|
+        SCALE_X   = _MATRIX_SCALE_X  # mm per pixel  |A11|
+        SCALE_Y   = _MATRIX_SCALE_Y  # mm per pixel  |A22|
         fov_half_w_px = (FOV_W_MM / SCALE_X) / 2.0   # half-width  in stitched pixels
         fov_half_h_px = (FOV_H_MM / SCALE_Y) / 2.0   # half-height in stitched pixels
 
@@ -592,8 +617,8 @@ class MainApp(ctk.CTk):
             # Applies the same 2×2 matrix inverse used in
             # calculate_phys_to_stitched_pixel_coords, stopping before the canvas-
             # scale step since _s stores positions in full-res stitched pixels.
-            A11, A12 = -0.001479,  0.000044
-            A21, A22 =  0.000018,  0.001459
+            A11, A12 = _MATRIX_A11, _MATRIX_A12
+            A21, A22 = _MATRIX_A21, _MATRIX_A22
             det_B = A11 * A22 - A12 * A21          # = det(A)
 
             delta_x = float(self.x_pos) - scan_origin_x
@@ -809,13 +834,13 @@ class MainApp(ctk.CTk):
                         fpy = _t0y - d_py
                         return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
                 else:
-                    _OVL = 0.20
+                    _OVL = _TILE_OVERLAP_FRAC
                     _tw  = stitched_w / (1.0 + (grid_x - 1) * (1.0 - _OVL))
                     _th  = stitched_h / (1.0 + (grid_y - 1) * (1.0 - _OVL))
                     _t0x = _tw / 2.0
                     _t0y = (grid_y - 1) * _th * (1.0 - _OVL) + _th / 2.0
-                    _A11, _A12 = -0.001479, 0.000044
-                    _A21, _A22 =  0.000018, 0.001459
+                    _A11, _A12 = _MATRIX_A11, _MATRIX_A12
+                    _A21, _A22 = _MATRIX_A21, _MATRIX_A22
                     _det = _A11 * _A22 - _A12 * _A21
 
                     def _p2c(pm_x, pm_y):
@@ -849,7 +874,7 @@ class MainApp(ctk.CTk):
             y1 = ch - margin
             x0 = x1 - bar_px
 
-            label_text = "5.60 mm"
+            label_text = f"{FOV_W_MM:.2f} mm"
 
             # Draw the scale bar line and end-caps
             canvas.create_line(x0, y1, x1, y1, fill="white", width=3)
@@ -1459,7 +1484,7 @@ class MainApp(ctk.CTk):
         smaract_y_pos_label.pack(pady=5, fill="x")
         ctk.CTkLabel(main_frame, textvariable=self.smaract_y_pos_var).pack(pady=5, fill='x')
         # polling itself now runs for the whole app session (started once at
-        # launch), not restarted per tab visit — see __init__
+        # launch), not restarted per tab visit - see __init__
 
     def refresh_motor_coord(self):
         """
@@ -1709,7 +1734,7 @@ class MainApp(ctk.CTk):
         empty_buffer_rpi_btn.pack(side="left", padx=10, fill='x', expand=True)
 
         # Save exactly what's rendered on the canvas right now (image + any
-        # overlays -- markers, ROI grid, labels), not the full-res source photo
+        # overlays - markers, ROI grid, labels), not the full-res source photo
         download_canvas_btn = ctk.CTkButton(button_frame, text="Download Canvas Image", font=("Arial", 16), fg_color="#555555",
                                             command=self.save_canvas_image)
         download_canvas_btn.pack(side="left", padx=10, fill='x', expand=True)
@@ -1748,7 +1773,7 @@ class MainApp(ctk.CTk):
         coord_strip = ctk.CTkFrame(right_frame, fg_color="transparent", height=20)
         coord_strip.pack(fill='x', padx=15, pady=(0, 5))
 
-        # Which stage the X/Y readout below is actually showing -- otherwise
+        # Which stage the X/Y readout below is actually showing - otherwise
         # there's no way to tell SmarAct coordinates from Module ones at a
         # glance. Kept updated in send_sample_data when the stage selection
         # changes without a full Image tab rebuild.
@@ -2014,8 +2039,8 @@ class MainApp(ctk.CTk):
         delta_j = j_center - j_click
 
         # Apply transformation matrix
-        A11, A12 = -0.001479, 0.000044
-        A21, A22 =  0.000018, 0.001459
+        A11, A12 = _MATRIX_A11, _MATRIX_A12
+        A21, A22 = _MATRIX_A21, _MATRIX_A22
 
         delta_x = (A11 * delta_i) + (A12 * delta_j)
         delta_y = (A21 * delta_i) + (A22 * delta_j)
@@ -2131,7 +2156,7 @@ class MainApp(ctk.CTk):
                 self._canvas_orig_h = img_pil.height
                 # Capture hardware position so _phys_to_canvas_pixel has a stable
                 # reference even if the stage moves before the next redraw. Only
-                # do this for a genuinely new photo (see is_new_image above) —
+                # do this for a genuinely new photo (see is_new_image above) -
                 # re-stamping it on every redraw of the same image is what let
                 # the ROI/grid box drift after the stage moved mid-scan.
                 if is_new_image or not hasattr(self, '_image_tab_ref_x'):
@@ -2227,8 +2252,8 @@ class MainApp(ctk.CTk):
         delta_i = i_center - sensor_x
         delta_j = j_center - sensor_y
 
-        A11, A12 = -0.001479, 0.000044
-        A21, A22 =  0.000018, 0.001459
+        A11, A12 = _MATRIX_A11, _MATRIX_A12
+        A21, A22 = _MATRIX_A21, _MATRIX_A22
 
         delta_x = A11 * delta_i + A12 * delta_j
         delta_y = A21 * delta_i + A22 * delta_j
@@ -2252,7 +2277,7 @@ class MainApp(ctk.CTk):
             # the SmarAct's travel range is symmetric (SMARACT_TRAVEL_MIN/MAX,
             # negative values are legitimate), and the callers that actually
             # dispatch a move already validate against that real range with a
-            # proper error dialog — clamping to 0 here would silently corrupt
+            # proper error dialog - clamping to 0 here would silently corrupt
             # the coordinate instead (e.g. two ROI corners that are both
             # genuinely negative would both clamp to 0.0, collapsing the
             # dragged box to a zero-size region).
@@ -2297,15 +2322,15 @@ class MainApp(ctk.CTk):
         -------
         (target_x, target_y) : absolute stage coordinates in mm, clamped to ≥ 0.
         """
-        OVERLAP = 0.20
+        OVERLAP = _TILE_OVERLAP_FRAC
 
         # Scale factors from the single-frame calibration matrix (diagonal terms).
         # A11 = -0.001479 → 1 px rightward in sensor = +0.001479 mm in X.
         # A22 =  0.001459 → 1 px upward   in sensor = +0.001459 mm in Y.
         # Cross-terms (A12=0.000044, A21=0.000018) are ~3 % of the diagonals
         # and are negligible at the stitched-image scale.
-        SCALE_X = 0.001479  # mm per pixel, right  → +X stage
-        SCALE_Y = 0.001459  # mm per pixel, upward → +Y stage
+        SCALE_X = _MATRIX_SCALE_X  # mm per pixel, right  → +X stage
+        SCALE_Y = _MATRIX_SCALE_Y  # mm per pixel, upward → +Y stage
 
         # ── Step 1: Recover individual tile pixel dimensions ─────────────────
         # Fiji places N tiles with (1-overlap) steps:
@@ -2353,7 +2378,7 @@ class MainApp(ctk.CTk):
         absolute SmarAct nanometer coordinate.
 
         Unlike calculate_stitched_phys_coords, this doesn't use the camera's
-        empirical calibration matrix — the SmarAct's own recorded grid pitch
+        empirical calibration matrix - the SmarAct's own recorded grid pitch
         (nm per tile step) gives an exact nm-per-pixel scale instead, and the
         click interpolates continuously against it, same as the optical case.
         Snapping to the nearest tile center was the old (wrong) behavior here.
@@ -2380,7 +2405,7 @@ class MainApp(ctk.CTk):
         image (used by calculate_stitched_smaract_coords and the stitched-view ROI-drag
         handlers, which need the same scale to convert a desired mm cell size back into
         canvas pixels)."""
-        OVERLAP = 0.20
+        OVERLAP = _TILE_OVERLAP_FRAC
         tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
         tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
         step_px_x = tile_w * (1.0 - OVERLAP)
@@ -2480,7 +2505,7 @@ class MainApp(ctk.CTk):
                                  the position is outside the scanned area (no
                                  boundary clamping is applied, edge-behaviour rule).
         """
-        OVERLAP = 0.20
+        OVERLAP = _TILE_OVERLAP_FRAC
 
         # ── Step 1: Tile geometry (identical to the forward function) ─────────
         tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
@@ -2498,8 +2523,8 @@ class MainApp(ctk.CTk):
 
         # ── Step 3: Invert B = −A to recover stitched-pixel displacement ──────
         # Calibration matrix constants (same values used everywhere in the file)
-        A11, A12 = -0.001479,  0.000044
-        A21, A22 =  0.000018,  0.001459
+        A11, A12 = _MATRIX_A11, _MATRIX_A12
+        A21, A22 = _MATRIX_A21, _MATRIX_A22
 
         # det(B) = det(−A) = det(A) = A11·A22 − A12·A21
         det_B = A11 * A22 - A12 * A21
@@ -2552,7 +2577,7 @@ class MainApp(ctk.CTk):
         full_py = tile0_cy - d_py
 
         # Canvas display layout (mirrors _render in display_stitched_inline; same
-        # simplification as calculate_phys_to_stitched_pixel_coords — assumes no
+        # simplification as calculate_phys_to_stitched_pixel_coords - assumes no
         # zoom/pan, i.e. fit-to-canvas).
         if stitched_w / stitched_h > canvas_w / canvas_h:
             disp_w = canvas_w
@@ -2690,7 +2715,7 @@ class MainApp(ctk.CTk):
         """Canvas pixel position for a measurement point/datum on the (non-stitched)
         Image tab. Always prefers the exact pixel position cached at click time
         (_canvas_click_cache), so markers and labels never drift or vanish on redraw
-        even if the live stage position has changed since the points were placed —
+        even if the live stage position has changed since the points were placed -
         this is what makes them stay put across a Display Heights/Indices toggle.
         Only falls back to the physics-based inverse transform (which can be off if
         the reference position has since moved) when no cache entry exists at all,
@@ -2699,7 +2724,7 @@ class MainApp(ctk.CTk):
         if cached is not None:
             return cached
         print(f"[canvas] WARNING: no cached click position for ({phys_x:.6f}, {phys_y:.6f}) mm "
-              f"— using computed fallback position (may be approximate)")
+              f"- using computed fallback position (may be approximate)")
         if ref_x is None or ref_y is None:
             return None, None
         return self._phys_to_canvas_pixel(phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h)
@@ -2756,7 +2781,7 @@ class MainApp(ctk.CTk):
         if self._last_stitched_was_smaract:
             # SmarAct points live in the SmarAct's own coordinate frame, not the
             # camera/module-stage frame the calibration matrix below assumes (see
-            # calculate_stitched_smaract_coords) — use its recorded grid pitch instead.
+            # calculate_stitched_smaract_coords) - use its recorded grid pitch instead.
             grid_params = self._smaract_last_grid
             if grid_params is None:
                 return
@@ -2773,13 +2798,13 @@ class MainApp(ctk.CTk):
                 return _s['ox'] + fpx * _s['sx'], _s['oy'] + fpy * _s['sy']
         else:
             # Tile-0 centre in full-res stitched pixels (same constants as _render)
-            OVERLAP = 0.20
+            OVERLAP = _TILE_OVERLAP_FRAC
             _tile_w = stitched_w / (1.0 + (grid_x - 1) * (1.0 - OVERLAP))
             _tile_h = stitched_h / (1.0 + (grid_y - 1) * (1.0 - OVERLAP))
             _t0x = _tile_w / 2.0
             _t0y = (grid_y - 1) * _tile_h * (1.0 - OVERLAP) + _tile_h / 2.0
-            _A11, _A12 = -0.001479,  0.000044
-            _A21, _A22 =  0.000018,  0.001459
+            _A11, _A12 = _MATRIX_A11, _MATRIX_A12
+            _A21, _A22 = _MATRIX_A21, _MATRIX_A22
             _det_B = _A11 * _A22 - _A12 * _A21
 
             def _phys_to_canvas(phys_x, phys_y):
@@ -2849,7 +2874,7 @@ class MainApp(ctk.CTk):
 
     def _smaract_point_out_of_bounds(self, phys_x, phys_y):
         """True (and shows the error) if (phys_x, phys_y) falls outside the
-        SmarAct's [-6, 6] mm travel box — only meaningful for a SmarAct-sourced
+        SmarAct's [-6, 6] mm travel box - only meaningful for a SmarAct-sourced
         stitched image, where that box is what's actually drawn on screen."""
         if not (SMARACT_TRAVEL_MIN <= phys_x <= SMARACT_TRAVEL_MAX
                 and SMARACT_TRAVEL_MIN <= phys_y <= SMARACT_TRAVEL_MAX):
@@ -3069,7 +3094,7 @@ class MainApp(ctk.CTk):
             self._roi_active_canvas.delete("custom_pt")
 
     def _fire_material_session_callback(self, raw_points):
-        """Called once ANY measurement sequence finishes — a single-point
+        """Called once ANY measurement sequence finishes - a single-point
         Measure Heights run or a full grid Map Surface scan. If 'Collect
         Points' is armed, route the raw heights into the active session
         either way; the drawer doesn't care which UI action produced them."""
@@ -3079,7 +3104,7 @@ class MainApp(ctk.CTk):
     def _material_start_collect(self):
         """Arm capture mode: right-click points as usual, then click the tab's
         own Measure Heights button (bottom bar) to add them to the active
-        session — no separate capture button. Only the button itself (not
+        session - no separate capture button. Only the button itself (not
         Escape) turns this back off."""
         self._material_capture_armed = True
         self._refresh_material_drawer()
@@ -3094,7 +3119,7 @@ class MainApp(ctk.CTk):
     def _on_material_points_measured(self, measured_points):
         """Fired when Measure Heights completes while 'Collect Points' is
         armed: route this run's raw heights into the active session. Leaves
-        custom_measure_points/canvas markers alone — Measure Heights is a
+        custom_measure_points/canvas markers alone - Measure Heights is a
         shared button and its normal post-measurement view must stay intact."""
         session = self.material_active_session
         valid_pts = [(x, y, z) for (x, y, z) in measured_points if not math.isnan(z)]
@@ -3120,7 +3145,7 @@ class MainApp(ctk.CTk):
     def _material_delete_set(self):
         """Delete the active session (not 'Reference'): drops its collected
         points and any grid map, then falls back to whichever session precedes
-        it. Remaining sets keep their original names/order — no renumbering."""
+        it. Remaining sets keep their original names/order - no renumbering."""
         session = self.material_active_session
         if session == "Reference":
             return
@@ -3162,13 +3187,13 @@ class MainApp(ctk.CTk):
 
     def _material_calculate_plane(self):
         """Fit a best-fit plane from the active session's currently collected
-        points (same mechanism for Reference and every Set — more points, e.g.
+        points (same mechanism for Reference and every Set - more points, e.g.
         via a grid scan rather than a few single clicks, means a more accurate
         fit). Reference is the true flat datum (the sample holder's edges);
         every Set's points are measured FROM that datum plane, not leveled
         against a plane fit from the set's own points. The points stay in the
         list afterward (so Re-calculate keeps refitting from everything
-        collected so far) — only "Reset Points" clears them."""
+        collected so far) - only "Reset Points" clears them."""
         session = self.material_active_session
         is_reference = (session == "Reference")
         label = "Reference Plane" if is_reference else "Plane"
@@ -3190,7 +3215,7 @@ class MainApp(ctk.CTk):
         self.material_planes[session] = plane
 
         if is_reference:
-            # Reference IS the datum — nothing to measure its own points against.
+            # Reference IS the datum - nothing to measure its own points against.
             self.removal_data[session] = list(pts)
         else:
             # Measure this Set's points from the reference plane as their datum.
@@ -3218,7 +3243,7 @@ class MainApp(ctk.CTk):
 
     def _material_compare(self, name_a, name_b):
         """Compare two sessions' own fitted planes (not their raw stored
-        points -- Reference's own points aren't on the same Z convention as a
+        points - Reference's own points aren't on the same Z convention as a
         Set's corrected points, so this is the only comparison that works for
         ANY pair). Returns (x, y, z_a, z_b, delta) rows, or None if either
         session has no plane yet or there are no nodes to evaluate at."""
@@ -3282,7 +3307,7 @@ class MainApp(ctk.CTk):
 
     def _material_export_plane_csv(self):
         """Standalone export of just the active session's own plane
-        coefficients and points -- no comparison involved."""
+        coefficients and points - no comparison involved."""
         session = self.material_active_session
         plane = self.material_planes.get(session)
         if plane is None:
@@ -3332,7 +3357,7 @@ class MainApp(ctk.CTk):
         try:
             with open(file_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['# Material Removal Report -- All Comparisons'])
+                writer.writerow(['# Material Removal Report - All Comparisons'])
                 writer.writerow(['# Sample', self.curr_sample_id])
                 writer.writerow([])
 
@@ -3437,7 +3462,7 @@ class MainApp(ctk.CTk):
             listbox.insert("end", f"{i}. ({x:.4f}, {y:.4f}, {z:.4f})")
 
         # Analysis: always-open sub-section (Total Material Removed / Compare /
-        # Export All) -- no toggle, can't be collapsed. The card is grey,
+        # Export All) - no toggle, can't be collapsed. The card is grey,
         # matching the Points listbox background.
         analysis_card = ctk.CTkFrame(body, fg_color="#2f2f2f", corner_radius=6)
         analysis_card.pack(side=ctk.TOP, fill='x', pady=(0, 8))
@@ -3567,7 +3592,7 @@ class MainApp(ctk.CTk):
                 header = next(reader, None)
 
                 # Validate only the last two of the first three columns. the
-                # first cell used to have to say "Site" -- now it's the stage
+                # first cell used to have to say "Site" - now it's the stage
                 # selector instead (see below), so it isn't checked for text.
                 if not header or len(header) < 3:
                     messagebox.showerror("Format Error", "CSV must have at least 3 columns: M/S, X_mm, Y_mm")
@@ -3611,7 +3636,7 @@ class MainApp(ctk.CTk):
                     # Pre-flight bounds check.
                     # SmarAct: the CSV coordinate is already a SmarAct-frame point (no
                     # confocal offset applied, same as everywhere else in this file),
-                    # checked against the SLC-1720's own symmetric travel range —
+                    # checked against the SLC-1720's own symmetric travel range -
                     # negative values are fine there, unlike the module stage.
                     if self.use_smaract_stage:
                         if not (SMARACT_TRAVEL_MIN <= x_val <= SMARACT_TRAVEL_MAX
@@ -3851,11 +3876,11 @@ class MainApp(ctk.CTk):
         if self.use_smaract_stage:
             offset_route = optimized_route
         else:
-            CONFOCAL_DX = -1.418137875
-            CONFOCAL_DY = -72.258765875
+            CONFOCAL_DX = _CONFOCAL_DX
+            CONFOCAL_DY = _CONFOCAL_DY
             offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in optimized_route]
 
-        print(f"[execute_custom_measurements] {len(offset_route)} point(s) — nearest-neighbour order (confocal offset applied):")
+        print(f"[execute_custom_measurements] {len(offset_route)} point(s) - nearest-neighbour order (confocal offset applied):")
         for i, (x, y) in enumerate(offset_route, 1):
             print(f"  {i:>3}. ({x:.4f} mm, {y:.4f} mm)")
 
@@ -3864,7 +3889,7 @@ class MainApp(ctk.CTk):
         # error message references a single concrete bad coordinate.
         # SmarAct: points are SmarAct-frame coordinates on the SLC-1720 piezo stage,
         # whose legitimate travel range is symmetric (SMARACT_TRAVEL_MIN/MAX, i.e.
-        # negative values are fine) — not the module stage's "must be >= 0" rule.
+        # negative values are fine) - not the module stage's "must be >= 0" rule.
         if self.use_smaract_stage:
             for target_x, target_y in offset_route:
                 if not (SMARACT_TRAVEL_MIN <= target_x <= SMARACT_TRAVEL_MAX
@@ -4026,7 +4051,7 @@ class MainApp(ctk.CTk):
 
         if target_x < 0 or target_y < 0 or float(self.z_pos) < 0:
             print(f"[sequence] ERROR: point {index + 1} ({target_x:.4f}, {target_y:.4f}) "
-                  f"out of range — aborting sequence")
+                  f"out of range - aborting sequence")
             messagebox.showerror(
                 "Sequence Aborted",
                 f"Point {index + 1}/{len(route)} ({target_x:.4f}, {target_y:.4f} mm) "
@@ -4059,14 +4084,14 @@ class MainApp(ctk.CTk):
         # camera assembly continues to ring for hundreds of milliseconds afterward.
         # Measuring without this delay was the confirmed primary cause of the 269 µm
         # run-to-run tramming discrepancy.
-        print(f"[sequence] stage idle — waiting {_SETTLING_DELAY_MS} ms for mechanical settling "
+        print(f"[sequence] stage idle - waiting {_SETTLING_DELAY_MS} ms for mechanical settling "
               f"(point {index + 1}/{len(route)})")
         self.after(_SETTLING_DELAY_MS, lambda: self._sequence_fire_sensor_read(route, index, results))
 
     def _sequence_fire_sensor_read(self, route, index, results):
         """Called after the mechanical settling delay has elapsed; starts the
         confocal read thread and schedules the result-polling loop."""
-        print(f"[sequence] settling complete — reading confocal sensor at point {index + 1}/{len(route)}")
+        print(f"[sequence] settling complete - reading confocal sensor at point {index + 1}/{len(route)}")
         result_holder = [None]   # thread writes float/NaN here; None means not done yet
         t = Thread(target=self._confocal_read_worker, args=(result_holder,), daemon=True)
         t.start()
@@ -4094,7 +4119,7 @@ class MainApp(ctk.CTk):
                 print(f"[confocal] unexpected response: {response!r}")
                 result_holder[0] = float('nan')
         except Exception as e:
-            print(f"[confocal] WARNING: sensor read failed — {e}")
+            print(f"[confocal] WARNING: sensor read failed - {e}")
             result_holder[0] = float('nan')
 
     def _close_confocal_socket(self):
@@ -4117,7 +4142,7 @@ class MainApp(ctk.CTk):
             return
         height = result_holder[0]
         if height is None or math.isnan(height):
-            print(f"[sequence] WARNING: sensor returned no data at point {index + 1} — recording NaN")
+            print(f"[sequence] WARNING: sensor returned no data at point {index + 1} - recording NaN")
             height = float('nan')
         self._sequence_record_height(route, index, results, height)
 
@@ -4140,7 +4165,7 @@ class MainApp(ctk.CTk):
         and action buttons are already disabled (a drop-in replacement for the
         final self._sequence_measure_point(route, 0, []) call in each launcher."""
         if self.use_smaract_stage:
-            # SmarAct samples: the confocal is fixed at the puck's park position —
+            # SmarAct samples: the confocal is fixed at the puck's park position -
             # it's the SAMPLE that has to move (via the SmarAct stage) so the
             # user-picked datum point ends up underneath it, before the module
             # carriage parks there and the Z-sweep calibrates against it. Without
@@ -4155,7 +4180,7 @@ class MainApp(ctk.CTk):
 
             def _on_smaract_at_datum():
                 print(f"[autofocus] SmarAct at datum ({self.datum_point[0]:.4f}, "
-                      f"{self.datum_point[1]:.4f}) mm — parking confocal carriage")
+                      f"{self.datum_point[1]:.4f}) mm - parking confocal carriage")
                 self._autofocus_raise_z(route, SMARACT_CONFOCAL_PARK_X, SMARACT_CONFOCAL_PARK_Y)
 
             print(f"[autofocus] moving SmarAct to datum ({self.datum_point[0]:.4f}, "
@@ -4176,7 +4201,7 @@ class MainApp(ctk.CTk):
             self._close_confocal_socket()
             self._sequence_unlock_buttons()
             return
-        print(f"[autofocus] datum target ({datum_x:.4f}, {datum_y:.4f}) mm — "
+        print(f"[autofocus] datum target ({datum_x:.4f}, {datum_y:.4f}) mm - "
               f"starting auto-focus calibration")
         self._autofocus_raise_z(route, datum_x, datum_y)
 
@@ -4188,7 +4213,7 @@ class MainApp(ctk.CTk):
         SmarAct samples sit on a mount higher than the module stage, so their
         clearance height is height-compensated around SMARACT_CONFOCAL_FOCUS_Z
         (the confocal's own zero-height focus Z, not the camera's SMARACT_PARK_Z),
-        not the module stage's 90mm clearance — going to 90mm would overshoot
+        not the module stage's 90mm clearance - going to 90mm would overshoot
         the mount.
         """
         if self.module_status != "Idle":
@@ -4224,7 +4249,7 @@ class MainApp(ctk.CTk):
         if self.module_status != "Idle":
             self.after(100, lambda: self._autofocus_wait_arrival(route, datum_x, datum_y))
             return
-        print(f"[autofocus] at datum — waiting {_SETTLING_DELAY_MS} ms for mechanical settling")
+        print(f"[autofocus] at datum - waiting {_SETTLING_DELAY_MS} ms for mechanical settling")
         base_z = float(self.z_pos)
         offsets = self._autofocus_sweep_offsets(_AUTOFOCUS_SWEEP_RANGE_MM, _AUTOFOCUS_SWEEP_STEP_MM)
         self.after(_SETTLING_DELAY_MS,
@@ -4245,7 +4270,7 @@ class MainApp(ctk.CTk):
         next offset on an out-of-range reading, or fails after the whole sweep is exhausted."""
         if idx >= len(offsets):
             print(f"[autofocus] ERROR: confocal sensor found no valid reading anywhere in a "
-                  f"+/-{_AUTOFOCUS_SWEEP_RANGE_MM:.1f} mm sweep around {base_z:.4f} mm — aborting")
+                  f"+/-{_AUTOFOCUS_SWEEP_RANGE_MM:.1f} mm sweep around {base_z:.4f} mm - aborting")
             messagebox.showerror(
                 "Auto-Focus Failed",
                 f"Auto-focus datum calibration failed: the confocal sensor returned an "
@@ -4291,14 +4316,14 @@ class MainApp(ctk.CTk):
             return
         reading = result_holder[0]
         if reading is None or math.isnan(reading) or reading < -90.0:
-            print(f"[autofocus] sweep {idx + 1}/{len(offsets)}: Z={target_z:.4f} mm — "
+            print(f"[autofocus] sweep {idx + 1}/{len(offsets)}: Z={target_z:.4f} mm - "
                   f"out of range, trying next offset")
             self._autofocus_sweep_step(route, datum_x, datum_y, base_z, offsets, idx + 1)
             return
 
         new_z = target_z - reading
         if new_z < 0:
-            print(f"[autofocus] ERROR: computed Z jog ({new_z:.4f} mm) out of range — aborting")
+            print(f"[autofocus] ERROR: computed Z jog ({new_z:.4f} mm) out of range - aborting")
             messagebox.showerror(
                 "Auto-Focus Failed",
                 f"Auto-focus datum calibration failed: the computed Z position "
@@ -4322,7 +4347,7 @@ class MainApp(ctk.CTk):
         self.after(_SETTLING_DELAY_MS, lambda: self._autofocus_complete(route))
 
     def _autofocus_complete(self, route):
-        print("[autofocus] datum Z calibration complete — starting main measurement sequence")
+        print("[autofocus] datum Z calibration complete - starting main measurement sequence")
         self._sequence_measure_point(route, 0, [])
 
     def _phys_to_canvas_pixel(self, phys_x, phys_y, ref_x, ref_y, canvas_w, canvas_h):
@@ -4331,8 +4356,8 @@ class MainApp(ctk.CTk):
         SmarAct's own live position) at the moment the image was displayed."""
         if self._canvas_disp_w == 0 or self._canvas_orig_w == 0:
             return None, None
-        A11, A12 = -0.001479,  0.000044
-        A21, A22 =  0.000018,  0.001459
+        A11, A12 = _MATRIX_A11, _MATRIX_A12
+        A21, A22 = _MATRIX_A21, _MATRIX_A22
         det = A11 * A22 - A12 * A21
         dp_x = phys_x - ref_x
         # SmarAct Y is mounted opposite the camera's Y axis (see _canvas_pixel_to_phys).
@@ -4484,7 +4509,7 @@ class MainApp(ctk.CTk):
             popup = ctk.CTkToplevel(self)
             popup.title("Scan Complete")
             # Grid scans get a second (Gwyddion) button on the same row, but the
-            # window height doesn't depend on that -- the individual-points case
+            # window height doesn't depend on that - the individual-points case
             # was reusing the grid size and left empty space at the bottom.
             popup.geometry("450x200" if is_grid else "450x150")
             popup.attributes("-topmost", True)
@@ -4590,7 +4615,7 @@ class MainApp(ctk.CTk):
         # Sequence is fully done: click-to-move is safe again
         self._sequence_active = False
 
-        print("[sequence] origin reached — unlocking action buttons")
+        print("[sequence] origin reached - unlocking action buttons")
         # Re-enable whichever tab's buttons are currently in the widget tree
         for btn_name in ('_measure_heights_btn', '_stitch_measure_heights_btn',
                          '_clear_points_btn', '_stitch_clear_points_btn'):
@@ -4698,8 +4723,8 @@ class MainApp(ctk.CTk):
         """
         if self._canvas_disp_w == 0 or self._canvas_orig_w == 0:
             return 0.0, 0.0
-        SCALE_X = 0.001479   # mm per sensor pixel (|A11|)
-        SCALE_Y = 0.001459   # mm per sensor pixel (|A22|)
+        SCALE_X = _MATRIX_SCALE_X   # mm per sensor pixel (|A11|)
+        SCALE_Y = _MATRIX_SCALE_Y   # mm per sensor pixel (|A22|)
         dcx = abs(phys_dx_mm) / SCALE_X * (self._canvas_disp_w / self._canvas_orig_w)
         dcy = abs(phys_dy_mm) / SCALE_Y * (self._canvas_disp_h / self._canvas_orig_h)
         return dcx, dcy
@@ -4808,7 +4833,7 @@ class MainApp(ctk.CTk):
             return
 
         # Moving/resizing the grid invalidates any index/height labels drawn
-        # from a previous scan at the grid's old position — drop them rather
+        # from a previous scan at the grid's old position - drop them rather
         # than leave them stuck pointing at nodes that no longer exist there.
         canvas.delete("measurement_text")
 
@@ -4844,7 +4869,7 @@ class MainApp(ctk.CTk):
             cell_x = float(self._roi_cell_x.get())
             cell_y = float(self._roi_cell_y.get())
         except (ValueError, AttributeError, tk.TclError) as e:
-            print(f"[roi_resize] aborted: could not read cell size entries — {e}")
+            print(f"[roi_resize] aborted: could not read cell size entries - {e}")
             return
         if cell_x <= 0 or cell_y <= 0:
             print(f"[roi_resize] aborted: non-positive cell size ({cell_x}, {cell_y})")
@@ -4855,8 +4880,8 @@ class MainApp(ctk.CTk):
         # Derived directly from the locked cell sizes via the A11/A22 scale
         # factors (mm per sensor pixel).  Computing this once in pixel space
         # avoids any canvas-px → mm → canvas-px double-conversion drift.
-        SCALE_X = 0.001479   # |A11|: mm per sensor pixel
-        SCALE_Y = 0.001459   # |A22|: mm per sensor pixel
+        SCALE_X = _MATRIX_SCALE_X   # |A11|: mm per sensor pixel
+        SCALE_Y = _MATRIX_SCALE_Y   # |A22|: mm per sensor pixel
         px_per_cell_x = cell_x / SCALE_X * (self._canvas_disp_w / self._canvas_orig_w)
         px_per_cell_y = cell_y / SCALE_Y * (self._canvas_disp_h / self._canvas_orig_h)
 
@@ -4878,7 +4903,7 @@ class MainApp(ctk.CTk):
         MAX_CELLS = 200
         if cols > MAX_CELLS or rows > MAX_CELLS:
             print(f"[roi_resize] WARNING: computed {cols}x{rows} cells "
-                  f"(px_per_cell=({px_per_cell_x:.4f}, {px_per_cell_y:.4f})) — "
+                  f"(px_per_cell=({px_per_cell_x:.4f}, {px_per_cell_y:.4f})) - "
                   f"clamping to {MAX_CELLS} to avoid hanging the redraw")
             cols = min(cols, MAX_CELLS)
             rows = min(rows, MAX_CELLS)
@@ -5256,7 +5281,7 @@ class MainApp(ctk.CTk):
             return
 
         canvas.configure(cursor="hand2")
-        SCALE_X, SCALE_Y = 0.001479, 0.001459
+        SCALE_X, SCALE_Y = _MATRIX_SCALE_X, _MATRIX_SCALE_Y
         px_per_cell_x = cell_x * _s['sx'] / SCALE_X
         px_per_cell_y = cell_y * _s['sy'] / SCALE_Y
 
@@ -5359,7 +5384,7 @@ class MainApp(ctk.CTk):
             dcx = cell_x * (nx - 1) * _s['sx'] * 1_000_000 / nm_per_px_x
             dcy = cell_y * (ny - 1) * _s['sy'] * 1_000_000 / nm_per_px_y
         else:
-            SCALE_X, SCALE_Y = 0.001479, 0.001459
+            SCALE_X, SCALE_Y = _MATRIX_SCALE_X, _MATRIX_SCALE_Y
             dcx = cell_x * (nx - 1) * _s['sx'] / SCALE_X
             dcy = cell_y * (ny - 1) * _s['sy'] / SCALE_Y
 
@@ -5458,12 +5483,12 @@ class MainApp(ctk.CTk):
         if self.use_smaract_stage:
             offset_route = snake_route
         else:
-            CONFOCAL_DX = -1.418137875
-            CONFOCAL_DY = -72.258765875
+            CONFOCAL_DX = _CONFOCAL_DX
+            CONFOCAL_DY = _CONFOCAL_DY
             offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in snake_route]
 
         # SmarAct's legitimate travel range is symmetric (SMARACT_TRAVEL_MIN/MAX,
-        # negative values are fine) — not the module stage's "must be >= 0" rule.
+        # negative values are fine) - not the module stage's "must be >= 0" rule.
         if self.use_smaract_stage:
             for target_x, target_y in offset_route:
                 if not (SMARACT_TRAVEL_MIN <= target_x <= SMARACT_TRAVEL_MAX
@@ -5583,12 +5608,12 @@ class MainApp(ctk.CTk):
         if self.use_smaract_stage:
             offset_route = snake_route
         else:
-            CONFOCAL_DX = -1.418137875
-            CONFOCAL_DY = -72.258765875
+            CONFOCAL_DX = _CONFOCAL_DX
+            CONFOCAL_DY = _CONFOCAL_DY
             offset_route = [(x + CONFOCAL_DX, y + CONFOCAL_DY) for x, y in snake_route]
 
         # SmarAct's legitimate travel range is symmetric (SMARACT_TRAVEL_MIN/MAX,
-        # negative values are fine) — not the module stage's "must be >= 0" rule.
+        # negative values are fine) - not the module stage's "must be >= 0" rule.
         if self.use_smaract_stage:
             for target_x, target_y in offset_route:
                 if not (SMARACT_TRAVEL_MIN <= target_x <= SMARACT_TRAVEL_MAX
@@ -6123,14 +6148,14 @@ class MainApp(ctk.CTk):
 
 
     def save_canvas_image(self):
-        """Save exactly what's currently drawn on the Image tab canvas -- the
+        """Save exactly what's currently drawn on the Image tab canvas - the
         displayed (possibly downscaled) image plus any overlays: markers, ROI
-        grid, datum marker, height/index labels -- not the full-resolution
+        grid, datum marker, height/index labels - not the full-resolution
         source photo, which is a separate file already saved elsewhere.
 
         Pulled from the canvas's own drawing data (every create_image/
         create_line/create_oval/create_text item on it) via Canvas.postscript,
-        NOT a screenshot -- unaffected by anything covering the window or by
+        NOT a screenshot - unaffected by anything covering the window or by
         display scaling. Requires Ghostscript to be installed for Pillow to
         rasterize the PostScript into a PNG."""
         canvas = self._image_tab_canvas
@@ -6660,7 +6685,7 @@ class MainApp(ctk.CTk):
             # is actually the one on screen right now. This runs on every status
             # poll regardless of which tab the user is looking at, and
             # main_right_frame gets destroyed the moment they switch away from
-            # Main -- rebuilding against a destroyed frame raised here, which
+            # Main - rebuilding against a destroyed frame raised here, which
             # left scanning_state stuck at 2 forever (re-spawning a new
             # start_stitching() thread on every subsequent poll) until the user
             # revisited Main tab and happened to provide a fresh frame.
@@ -6814,7 +6839,7 @@ class MainApp(ctk.CTk):
             try:
                 self._smaract_handle = open_smaract()
             except Exception as e:
-                print(f"Warning: could not open SmarAct system — {e}")
+                print(f"Warning: could not open SmarAct system - {e}")
                 return False
         return True
 
@@ -6848,7 +6873,7 @@ class MainApp(ctk.CTk):
             try:
                 close_smaract(self._smaract_handle)
             except Exception as e:
-                print(f"Warning: error closing SmarAct system — {e}")
+                print(f"Warning: error closing SmarAct system - {e}")
             self._smaract_handle = None
 
     def _smaract_move_to(self, x_nm, y_nm, on_complete=None, on_error=None):
@@ -6867,7 +6892,7 @@ class MainApp(ctk.CTk):
             messagebox.showerror(
                 "SmarAct Error",
                 f"Cannot move SmarAct stage to ({x_nm / 1_000_000:.4f} mm, "
-                f"{y_nm / 1_000_000:.4f} mm) — outside the stage's "
+                f"{y_nm / 1_000_000:.4f} mm) - outside the stage's "
                 f"{SMARACT_TRAVEL_MIN:.1f} to {SMARACT_TRAVEL_MAX:.1f} mm travel range. "
                 f"Move rejected."
             )
@@ -6916,7 +6941,7 @@ class MainApp(ctk.CTk):
     def _start_smaract_position_polling(self):
         """Starts the live SmarAct X/Y position readout (smaract_x_pos_var/
         smaract_y_pos_var). Runs for the whole app session, not just while the
-        Motion tab is open — the Image tab's Live Position reads from the same
+        Motion tab is open - the Image tab's Live Position reads from the same
         vars when a SmarAct sample is active."""
         self._smaract_poll_active = True
         self._smaract_poll_tick()
@@ -6940,7 +6965,7 @@ class MainApp(ctk.CTk):
                 self.smaract_x_pos_var.set(f"{x_nm / 1_000_000:.6f}")
                 self.smaract_y_pos_var.set(f"{y_nm / 1_000_000:.6f}")
             except Exception as e:
-                print(f"Warning: SmarAct position read failed — {e}")
+                print(f"Warning: SmarAct position read failed - {e}")
                 self.smaract_enabled_var.set("No")
                 self.smaract_x_pos_var.set("--")
                 self.smaract_y_pos_var.set("--")
@@ -7208,7 +7233,7 @@ class MainApp(ctk.CTk):
         # (update_gui_elements), which keeps firing long after the scan itself
         # is done. SmarAct's after()-chain just ends here, no heartbeat, so one
         # update_idletasks() call isn't reliably enough for CTk to finish
-        # blitting the new layout — fake that heartbeat for under a second.
+        # blitting the new layout - fake that heartbeat for under a second.
         self._smaract_force_repaint(6)
 
     def _smaract_force_repaint(self, ticks_left):
@@ -7301,7 +7326,7 @@ class MainApp(ctk.CTk):
                         self.rpi_transfer.close_ssh_connection()
                         print(f"Pi buffer cleared before scan: {remote_folder}")
                     except Exception as e:
-                        print(f"Warning: could not clear Pi buffer before scan — {e}")
+                        print(f"Warning: could not clear Pi buffer before scan - {e}")
                 self.after(0, lambda: self.send_json_error_check(scanning_data_snapshot, "Scanning request sent."))
 
             self.scan_in_progress = True
@@ -7385,10 +7410,10 @@ class MainApp(ctk.CTk):
 
     def toggle_interferometer_camera(self):
         if not self.is_at_confocal:
-            dx, dy = -1.418137875, -72.258765875
+            dx, dy = _CONFOCAL_DX, _CONFOCAL_DY
             new_label = "Optical"
         else:
-            dx, dy = 1.418137875, 72.258765875
+            dx, dy = -_CONFOCAL_DX, -_CONFOCAL_DY
             new_label = "Confocal"
 
         target_x = float(self.x_pos) + dx
@@ -7400,7 +7425,7 @@ class MainApp(ctk.CTk):
             messagebox.showerror("Error", "Status not in idle, wait before sending request.")
             return
         if target_x < 0 or target_y < 0 or target_z < 0:
-            print(f"Warning: toggle move rejected — target ({target_x:.6f}, {target_y:.6f}, {target_z:.6f}) contains a negative value.")
+            print(f"Warning: toggle move rejected - target ({target_x:.6f}, {target_y:.6f}, {target_z:.6f}) contains a negative value.")
             messagebox.showerror(
                 "Cannot Toggle",
                 f"Toggle move rejected: target ({target_x:.4f}, {target_y:.4f}, {target_z:.4f}) mm "
@@ -7411,7 +7436,7 @@ class MainApp(ctk.CTk):
         try:
             self.send_goto_command(target_x, target_y, target_z, show_success=False)
         except Exception as e:
-            print(f"Warning: toggle move failed — {e}")
+            print(f"Warning: toggle move failed - {e}")
             messagebox.showerror("Error", f"Toggle move failed: {e}")
             return
 
